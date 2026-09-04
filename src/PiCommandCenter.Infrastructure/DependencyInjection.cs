@@ -1,11 +1,15 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Projects;
 using PiCommandCenter.Application.Requests;
+using PiCommandCenter.Application.Transport;
+using PiCommandCenter.Infrastructure.Nodes;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Projects;
 using PiCommandCenter.Infrastructure.Requests;
+using PiCommandCenter.Infrastructure.Transport;
 
 namespace PiCommandCenter.Infrastructure;
 
@@ -37,6 +41,9 @@ public static class DependencyInjection
 
         services.AddScoped<IProjectCatalog, ProjectCatalog>();
         services.AddScoped<IRequestQueue, RequestQueue>();
+        services.AddScoped<INodeRegistry, NodeRegistry>();
+        services.AddScoped<IRequestClaimService, RequestClaimService>();
+        services.AddScoped<INodeEventSink, NodeEventSink>();
 
         return services;
     }

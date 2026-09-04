@@ -113,6 +113,50 @@ h2 {
     overflow-wrap: anywhere;
 }
 
+/* Node identity and connectivity */
+.node-name {
+    font-weight: 600;
+}
+
+.node-version {
+    margin-inline-start: calc(var(--design-unit) * 2px);
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+}
+
+.node-id {
+    display: block;
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-size: var(--type-ramp-minus-1-font-size);
+    color: var(--neutral-foreground-hint);
+    overflow-wrap: anywhere;
+}
+
+.node-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+}
+
+.node-seen {
+    display: flex;
+    align-items: baseline;
+    gap: calc(var(--design-unit) * 2px);
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+}
+
+.node-seen-utc {
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    opacity: 0.75;
+}
+
+.node-missing {
+    color: var(--neutral-foreground-hint);
+}
+
 /* Composer */
 .form-grid {
     display: grid;

@@ -2,12 +2,15 @@
 @namespace PiCommandCenter.Web.Components.Pages
 @rendermode InteractiveServer
 @using PiCommandCenter.Application
+@using PiCommandCenter.Application.Nodes
 @using PiCommandCenter.Application.Projects
 @using PiCommandCenter.Application.Requests
 @using PiCommandCenter.Domain
+@using PiCommandCenter.Domain.Nodes
 @using PiCommandCenter.Domain.Requests
 @inject IProjectCatalog Catalog
 @inject IRequestQueue Queue
+@inject INodeRegistry NodeRegistry
 @inject IClock Clock
 @inject IToastService ToastService
 
@@ -41,9 +44,9 @@
                 <dd>@_activeProjects</dd>
             </div>
             <div class="metric">
-                <dt>Active agents</dt>
-                <dd>0</dd>
-                <p class="metric-note">Sessions are not started yet.</p>
+                <dt>Online nodes</dt>
+                <dd>@_onlineNodes</dd>
+                <p class="metric-note">@NodeCountNote()</p>
             </div>
             <div class="metric">
                 <dt>Queued requests</dt>
@@ -55,6 +58,51 @@
                 <p class="metric-note">No signals are collected yet.</p>
             </div>
         </dl>
+    </section>
+
+    <section aria-labelledby="nodes-heading">
+        <h2 id="nodes-heading">Nodes</h2>
+
+        @if (_nodeError is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Could not load nodes"
+                              AllowDismiss="false">
+                @_nodeError
+            </FluentMessageBar>
+        }
+        else if (_loading)
+        {
+            <div class="state-block" role="status">
+                <FluentProgressRing aria-label="Loading nodes" />
+                <span>Loading nodes</span>
+            </div>
+        }
+        else if (_nodes.Count == 0)
+        {
+            <p class="panel-empty">
+                No node has registered yet. Start a node agent against this control plane; it appears
+                here after its first registration.
+            </p>
+        }
+        else
+        {
+            <ul class="node-list">
+                @foreach (var node in _nodes)
+                {
+                    <li class="node-row">
+                        <span class="node-name">@node.DisplayName</span>
+                        <FluentBadge Appearance="@BadgeAppearance(node.Status)">@node.Status.ToString()</FluentBadge>
+                        <span class="node-version">agent @node.AgentVersion</span>
+                        <span class="node-seen">
+                            <span class="visually-hidden">Last heartbeat</span>
+                            @Relative(node.LastHeartbeatAt, _snapshot)
+                            <span class="node-seen-utc">@node.LastHeartbeatAt.ToString("u")</span>
+                        </span>
+                    </li>
+                }
+            </ul>
+        }
     </section>
 
     <section aria-labelledby="projects-heading">
@@ -127,7 +175,27 @@
                                     <dt>Default branch</dt>
                                     <dd>@project.DefaultBranch</dd>
                                     <dt>Node</dt>
-                                    <dd class="path">@project.NodeId</dd>
+                                    <dd>
+                                        @{
+                                            var node = FindNode(project.NodeId);
+                                        }
+                                        @if (node is null)
+                                        {
+                                            <span class="node-missing">Not registered</span>
+                                            <span class="path node-id">@project.NodeId</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="node-inline">
+                                                <span class="node-name">@node.DisplayName</span>
+                                                <FluentBadge Appearance="@BadgeAppearance(node.Status)">@node.Status.ToString()</FluentBadge>
+                                                <span class="node-seen">
+                                                    <span class="visually-hidden">Last heartbeat</span>
+                                                    @Relative(node.LastHeartbeatAt, _snapshot)
+                                                </span>
+                                            </span>
+                                        }
+                                    </dd>
                                 </dl>
 
                                 <FluentStack Class="card-action" Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
@@ -249,17 +317,21 @@
 @code {
     private readonly RegistrationForm _form = new();
     private readonly Dictionary<Guid, QueueCounts> _counts = [];
+    private readonly Dictionary<Guid, NodeDto> _nodesById = [];
 
     private IReadOnlyList<ProjectDto> _projects = Array.Empty<ProjectDto>();
+    private IReadOnlyList<NodeDto> _nodes = Array.Empty<NodeDto>();
     private IReadOnlyList<string> _registrationErrors = Array.Empty<string>();
     private DateTimeOffset _snapshot;
     private string? _loadError;
+    private string? _nodeError;
     private bool _loading = true;
     private bool _submitting;
     private bool _validationPassed;
     private bool _registrationHidden = true;
     private int _activeProjects;
     private int _queuedRequests;
+    private int _onlineNodes;
 
     protected override Task OnInitializedAsync() => ReloadAsync();
 
@@ -268,6 +340,8 @@
         _loading = true;
         _loadError = null;
         StateHasChanged();
+
+        await LoadNodesAsync();
 
         try
         {
@@ -300,6 +374,83 @@
             _snapshot = Clock.UtcNow;
             _loading = false;
         }
+    }
+
+    private async Task LoadNodesAsync()
+    {
+        _nodeError = null;
+        try
+        {
+            var nodes = await NodeRegistry.ListAsync(CancellationToken.None);
+
+            _nodesById.Clear();
+            var online = 0;
+            foreach (var node in nodes)
+            {
+                _nodesById[node.Id] = node;
+                if (node.Status == NodeStatus.Online)
+                {
+                    online++;
+                }
+            }
+
+            _nodes = nodes;
+            _onlineNodes = online;
+        }
+        catch (Exception ex)
+        {
+            _nodeError = ex.Message;
+            _nodes = Array.Empty<NodeDto>();
+            _nodesById.Clear();
+            _onlineNodes = 0;
+        }
+    }
+
+    private NodeDto? FindNode(Guid nodeId) =>
+        _nodesById.TryGetValue(nodeId, out var node) ? node : null;
+
+    private string NodeCountNote()
+    {
+        if (_nodeError is not null)
+        {
+            return "Node registry unavailable.";
+        }
+
+        return _nodes.Count switch
+        {
+            0 => "No node has registered.",
+            1 => "of 1 known node",
+            _ => $"of {_nodes.Count} known nodes",
+        };
+    }
+
+    private static Appearance BadgeAppearance(NodeStatus status) =>
+        status == NodeStatus.Online ? Appearance.Accent : Appearance.Neutral;
+
+    private static string Relative(DateTimeOffset instant, DateTimeOffset now)
+    {
+        var delta = now - instant;
+        if (delta < TimeSpan.Zero)
+        {
+            delta = TimeSpan.Zero;
+        }
+
+        if (delta.TotalSeconds < 60)
+        {
+            return $"{(int)delta.TotalSeconds}s ago";
+        }
+
+        if (delta.TotalMinutes < 60)
+        {
+            return $"{(int)delta.TotalMinutes}m ago";
+        }
+
+        if (delta.TotalHours < 24)
+        {
+            return $"{(int)delta.TotalHours}h ago";
+        }
+
+        return $"{(int)delta.TotalDays}d ago";
     }
 
     private void OpenRegistration()

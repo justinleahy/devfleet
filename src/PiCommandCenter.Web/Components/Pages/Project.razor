@@ -2,12 +2,15 @@
 @namespace PiCommandCenter.Web.Components.Pages
 @rendermode InteractiveServer
 @using PiCommandCenter.Application
+@using PiCommandCenter.Application.Nodes
 @using PiCommandCenter.Application.Projects
 @using PiCommandCenter.Application.Requests
 @using PiCommandCenter.Domain
+@using PiCommandCenter.Domain.Nodes
 @using PiCommandCenter.Domain.Requests
 @inject IProjectCatalog Catalog
 @inject IRequestQueue Queue
+@inject INodeRegistry NodeRegistry
 @inject IClock Clock
 @inject IToastService ToastService
 
@@ -72,9 +75,40 @@ else
                     <dt>Default branch</dt>
                     <dd>@project.DefaultBranch</dd>
                     <dt>Node</dt>
-                    <dd class="path">@project.NodeId</dd>
+                    <dd>
+                        @if (_node is null)
+                        {
+                            <span class="node-missing">Not registered</span>
+                        }
+                        else
+                        {
+                            <span class="node-name">@_node.DisplayName</span>
+                            <span class="node-version">agent @_node.AgentVersion</span>
+                        }
+                        <span class="path node-id">@project.NodeId</span>
+                    </dd>
                     <dt>Node status</dt>
-                    <dd>Not reporting</dd>
+                    <dd>
+                        @if (_nodeError is not null)
+                        {
+                            <span class="node-missing">Node registry unavailable</span>
+                        }
+                        else if (_node is null)
+                        {
+                            <span class="node-missing">Not registered</span>
+                        }
+                        else
+                        {
+                            <span class="node-inline">
+                                <FluentBadge Appearance="@BadgeAppearance(_node.Status)">@_node.Status.ToString()</FluentBadge>
+                                <span class="node-seen">
+                                    <span class="visually-hidden">Last heartbeat</span>
+                                    @Relative(_node.LastHeartbeatAt, _snapshot)
+                                    <span class="node-seen-utc">@_node.LastHeartbeatAt.ToString("u")</span>
+                                </span>
+                            </span>
+                        }
+                    </dd>
                     <dt>Write slots</dt>
                     <dd>@project.MaxActiveWriteRequests</dd>
                     <dt>Read-only slots</dt>
@@ -234,8 +268,10 @@ else
 
     private IReadOnlyList<string> _composerErrors = Array.Empty<string>();
     private ProjectDto? _project;
+    private NodeDto? _node;
     private DateTimeOffset _snapshot;
     private string? _loadError;
+    private string? _nodeError;
     private string? _queuedTitle;
     private string? _title = string.Empty;
     private string? _prompt = string.Empty;
@@ -264,6 +300,8 @@ else
     {
         _loading = true;
         _loadError = null;
+        _nodeError = null;
+        _node = null;
         Partition(Array.Empty<WorkRequestDto>());
         StateHasChanged();
 
@@ -278,6 +316,7 @@ else
             var id = new ProjectId(ProjectId);
             _project = await Catalog.GetAsync(id, CancellationToken.None);
             Partition(await Queue.ListAsync(id, CancellationToken.None));
+            await LoadNodeAsync(_project.NodeId);
         }
         catch (ProjectNotFoundException)
         {
@@ -292,6 +331,48 @@ else
             _snapshot = Clock.UtcNow;
             _loading = false;
         }
+    }
+
+    private async Task LoadNodeAsync(Guid nodeId)
+    {
+        try
+        {
+            _node = await NodeRegistry.GetAsync(new NodeId(nodeId), CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _node = null;
+            _nodeError = ex.Message;
+        }
+    }
+
+    private static Appearance BadgeAppearance(NodeStatus status) =>
+        status == NodeStatus.Online ? Appearance.Accent : Appearance.Neutral;
+
+    private static string Relative(DateTimeOffset instant, DateTimeOffset now)
+    {
+        var delta = now - instant;
+        if (delta < TimeSpan.Zero)
+        {
+            delta = TimeSpan.Zero;
+        }
+
+        if (delta.TotalSeconds < 60)
+        {
+            return $"{(int)delta.TotalSeconds}s ago";
+        }
+
+        if (delta.TotalMinutes < 60)
+        {
+            return $"{(int)delta.TotalMinutes}m ago";
+        }
+
+        if (delta.TotalHours < 24)
+        {
+            return $"{(int)delta.TotalHours}h ago";
+        }
+
+        return $"{(int)delta.TotalDays}d ago";
     }
 
     private void Partition(IReadOnlyList<WorkRequestDto> requests)

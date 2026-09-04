@@ -58,7 +58,7 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
 
         Assert.Contains("Fleet dashboard", html);
         Assert.Contains("Active projects", html);
-        Assert.Contains("Active agents", html);
+        Assert.Contains("Online nodes", html);
         Assert.Contains("Queued requests", html);
         Assert.Contains("Needs attention", html);
         Assert.Contains("Projects", html);

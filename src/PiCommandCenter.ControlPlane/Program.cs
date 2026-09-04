@@ -5,6 +5,8 @@ using PiCommandCenter.ControlPlane.Api;
 using PiCommandCenter.Infrastructure;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Web.Components;
+using PiCommandCenter.ControlPlane.Hubs;
+using PiCommandCenter.ControlPlane.Hosting;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseStaticWebAssets();
@@ -20,6 +22,14 @@ builder.Services.AddHttpClient("PiCommandCenter.ControlPlane", client =>
         UriKind.Absolute);
 });
 builder.Services.AddFluentUIComponents();
+
+// Node fleet transport: SignalR hub at /nodeHub (server-only; never navigated from
+// the browser) plus the background sweeper that flips silent nodes offline after
+// three missed heartbeats.
+builder.Services.AddSignalR(options => options.EnableDetailedErrors = builder.Environment.IsDevelopment());
+builder.Services.Configure<NodeLivenessOptions>(
+    builder.Configuration.GetSection(NodeLivenessOptions.SectionName));
+builder.Services.AddHostedService<NodeLivenessService>();
 
 builder.Services.AddSingleton<IClock, SystemClock>();
 builder.Services.AddHealthChecks();
@@ -59,6 +69,7 @@ app.MapRazorComponents<App>()
 app.MapHealthChecks("/health");
 app.MapProjectsEndpoints();
 app.MapRequestsEndpoints();
+app.MapHub<NodeHub>("/nodeHub");
 
 app.Run();
 

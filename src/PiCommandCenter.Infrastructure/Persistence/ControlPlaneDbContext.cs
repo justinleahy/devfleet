@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Domain;
+using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Projects;
 using PiCommandCenter.Domain.Requests;
 
@@ -19,6 +20,12 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
     public DbSet<Project> Projects => Set<Project>();
 
     public DbSet<WorkRequest> WorkRequests => Set<WorkRequest>();
+
+    public DbSet<FleetNode> FleetNodes => Set<FleetNode>();
+
+    public DbSet<RequestClaim> RequestClaims => Set<RequestClaim>();
+
+    public DbSet<SessionEvent> SessionEvents => Set<SessionEvent>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -148,6 +155,132 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
             // Serves queue ordering: Priority DESC, CreatedAt ASC (SQLite scans backward).
             request.HasIndex(r => new { r.Priority, r.CreatedAt })
                 .HasDatabaseName("IX_WorkRequests_Priority_CreatedAt");
+        });
+
+        builder.Entity<FleetNode>(node =>
+        {
+            node.ToTable("FleetNodes");
+
+            node.HasKey(n => n.Id);
+            node.Property(n => n.Id)
+                .HasConversion(id => id.Value, value => new NodeId(value))
+                .HasColumnType("TEXT");
+
+            node.Property(n => n.DisplayName)
+                .IsRequired()
+                .HasMaxLength(256);
+
+            node.Property(n => n.AgentVersion)
+                .IsRequired()
+                .HasMaxLength(64);
+
+            node.Property(n => n.Status)
+                .HasConversion<string>()
+                .HasMaxLength(16)
+                .HasColumnType("TEXT")
+                .IsRequired();
+
+            node.Property(n => n.LastHeartbeatAt).HasConversion(
+                timestamp => timestamp.UtcTicks,
+                ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
+            node.Property(n => n.CapabilitiesJson)
+                .IsRequired()
+                .HasMaxLength(16384);
+
+            node.Property(n => n.CreatedAt).HasConversion(
+                timestamp => timestamp.UtcTicks,
+                ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
+            node.Property(n => n.UpdatedAt).HasConversion(
+                timestamp => timestamp.UtcTicks,
+                ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
+
+            node.Property(n => n.Version)
+                .IsConcurrencyToken()
+                .HasColumnType("INTEGER");
+
+            node.HasIndex(n => n.DisplayName)
+                .HasDatabaseName("IX_FleetNodes_DisplayName");
+        });
+
+        builder.Entity<RequestClaim>(claim =>
+        {
+            claim.ToTable("RequestClaims");
+
+            // Primary key on the request id: at most one claim can ever exist per request.
+            claim.HasKey(c => c.RequestId);
+            claim.Property(c => c.RequestId)
+                .HasConversion(id => id.Value, value => new WorkRequestId(value))
+                .HasColumnType("TEXT");
+
+            claim.Property(c => c.ProjectId)
+                .HasConversion(id => id.Value, value => new ProjectId(value))
+                .HasColumnType("TEXT");
+
+            claim.Property(c => c.NodeId)
+                .HasConversion(id => id.Value, value => new NodeId(value))
+                .HasColumnType("TEXT");
+
+            claim.Property(c => c.ClaimToken)
+                .IsRequired()
+                .HasMaxLength(128);
+
+            claim.Property(c => c.ClaimedAt).HasConversion(
+                timestamp => timestamp.UtcTicks,
+                ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
+            claim.Property(c => c.LeaseExpiresAt).HasConversion(
+                timestamp => timestamp.UtcTicks,
+                ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
+
+            claim.Property(c => c.Version)
+                .IsConcurrencyToken()
+                .HasColumnType("INTEGER");
+
+            claim.HasOne<WorkRequest>()
+                .WithOne()
+                .HasPrincipalKey<WorkRequest>(r => r.Id)
+                .HasForeignKey<RequestClaim>(c => c.RequestId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            claim.HasIndex(c => c.RequestId)
+                .IsUnique()
+                .HasDatabaseName("IX_RequestClaims_RequestId");
+
+            // Capacity checks look up active (unexpired) claims per project and node.
+            claim.HasIndex(c => new { c.ProjectId, c.LeaseExpiresAt })
+                .HasDatabaseName("IX_RequestClaims_ProjectId_LeaseExpiresAt");
+        });
+
+        builder.Entity<SessionEvent>(sessionEvent =>
+        {
+            sessionEvent.ToTable("SessionEvents");
+
+            // Primary key on the globally unique event id backs batch idempotency.
+            sessionEvent.HasKey(e => e.EventId);
+            sessionEvent.Property(e => e.EventId)
+                .HasColumnType("TEXT")
+                .HasMaxLength(64);
+
+            sessionEvent.Property(e => e.NodeId).HasColumnType("TEXT");
+            sessionEvent.Property(e => e.ProjectId).HasColumnType("TEXT");
+            sessionEvent.Property(e => e.RequestId).HasColumnType("TEXT");
+            sessionEvent.Property(e => e.SessionId)
+                .HasMaxLength(128);
+
+            sessionEvent.Property(e => e.Sequence).HasColumnType("INTEGER");
+
+            sessionEvent.Property(e => e.Type)
+                .IsRequired()
+                .HasMaxLength(64);
+
+            sessionEvent.Property(e => e.OccurredAtUtcTicks).HasColumnType("INTEGER");
+            sessionEvent.Property(e => e.ReceivedAtUtcTicks).HasColumnType("INTEGER");
+
+            sessionEvent.Property(e => e.PayloadJson)
+                .IsRequired()
+                .HasMaxLength(65536);
+
+            sessionEvent.HasIndex(e => new { e.ProjectId, e.OccurredAtUtcTicks })
+                .HasDatabaseName("IX_SessionEvents_ProjectId_OccurredAtUtcTicks");
         });
     }
 

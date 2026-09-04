@@ -346,6 +346,141 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.ToTable("WorkRequests", (string)null);
                 });
 
+            modelBuilder.Entity("PiCommandCenter.Domain.Nodes.FleetNode", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AgentVersion")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CapabilitiesJson")
+                        .IsRequired()
+                        .HasMaxLength(16384)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasConversion(v => v.UtcTicks, v => new DateTimeOffset(v, TimeSpan.Zero))
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset>("LastHeartbeatAt")
+                        .HasConversion(v => v.UtcTicks, v => new DateTimeOffset(v, TimeSpan.Zero))
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasConversion(v => v.UtcTicks, v => new DateTimeOffset(v, TimeSpan.Zero))
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DisplayName")
+                        .HasDatabaseName("IX_FleetNodes_DisplayName");
+
+                    b.ToTable("FleetNodes", (string)null);
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Domain.Requests.RequestClaim", b =>
+                {
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ClaimToken")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTimeOffset>("ClaimedAt")
+                        .HasConversion(v => v.UtcTicks, v => new DateTimeOffset(v, TimeSpan.Zero))
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTimeOffset>("LeaseExpiresAt")
+                        .HasConversion(v => v.UtcTicks, v => new DateTimeOffset(v, TimeSpan.Zero))
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("RequestId");
+
+                    b.HasIndex("RequestId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_RequestClaims_RequestId");
+
+                    b.HasIndex("ProjectId", "LeaseExpiresAt")
+                        .HasDatabaseName("IX_RequestClaims_ProjectId_LeaseExpiresAt");
+
+                    b.ToTable("RequestClaims", (string)null);
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Persistence.SessionEvent", b =>
+                {
+                    b.Property<string>("EventId")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("OccurredAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PayloadJson")
+                        .IsRequired()
+                        .HasMaxLength(65536)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ReceivedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("RequestId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SessionId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Sequence")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("EventId");
+
+                    b.HasIndex("ProjectId", "OccurredAtUtcTicks")
+                        .HasDatabaseName("IX_SessionEvents_ProjectId_OccurredAtUtcTicks");
+
+                    b.ToTable("SessionEvents", (string)null);
+                });
+
 modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
                 {
                     b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole", "Role")
@@ -418,6 +553,15 @@ modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Domain.Requests.RequestClaim", b =>
+                {
+                    b.HasOne("PiCommandCenter.Domain.Requests.WorkRequest", null)
+                        .WithOne()
+                        .HasPrincipalKey("PiCommandCenter.Domain.Requests.WorkRequest", "Id")
+                        .HasForeignKey("PiCommandCenter.Domain.Requests.RequestClaim", "RequestId")
+                        .OnDelete(DeleteBehavior.Cascade);
                 });
 
 modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
