@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>PiCommandCenter.Domain</RootNamespace>
+    <Description>Core domain model. Depends on nothing application-specific; no provider-specific types.</Description>
+  </PropertyGroup>
+
+</Project>

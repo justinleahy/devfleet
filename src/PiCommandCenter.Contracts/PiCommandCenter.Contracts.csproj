@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>PiCommandCenter.Contracts</RootNamespace>
+    <Description>Shared transport DTOs for the versioned runtime protocol (protocolVersion 1).</Description>
+  </PropertyGroup>
+
+</Project>

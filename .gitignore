@@ -1,0 +1,20 @@
+# .NET
+**/bin/
+**/obj/
+*.user
+*.suo
+
+# Node.js
+node_modules/
+*.tsbuildinfo
+
+# Runtime state
+*.db
+*.db-shm
+*.db-wal
+
+# Editors and OS
+.vs/
+.vscode/
+.idea/
+.DS_Store

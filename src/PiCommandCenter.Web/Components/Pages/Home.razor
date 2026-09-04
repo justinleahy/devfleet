@@ -1,0 +1,120 @@
+@page "/"
+@namespace PiCommandCenter.Web.Components.Pages
+@rendermode InteractiveServer
+@using PiCommandCenter.Application
+@inject IClock Clock
+@inject IToastService ToastService
+
+<PageTitle>Overview &middot; Pi Command Center</PageTitle>
+
+<FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+
+    <header class="page-head">
+        <h1>Pi Command Center</h1>
+        <p class="page-lead">
+            Control plane is running. Protocol version: @(PiCommandCenter.Contracts.ProtocolVersion.Current).
+            Server time: @_snapshot.ToString("u")
+        </p>
+    </header>
+
+    <FluentMessageBar Intent="MessageIntent.Info"
+                      Title="Scaffold surface"
+                      AllowDismiss="false">
+        Everything below reports control-plane state only. Node enrollment, project workspaces and
+        request routing are not wired yet, so no fleet telemetry is collected or displayed.
+    </FluentMessageBar>
+
+    <FluentGrid Spacing="3" Justify="JustifyContent.FlexStart" Width="100%">
+
+        <FluentGridItem xs="12" md="6" xl="4">
+            <FluentCard Height="100%">
+                <section class="card-body" aria-labelledby="card-fleet">
+                    <FluentStack Orientation="Orientation.Horizontal"
+                                 VerticalAlignment="VerticalAlignment.Center"
+                                 HorizontalGap="8">
+                        <h2 id="card-fleet">Fleet</h2>
+                        <FluentSpacer />
+                        <FluentBadge Appearance="Appearance.Neutral">No nodes enrolled</FluentBadge>
+                    </FluentStack>
+                    <p>
+                        Nodes appear here once the agent transport is in place and a device completes
+                        enrollment against this control plane.
+                    </p>
+                    <FluentButton Class="card-action"
+                                  Appearance="Appearance.Neutral"
+                                  Disabled="true"
+                                  Title="Enrollment ships with the node agent transport.">
+                        Enroll a node
+                    </FluentButton>
+                </section>
+            </FluentCard>
+        </FluentGridItem>
+
+        <FluentGridItem xs="12" md="6" xl="4">
+            <FluentCard Height="100%">
+                <section class="card-body" aria-labelledby="card-attention">
+                    <FluentStack Orientation="Orientation.Horizontal"
+                                 VerticalAlignment="VerticalAlignment.Center"
+                                 HorizontalGap="8">
+                        <h2 id="card-attention">Attention</h2>
+                        <FluentSpacer />
+                        <FluentBadge Appearance="Appearance.Neutral">Not collecting signals</FluentBadge>
+                    </FluentStack>
+                    <p>
+                        Approvals, failed runs and stalled requests will queue here. Nothing is being
+                        watched yet, so an empty queue is not evidence of a healthy fleet.
+                    </p>
+                    <FluentButton Class="card-action"
+                                  Appearance="Appearance.Neutral"
+                                  Disabled="true"
+                                  Title="The attention queue ships with request routing.">
+                        Open queue
+                    </FluentButton>
+                </section>
+            </FluentCard>
+        </FluentGridItem>
+
+        <FluentGridItem xs="12" md="12" xl="4">
+            <FluentCard Height="100%">
+                <section class="card-body" aria-labelledby="card-plane">
+                    <FluentStack Orientation="Orientation.Horizontal"
+                                 VerticalAlignment="VerticalAlignment.Center"
+                                 HorizontalGap="8">
+                        <h2 id="card-plane">Control plane</h2>
+                        <FluentSpacer />
+                        <FluentBadge Appearance="Appearance.Accent">Serving this session</FluentBadge>
+                    </FluentStack>
+                    <dl class="facts">
+                        <dt>Render mode</dt>
+                        <dd>Interactive Server</dd>
+                        <dt>Protocol</dt>
+                        <dd>v@(PiCommandCenter.Contracts.ProtocolVersion.Current)</dd>
+                        <dt>Snapshot taken</dt>
+                        <dd>@_snapshot.ToString("u")</dd>
+                    </dl>
+                    <FluentStack Class="card-action" Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
+                        <FluentButton Appearance="Appearance.Accent" OnClick="Refresh">
+                            Refresh snapshot
+                        </FluentButton>
+                        <FluentAnchor Href="/health" Appearance="Appearance.Outline" Target="_blank">
+                            Health endpoint
+                        </FluentAnchor>
+                    </FluentStack>
+                </section>
+            </FluentCard>
+        </FluentGridItem>
+
+    </FluentGrid>
+</FluentStack>
+
+@code {
+    private DateTimeOffset _snapshot;
+
+    protected override void OnInitialized() => _snapshot = Clock.UtcNow;
+
+    private void Refresh()
+    {
+        _snapshot = Clock.UtcNow;
+        ToastService.ShowSuccess($"Control-plane snapshot refreshed at {_snapshot:HH:mm:ss} UTC");
+    }
+}

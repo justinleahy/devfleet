@@ -1,0 +1,65 @@
+@namespace PiCommandCenter.Web.Components.Layout
+@inherits LayoutComponentBase
+
+<FluentDesignTheme StorageName="theme" />
+
+<div class="app-shell">
+    <FluentLayout>
+        <FluentHeader Height="72">
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="16"
+                         Width="100%">
+                <FluentStack Orientation="Orientation.Vertical" VerticalGap="0" Width="auto">
+                    <span class="brand">Pi Command Center</span>
+                    <span class="brand-sub">Raspberry Pi fleet control plane</span>
+                </FluentStack>
+                <FluentSpacer />
+                <FluentBadge Appearance="Appearance.Neutral">Interactive Server</FluentBadge>
+                <FluentBadge Appearance="Appearance.Neutral">
+                    Protocol v@(PiCommandCenter.Contracts.ProtocolVersion.Current)
+                </FluentBadge>
+            </FluentStack>
+        </FluentHeader>
+
+        <FluentStack Class="shell" Orientation="Orientation.Horizontal" HorizontalGap="0" Width="100%">
+            <nav class="shell-nav" aria-label="Command center sections">
+                <FluentNavMenu Width="240" Title="Command center sections">
+                    <FluentNavLink Href="/" Match="NavLinkMatch.All">Overview</FluentNavLink>
+                    <FluentNavLink Disabled="true"
+                                   Tooltip="Fleet inventory arrives with node enrollment.">
+                        Fleet
+                    </FluentNavLink>
+                    <FluentNavLink Disabled="true"
+                                   Tooltip="Attention queue arrives with request routing.">
+                        Attention
+                    </FluentNavLink>
+                </FluentNavMenu>
+            </nav>
+
+            <FluentBodyContent Class="shell-body">
+                <article class="content">
+                    @Body
+                </article>
+            </FluentBodyContent>
+        </FluentStack>
+
+        <FluentFooter Class="shell-footer">
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="12"
+                         Width="100%">
+                <span>Pi Command Center</span>
+                <FluentSpacer />
+                <span>Scaffold surface &mdash; only control-plane self-reported state is shown.</span>
+            </FluentStack>
+        </FluentFooter>
+    </FluentLayout>
+</div>
+
+<FluentToastProvider />
+<FluentDialogProvider />
+<FluentTooltipProvider />
+<FluentMessageBarProvider />
+<FluentMenuProvider />
+<FluentKeyCodeProvider />

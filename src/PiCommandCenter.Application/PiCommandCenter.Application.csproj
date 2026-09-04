@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>PiCommandCenter.Application</RootNamespace>
+    <Description>Application services and abstractions. Depends on Domain only.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PiCommandCenter.Domain\PiCommandCenter.Domain.csproj" />
+    <ProjectReference Include="..\PiCommandCenter.Contracts\PiCommandCenter.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

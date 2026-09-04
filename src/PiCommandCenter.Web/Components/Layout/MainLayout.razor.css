@@ -1,0 +1,70 @@
+.app-shell {
+    display: flex;
+    flex-direction: column;
+    min-height: 100dvh;
+}
+
+/* Header brand block */
+.brand {
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
+    font-weight: 600;
+    letter-spacing: -0.015em;
+}
+
+.brand-sub {
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    font-weight: 400;
+    opacity: 0.85;
+}
+
+/* Body row: navigation rail beside scrolling content */
+.app-shell ::deep .shell {
+    flex: 1 1 auto;
+    min-height: 0;
+    align-items: stretch;
+}
+
+.shell-nav {
+    flex: 0 0 auto;
+    padding-block: calc(var(--design-unit) * 3px);
+    background-color: var(--neutral-layer-1);
+    border-inline-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.app-shell ::deep .shell-body {
+    background-color: var(--neutral-layer-2);
+}
+
+.content {
+    display: block;
+    max-width: 1180px;
+    padding: calc(var(--design-unit) * 8px) calc(var(--design-unit) * 7px) calc(var(--design-unit) * 12px);
+}
+
+/* Footer */
+.app-shell ::deep .shell-footer {
+    flex: 0 0 auto;
+    padding: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 7px);
+    color: var(--neutral-foreground-hint);
+    background-color: var(--neutral-layer-1);
+    border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+/* Narrow viewports: rail becomes a full-width band above the content */
+@media (max-width: 820px) {
+    .app-shell ::deep .shell {
+        flex-direction: column;
+    }
+
+    .shell-nav {
+        width: 100%;
+        border-inline-end: none;
+        border-block-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    }
+
+    .content {
+        padding: calc(var(--design-unit) * 5px) calc(var(--design-unit) * 4px) calc(var(--design-unit) * 10px);
+    }
+}

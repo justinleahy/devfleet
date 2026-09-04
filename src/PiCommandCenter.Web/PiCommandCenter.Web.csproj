@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+  <PropertyGroup>
+    <RootNamespace>PiCommandCenter.Web</RootNamespace>
+    <Description>Presentation-only Razor class library of shared components composed by ControlPlane.</Description>
+    <AddRazorSupportForMvc>true</AddRazorSupportForMvc>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.FluentUI.AspNetCore.Components" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PiCommandCenter.Contracts\PiCommandCenter.Contracts.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PiCommandCenter.Application\PiCommandCenter.Application.csproj" />
+  </ItemGroup>
+
+</Project>
