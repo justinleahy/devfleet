@@ -201,6 +201,22 @@ h2 {
     font-weight: 600;
 }
 
+.request-row h3 a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.request-row h3 a:hover {
+    color: var(--accent-foreground-rest);
+    text-decoration: underline;
+}
+
+.request-row h3 a:focus-visible {
+    outline: calc(var(--focus-stroke-width) * 1px) solid var(--focus-stroke-outer);
+    outline-offset: 2px;
+    border-radius: calc(var(--control-corner-radius) * 1px);
+}
+
 .request-prompt {
     margin: 0;
     max-width: 88ch;

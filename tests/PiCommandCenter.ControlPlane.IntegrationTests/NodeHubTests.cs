@@ -99,6 +99,12 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
         Assert.Equal(_nodeId, claim.NodeId);
         Assert.False(string.IsNullOrWhiteSpace(claim.ClaimToken));
         Assert.True(claim.LeaseExpiresAt > claim.ClaimedAt);
+        Assert.False(string.IsNullOrWhiteSpace(claim.RepositoryPath));
+        Assert.Equal("main", claim.DefaultBranch);
+        Assert.Equal("Hub request", claim.Title);
+        Assert.Equal("Do hub work", claim.Prompt);
+        Assert.Equal(WorkRequestKind.Development.ToString(), claim.Kind);
+        Assert.Equal(RiskLevel.Standard.ToString(), claim.RiskLevel);
 
         var second = await _connection.InvokeAsync<RequestClaimMessage?>(
             "ClaimNext", new ClaimRequestMessage(_nodeId, LeaseSeconds: 60));

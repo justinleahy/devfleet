@@ -53,6 +53,7 @@ public sealed class RequestClaimService(TimeProvider clock, ControlPlaneDbContex
         }
 
         var projectLimits = projects.ToDictionary(p => p.Id, p => p.MaxReadOnlyRequests);
+        var projectById = projects.ToDictionary(p => p.Id);
         var projectIds = projects.Select(p => p.Id).ToList();
 
         var activeClaims = db.RequestClaims
@@ -111,7 +112,13 @@ public sealed class RequestClaimService(TimeProvider clock, ControlPlaneDbContex
                 claim.NodeId.Value,
                 claim.ClaimToken,
                 claim.ClaimedAt,
-                claim.LeaseExpiresAt);
+                claim.LeaseExpiresAt,
+                projectById[candidate.ProjectId].RepositoryPath,
+                projectById[candidate.ProjectId].DefaultBranch,
+                candidate.Title,
+                candidate.Prompt,
+                candidate.Kind.ToString(),
+                candidate.RiskLevel.ToString());
         }
 
         return null;

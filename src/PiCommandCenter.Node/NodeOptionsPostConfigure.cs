@@ -57,7 +57,7 @@ public sealed class NodeOptionsPostConfigure : IPostConfigureOptions<NodeOptions
         return path;
     }
 
-    private static void CreatePrivateDirectory(string directory)
+    internal static void CreatePrivateDirectory(string directory)
     {
         try
         {

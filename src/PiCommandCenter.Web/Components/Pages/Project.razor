@@ -5,12 +5,15 @@
 @using PiCommandCenter.Application.Nodes
 @using PiCommandCenter.Application.Projects
 @using PiCommandCenter.Application.Requests
+@using PiCommandCenter.Application.Sessions
 @using PiCommandCenter.Domain
 @using PiCommandCenter.Domain.Nodes
 @using PiCommandCenter.Domain.Requests
+@using PiCommandCenter.Domain.Sessions
 @inject IProjectCatalog Catalog
 @inject IRequestQueue Queue
 @inject INodeRegistry NodeRegistry
+@inject IAgentSessionStore SessionStore
 @inject IClock Clock
 @inject IToastService ToastService
 
@@ -115,6 +118,18 @@ else
                     <dd>@project.MaxReadOnlyRequests</dd>
                     <dt>Child agents per request</dt>
                     <dd>@project.MaxChildAgentsPerRequest</dd>
+                    <dt>Active agents</dt>
+                    <dd>
+                        @if (_sessionError is not null)
+                        {
+                            <span class="node-missing">Session projection unavailable</span>
+                        }
+                        else
+                        {
+                            @_activeSessions
+                            <span class="node-seen">of @_trackedSessions tracked sessions</span>
+                        }
+                    </dd>
                 </dl>
             </section>
         </FluentCard>
@@ -221,7 +236,9 @@ else
                                         <FluentStack Orientation="Orientation.Horizontal"
                                                      VerticalAlignment="VerticalAlignment.Center"
                                                      HorizontalGap="8">
-                                            <h3>@request.Title</h3>
+                                            <h3>
+                                                <a href="@($"/requests/{request.Id}")">@request.Title</a>
+                                            </h3>
                                             <FluentSpacer />
                                             <FluentBadge Appearance="Appearance.Accent">@request.StatusName</FluentBadge>
                                             <FluentBadge Appearance="Appearance.Neutral">@request.PriorityName</FluentBadge>
@@ -235,6 +252,7 @@ else
                                             {
                                                 <span>&nbsp;&middot; blocked in @request.BlockedPhaseName</span>
                                             }
+                                            <span>&nbsp;&middot; @AgentSummary(request.Id)</span>
                                         </p>
                                     </article>
                                 </FluentCard>
@@ -280,6 +298,10 @@ else
     private string? _risk = nameof(RiskLevel.Standard);
     private bool _loading = true;
     private bool _submitting;
+    private readonly Dictionary<Guid, IReadOnlyList<AgentSessionDto>> _sessionsByRequest = [];
+    private string? _sessionError;
+    private int _activeSessions;
+    private int _trackedSessions;
 
     protected override Task OnParametersSetAsync() => ReloadAsync();
 
@@ -303,6 +325,7 @@ else
         _nodeError = null;
         _node = null;
         Partition(Array.Empty<WorkRequestDto>());
+        ResetSessions();
         StateHasChanged();
 
         try
@@ -315,7 +338,9 @@ else
 
             var id = new ProjectId(ProjectId);
             _project = await Catalog.GetAsync(id, CancellationToken.None);
-            Partition(await Queue.ListAsync(id, CancellationToken.None));
+            var requests = await Queue.ListAsync(id, CancellationToken.None);
+            Partition(requests);
+            await LoadSessionsAsync(requests);
             await LoadNodeAsync(_project.NodeId);
         }
         catch (ProjectNotFoundException)
@@ -345,6 +370,72 @@ else
             _nodeError = ex.Message;
         }
     }
+
+    private void ResetSessions()
+    {
+        _sessionsByRequest.Clear();
+        _sessionError = null;
+        _activeSessions = 0;
+        _trackedSessions = 0;
+    }
+
+    private async Task LoadSessionsAsync(IReadOnlyList<WorkRequestDto> requests)
+    {
+        ResetSessions();
+
+        foreach (var request in requests)
+        {
+            IReadOnlyList<AgentSessionDto> sessions;
+            try
+            {
+                sessions = await SessionStore.ListAsync(new WorkRequestId(request.Id), CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _sessionError ??= ex.Message;
+                continue;
+            }
+
+            _sessionsByRequest[request.Id] = sessions;
+            _trackedSessions += sessions.Count;
+            foreach (var session in sessions)
+            {
+                if (IsRunning(session))
+                {
+                    _activeSessions++;
+                }
+            }
+        }
+    }
+
+    private string AgentSummary(Guid requestId)
+    {
+        if (_sessionError is not null)
+        {
+            return "agents unavailable";
+        }
+
+        if (!_sessionsByRequest.TryGetValue(requestId, out var sessions) || sessions.Count == 0)
+        {
+            return "no agent session";
+        }
+
+        var running = 0;
+        foreach (var session in sessions)
+        {
+            if (IsRunning(session))
+            {
+                running++;
+            }
+        }
+
+        return $"{running} of {sessions.Count} agent{(sessions.Count == 1 ? string.Empty : "s")} running";
+    }
+
+    private static bool IsRunning(AgentSessionDto session) =>
+        session.EndedAt is null
+        && session.Liveness != AgentLiveness.Exited
+        && session.WorkState is not (AgentWorkState.Completed or AgentWorkState.Failed or AgentWorkState.Cancelled);
 
     private static Appearance BadgeAppearance(NodeStatus status) =>
         status == NodeStatus.Online ? Appearance.Accent : Appearance.Neutral;
@@ -442,7 +533,9 @@ else
             _risk = nameof(RiskLevel.Standard);
 
             ToastService.ShowSuccess($"Queued {request.Title}");
-            Partition(await Queue.ListAsync(new ProjectId(ProjectId), CancellationToken.None));
+            var refreshed = await Queue.ListAsync(new ProjectId(ProjectId), CancellationToken.None);
+            Partition(refreshed);
+            await LoadSessionsAsync(refreshed);
             _snapshot = Clock.UtcNow;
         }
         catch (ProjectNotFoundException)

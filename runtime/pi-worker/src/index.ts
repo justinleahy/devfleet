@@ -6,18 +6,10 @@
  * to stderr and skipped; the worker keeps running so a single bad frame can
  * never take the protocol stream down.
  */
+import { createSdkSessionFactory } from "./sdk.ts";
 import { FrameDecoder, type Envelope, log, writeFrame } from "./protocol.ts";
+import { PiWorker } from "./worker.ts";
 
-function responseFor(received: Envelope): Envelope {
-  return {
-    protocolVersion: 1,
-    messageId: received.messageId,
-    kind: "response",
-    sessionId: received.sessionId,
-    type: "worker.ack",
-    payload: { acknowledgedKind: received.kind, receivedType: received.type },
-  };
-}
 /** process.stdout is asynchronous when redirected; wait for it to drain. */
 function drainStdout(): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -31,6 +23,14 @@ function drainStdout(): Promise<void> {
 
 async function main(): Promise<void> {
   const decoder = new FrameDecoder();
+  const worker: PiWorker = new PiWorker({
+    // Custom orchestration tools round-trip through this worker's correlated
+    // request broker; the closure runs only after `worker` is assigned.
+    factory: createSdkSessionFactory((_sessionId, type, payload) =>
+      worker.requestFromNode(type, payload),
+    ),
+    send: (envelope: Envelope) => writeFrame(envelope),
+  });
   log(`pi-worker ready (protocolVersion 1, pid ${process.pid})`);
 
   for await (const chunk of process.stdin) {
@@ -40,8 +40,9 @@ async function main(): Promise<void> {
       log(`FRAME_ERROR ${error.message}`);
     });
     for (const frame of frames) {
-      writeFrame(responseFor(frame));
+      await worker.handleFrame(frame);
       if (frame.kind === "goodbye") {
+        worker.stop();
         log("goodbye received; shutting down");
         await drainStdout();
         return;
@@ -51,11 +52,12 @@ async function main(): Promise<void> {
 
   try {
     for (const frame of decoder.flush()) {
-      writeFrame(responseFor(frame));
+      await worker.handleFrame(frame);
     }
   } catch (cause) {
     log(`FRAME_ERROR ${(cause as Error).message}`);
   }
+  worker.stop();
   await drainStdout();
   log("stdin closed; exiting");
 }

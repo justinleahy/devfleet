@@ -26,6 +26,7 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
     public DbSet<RequestClaim> RequestClaims => Set<RequestClaim>();
 
     public DbSet<SessionEvent> SessionEvents => Set<SessionEvent>();
+    public DbSet<AgentSessionRow> AgentSessions => Set<AgentSessionRow>();
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -281,6 +282,71 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
 
             sessionEvent.HasIndex(e => new { e.ProjectId, e.OccurredAtUtcTicks })
                 .HasDatabaseName("IX_SessionEvents_ProjectId_OccurredAtUtcTicks");
+        });
+
+        builder.Entity<AgentSessionRow>(session =>
+        {
+            session.ToTable("AgentSessions");
+
+            // The session id is globally unique: the primary key doubles as the uniqueness
+            // constraint required for upsert-on-registration.
+            session.HasKey(s => s.Id);
+            session.Property(s => s.Id)
+                .HasMaxLength(128);
+
+            session.Property(s => s.ProjectId).HasColumnType("TEXT");
+            session.Property(s => s.RequestId).HasColumnType("TEXT");
+            session.Property(s => s.ParentSessionId)
+                .HasMaxLength(128);
+
+            session.Property(s => s.AgentName)
+                .IsRequired()
+                .HasMaxLength(256);
+            session.Property(s => s.Role)
+                .IsRequired()
+                .HasMaxLength(64);
+            session.Property(s => s.Runtime)
+                .IsRequired()
+                .HasMaxLength(64);
+            session.Property(s => s.RuntimeProfile)
+                .IsRequired()
+                .HasMaxLength(64);
+            session.Property(s => s.ProviderSessionId)
+                .HasMaxLength(256);
+
+            session.Property(s => s.Liveness)
+                .IsRequired()
+                .HasMaxLength(32);
+            session.Property(s => s.Activity)
+                .IsRequired()
+                .HasMaxLength(32);
+            session.Property(s => s.Attention)
+                .IsRequired()
+                .HasMaxLength(32);
+            session.Property(s => s.WorkState)
+                .IsRequired()
+                .HasMaxLength(32);
+
+            session.Property(s => s.StatusReason)
+                .IsRequired()
+                .HasMaxLength(1024);
+            session.Property(s => s.CurrentOperation)
+                .HasMaxLength(256);
+
+            session.Property(s => s.StartedAtUtcTicks).HasColumnType("INTEGER");
+            session.Property(s => s.LastHeartbeatAtUtcTicks).HasColumnType("INTEGER");
+            session.Property(s => s.EndedAtUtcTicks).HasColumnType("INTEGER");
+            session.Property(s => s.LastSequence).HasColumnType("INTEGER");
+
+            session.Property(s => s.Version)
+                .IsConcurrencyToken()
+                .HasColumnType("INTEGER");
+
+            session.HasIndex(s => s.RequestId)
+                .HasDatabaseName("IX_AgentSessions_RequestId");
+
+            session.HasIndex(s => s.ParentSessionId)
+                .HasDatabaseName("IX_AgentSessions_ParentSessionId");
         });
     }
 

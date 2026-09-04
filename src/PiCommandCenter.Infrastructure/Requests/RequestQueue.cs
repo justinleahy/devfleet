@@ -30,6 +30,18 @@ public sealed class RequestQueue(TimeProvider clock, ControlPlaneDbContext db) :
         return requests.Select(ToDto).ToList();
     }
 
+    public async Task<WorkRequestDto> GetAsync(
+        WorkRequestId requestId,
+        CancellationToken cancellationToken = default)
+    {
+        var request = await db.WorkRequests
+            .AsNoTracking()
+            .SingleOrDefaultAsync(r => r.Id == requestId, cancellationToken)
+            ?? throw new RequestNotFoundException(requestId);
+
+        return ToDto(request);
+    }
+
     public async Task<WorkRequestDto> EnqueueAsync(
         ProjectId projectId,
         QueueWorkRequestCommand command,

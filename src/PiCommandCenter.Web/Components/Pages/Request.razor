@@ -1,0 +1,577 @@
+@page "/requests/{RequestId:guid}"
+@namespace PiCommandCenter.Web.Components.Pages
+@rendermode InteractiveServer
+@using PiCommandCenter.Application
+@using PiCommandCenter.Application.Projects
+@using PiCommandCenter.Application.Requests
+@using PiCommandCenter.Application.Sessions
+@using PiCommandCenter.Domain
+@using PiCommandCenter.Domain.Requests
+@using PiCommandCenter.Domain.Sessions
+@using PiCommandCenter.Web.Components.Sessions
+@implements IAsyncDisposable
+@inject IRequestQueue Queue
+@inject IProjectCatalog Catalog
+@inject IAgentSessionStore SessionStore
+@inject IClock Clock
+
+<PageTitle>@(_request?.Title ?? "Request") &middot; Pi Command Center</PageTitle>
+
+@if (_loading)
+{
+    <div class="state-block" role="status">
+        <FluentProgressRing aria-label="Loading request" />
+        <span>Loading request</span>
+    </div>
+}
+else if (_request is null)
+{
+    <FluentStack Orientation="Orientation.Vertical" VerticalGap="16" Width="100%">
+        <h1>Request not found</h1>
+        <p class="page-lead">
+            @if (_loadError is not null)
+            {
+                @_loadError
+            }
+            else
+            {
+                <text>No work request is queued with that id.</text>
+            }
+        </p>
+        <p class="mono hint">@RequestId</p>
+        <a class="back-link" href="/">Back to fleet</a>
+    </FluentStack>
+}
+else
+{
+    var request = _request;
+
+    <FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+
+        <header class="page-head">
+            <a class="back-link" href="@ProjectHref()">
+                @(_project is null ? "Back to project" : $"Back to {_project.DisplayName}")
+            </a>
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="12"
+                         Width="100%">
+                <h1>@request.Title</h1>
+                <FluentSpacer />
+                <FluentButton Appearance="Appearance.Stealth" OnClick="ManualReloadAsync">
+                    Reload
+                </FluentButton>
+            </FluentStack>
+            <div class="badge-row">
+                <FluentBadge Appearance="Appearance.Accent">@request.StatusName</FluentBadge>
+                <FluentBadge Appearance="Appearance.Neutral">@request.PriorityName</FluentBadge>
+                <FluentBadge Appearance="Appearance.Neutral">@request.KindName</FluentBadge>
+                <FluentBadge Appearance="Appearance.Neutral">@request.RiskLevelName</FluentBadge>
+                @if (request.BlockedPhaseName is not null)
+                {
+                    <FluentBadge Appearance="Appearance.Neutral">blocked in @request.BlockedPhaseName</FluentBadge>
+                }
+            </div>
+            <p class="page-lead">
+                Request state and agent sessions are read from the control-plane projection.
+                Refreshed every @RefreshSeconds s; snapshot @_snapshot.ToString("u").
+            </p>
+        </header>
+
+        @if (_loadError is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Could not refresh request"
+                              AllowDismiss="false">
+                @_loadError
+            </FluentMessageBar>
+        }
+
+        <FluentCard>
+            <section class="panel" aria-labelledby="original-heading">
+                <h2 id="original-heading">Original request</h2>
+                <p class="request-prompt">@request.Prompt</p>
+                <dl class="facts">
+                    <dt>Request id</dt>
+                    <dd class="mono">@request.Id</dd>
+                    <dt>Project</dt>
+                    <dd>
+                        @if (_project is not null)
+                        {
+                            <a href="@ProjectHref()">@_project.DisplayName</a>
+                        }
+                        <span class="mono hint">@request.ProjectId</span>
+                    </dd>
+                    <dt>Created</dt>
+                    <dd>@request.CreatedAt.ToString("u")</dd>
+                    <dt>Updated</dt>
+                    <dd>
+                        @request.UpdatedAt.ToString("u")
+                        <span class="hint">(@Relative(request.UpdatedAt, _snapshot))</span>
+                    </dd>
+                    <dt>Version</dt>
+                    <dd>@request.Version</dd>
+                </dl>
+            </section>
+        </FluentCard>
+
+        <FluentCard>
+            <section class="panel" aria-labelledby="status-heading">
+                <h2 id="status-heading">Current status</h2>
+
+                @if (_sessionError is not null)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Error"
+                                      Title="Session projection unavailable"
+                                      AllowDismiss="false">
+                        @_sessionError
+                    </FluentMessageBar>
+                }
+                else if (_root is null)
+                {
+                    <p class="panel-empty">
+                        No agent session is registered for this request yet. The request is
+                        @request.StatusName; a root session appears here once a node claims the
+                        request and its runtime reports <span class="mono">session.registered</span>.
+                    </p>
+                }
+                else
+                {
+                    var root = _root;
+
+                    <dl class="dimensions">
+                        <div class="dimension @(root.Liveness == AgentLiveness.Online ? "is-live" : root.Liveness == AgentLiveness.Exited ? "is-alert" : string.Empty)">
+                            <dt>Liveness</dt>
+                            <dd>@root.Liveness</dd>
+                        </div>
+                        <div class="dimension @(IsWorking(root.Activity) ? "is-live" : string.Empty)">
+                            <dt>Activity</dt>
+                            <dd>@root.Activity</dd>
+                        </div>
+                        <div class="dimension @(root.Attention == AgentAttention.None ? string.Empty : "is-alert")">
+                            <dt>Attention</dt>
+                            <dd>@root.Attention</dd>
+                        </div>
+                        <div class="dimension @(IsFailed(root.WorkState) ? "is-alert" : IsTerminal(root.WorkState) ? string.Empty : "is-live")">
+                            <dt>Work state</dt>
+                            <dd>@root.WorkState</dd>
+                        </div>
+                    </dl>
+
+                    <p class="operation">
+                        <span class="operation-label">Status reason</span>
+                        <span>@(string.IsNullOrWhiteSpace(root.StatusReason) ? "None reported." : root.StatusReason)</span>
+                    </p>
+                    <p class="operation">
+                        <span class="operation-label">Current operation</span>
+                        <span>@(root.CurrentOperation ?? "None reported.")</span>
+                    </p>
+
+                    <dl class="facts">
+                        <dt>Root session</dt>
+                        <dd class="mono">@root.Id</dd>
+                        <dt>Runtime</dt>
+                        <dd>@root.Runtime <span class="hint">/ @root.RuntimeProfile</span></dd>
+                        <dt>Provider session</dt>
+                        <dd class="mono">@(root.ProviderSessionId ?? "not reported")</dd>
+                        <dt>Process</dt>
+                        <dd>@(root.ProcessId?.ToString() ?? "not reported")</dd>
+                        <dt>Started</dt>
+                        <dd>@root.StartedAt.ToString("u")</dd>
+                        <dt>Last heartbeat</dt>
+                        <dd>
+                            @if (root.LastHeartbeatAt is { } beat)
+                            {
+                                @beat.ToString("u")
+                                <span class="hint">(@Relative(beat, _snapshot))</span>
+                            }
+                            else
+                            {
+                                <span class="hint">no heartbeat received</span>
+                            }
+                        </dd>
+                        <dt>Ended</dt>
+                        <dd>
+                            @if (root.EndedAt is { } ended)
+                            {
+                                @ended.ToString("u")
+                            }
+                            else
+                            {
+                                <span class="hint">still open</span>
+                            }
+                        </dd>
+                    </dl>
+                }
+            </section>
+        </FluentCard>
+
+        <section aria-labelledby="tree-heading">
+            <h2 id="tree-heading">Agent tree</h2>
+            @if (_roots.Count == 0)
+            {
+                <p class="panel-empty">
+                    No sessions yet. Root and child agents appear as their runtimes register.
+                </p>
+            }
+            else
+            {
+                <FluentCard>
+                    <div class="panel">
+                        <ul class="agent-tree" role="tree" aria-labelledby="tree-heading">
+                            @foreach (var session in _roots)
+                            {
+                                <AgentTreeNode Session="session" ChildrenOf="ChildrenOf" Now="_snapshot" />
+                            }
+                        </ul>
+                    </div>
+                </FluentCard>
+            }
+        </section>
+
+        <section aria-labelledby="timeline-heading">
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="12"
+                         Width="100%">
+                <h2 id="timeline-heading">Event timeline</h2>
+                <FluentSpacer />
+                <span class="event-origin" role="status" aria-live="polite">
+                    @_events.Count persisted event@(_events.Count == 1 ? string.Empty : "s") &middot;
+                    newest first &middot; refreshed @Relative(_snapshot, Clock.UtcNow)
+                </span>
+            </FluentStack>
+
+            @if (_events.Count == 0)
+            {
+                <p class="panel-empty">
+                    No events persisted for this request yet. Normalized runtime events land here in
+                    occurrence order as the node forwards them.
+                </p>
+            }
+            else
+            {
+                <FluentCard>
+                    <div class="panel">
+                        @if (_events.Count > TimelineCap)
+                        {
+                            <p class="panel-lead">
+                                Showing the most recent @TimelineCap of @_events.Count events.
+                            </p>
+                        }
+                        <ol class="timeline">
+                            @foreach (var evt in TimelineWindow())
+                            {
+                                <li>
+                                    <span class="event-time">
+                                        <span class="visually-hidden">Occurred at</span>
+                                        @evt.OccurredAt.ToString("HH:mm:ss")
+                                    </span>
+                                    <span class="event-type">@evt.Type</span>
+                                    <div class="event-body">
+                                        <span class="event-origin">
+                                            seq @evt.Sequence &middot;
+                                            @(evt.SessionId is null ? "request-scoped" : SessionLabel(evt.SessionId)) &middot;
+                                            @evt.OccurredAt.ToString("u")
+                                        </span>
+                                        @if (HasPayload(evt.PayloadJson))
+                                        {
+                                            <details>
+                                                <summary>payload</summary>
+                                                <pre class="event-payload">@Payload(evt.PayloadJson)</pre>
+                                            </details>
+                                        }
+                                    </div>
+                                </li>
+                            }
+                        </ol>
+                    </div>
+                </FluentCard>
+            }
+        </section>
+
+        <section aria-labelledby="detail-heading">
+            <h2 id="detail-heading">Plan, messages, reservations, diff</h2>
+            <p class="panel-lead">
+                These views are projected from event families that have no read contract yet. Counts
+                below are the persisted events matching each family, so nothing is inferred.
+            </p>
+            <div class="pending-grid">
+                @foreach (var region in DetailRegions())
+                {
+                    <article class="pending">
+                        <h3>@region.Heading</h3>
+                        <p>
+                            <span class="pending-count">@CountEvents(region.Prefix)</span>
+                            events matching <span class="mono">@region.Prefix*</span>
+                        </p>
+                        <p>@region.Note</p>
+                    </article>
+                }
+            </div>
+        </section>
+    </FluentStack>
+}
+
+@code {
+    private const int TimelineCap = 200;
+    private const int RefreshSeconds = 3;
+    private const int PayloadCap = 2000;
+
+    [Parameter]
+    public Guid RequestId { get; set; }
+
+    private readonly Dictionary<string, List<AgentSessionDto>> _children = [];
+    private readonly Dictionary<string, AgentSessionDto> _sessionsById = [];
+
+    private List<AgentSessionDto> _roots = [];
+    private IReadOnlyList<AgentSessionDto> _sessions = Array.Empty<AgentSessionDto>();
+    private IReadOnlyList<SessionEventDto> _events = Array.Empty<SessionEventDto>();
+    private AgentSessionDto? _root;
+    private WorkRequestDto? _request;
+    private ProjectDto? _project;
+    private CancellationTokenSource? _refreshCts;
+    private DateTimeOffset _snapshot;
+    private string? _loadError;
+    private string? _sessionError;
+    private bool _loading = true;
+    private bool _busy;
+
+    protected override Task OnParametersSetAsync() => LoadAsync(showSpinner: true);
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && _refreshCts is null)
+        {
+            _refreshCts = new CancellationTokenSource();
+            _ = RefreshLoopAsync(_refreshCts.Token);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        var cts = _refreshCts;
+        _refreshCts = null;
+        if (cts is not null)
+        {
+            await cts.CancelAsync();
+            cts.Dispose();
+        }
+    }
+
+    private async Task RefreshLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(RefreshSeconds));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await InvokeAsync(async () =>
+                {
+                    await LoadAsync(showSpinner: false);
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private Task ManualReloadAsync() => LoadAsync(showSpinner: true);
+
+    private async Task LoadAsync(bool showSpinner)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        if (showSpinner)
+        {
+            _loading = true;
+            StateHasChanged();
+        }
+
+        try
+        {
+            if (RequestId == Guid.Empty)
+            {
+                _request = null;
+                return;
+            }
+
+            var requestId = new WorkRequestId(RequestId);
+            _request = await Queue.GetAsync(requestId, CancellationToken.None);
+            _loadError = null;
+            await LoadProjectAsync(_request.ProjectId);
+            await LoadSessionsAsync(requestId);
+        }
+        catch (RequestNotFoundException)
+        {
+            _request = null;
+            _loadError = null;
+        }
+        catch (Exception ex)
+        {
+            _loadError = ex.Message;
+        }
+        finally
+        {
+            _snapshot = Clock.UtcNow;
+            _loading = false;
+            _busy = false;
+        }
+    }
+
+    private async Task LoadProjectAsync(Guid projectId)
+    {
+        try
+        {
+            _project = await Catalog.GetAsync(new ProjectId(projectId), CancellationToken.None);
+        }
+        catch (Exception)
+        {
+            _project = null;
+        }
+    }
+
+    private async Task LoadSessionsAsync(WorkRequestId requestId)
+    {
+        try
+        {
+            _sessions = await SessionStore.ListAsync(requestId, CancellationToken.None);
+            _events = await SessionStore.ListEventsAsync(requestId, CancellationToken.None);
+            _sessionError = null;
+        }
+        catch (Exception ex)
+        {
+            _sessionError = ex.Message;
+            _sessions = Array.Empty<AgentSessionDto>();
+            _events = Array.Empty<SessionEventDto>();
+        }
+
+        BuildTree();
+    }
+
+    private void BuildTree()
+    {
+        _children.Clear();
+        _sessionsById.Clear();
+        _roots = [];
+
+        foreach (var session in _sessions)
+        {
+            _sessionsById[session.Id] = session;
+        }
+
+        foreach (var session in _sessions)
+        {
+            if (session.ParentSessionId is { } parent && _sessionsById.ContainsKey(parent))
+            {
+                if (!_children.TryGetValue(parent, out var siblings))
+                {
+                    siblings = [];
+                    _children[parent] = siblings;
+                }
+
+                siblings.Add(session);
+            }
+            else
+            {
+                _roots.Add(session);
+            }
+        }
+
+        _root = _roots.Count > 0 ? _roots[0] : null;
+    }
+
+    private IReadOnlyList<AgentSessionDto> ChildrenOf(string sessionId) =>
+        _children.TryGetValue(sessionId, out var children) ? children : Array.Empty<AgentSessionDto>();
+
+    private IEnumerable<SessionEventDto> TimelineWindow()
+    {
+        var skip = Math.Max(0, _events.Count - TimelineCap);
+        for (var index = _events.Count - 1; index >= skip; index--)
+        {
+            yield return _events[index];
+        }
+    }
+
+    private string SessionLabel(string sessionId) =>
+        _sessionsById.TryGetValue(sessionId, out var session)
+            ? $"{session.AgentName} ({sessionId})"
+            : sessionId;
+
+    private int CountEvents(string prefix)
+    {
+        var total = 0;
+        foreach (var evt in _events)
+        {
+            if (evt.Type.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                total++;
+            }
+        }
+
+        return total;
+    }
+
+    private string ProjectHref() =>
+        _request is null ? "/" : $"/projects/{_request.ProjectId}";
+
+    private static bool HasPayload(string payloadJson) =>
+        !string.IsNullOrWhiteSpace(payloadJson) && payloadJson is not "{}" and not "null";
+
+    private static string Payload(string payloadJson) =>
+        payloadJson.Length <= PayloadCap
+            ? payloadJson
+            : string.Concat(payloadJson.AsSpan(0, PayloadCap), "\u2026 (truncated)");
+
+    private static bool IsWorking(AgentActivity activity) => activity != AgentActivity.Idle;
+
+    private static bool IsTerminal(AgentWorkState state) =>
+        state is AgentWorkState.Completed or AgentWorkState.Failed or AgentWorkState.Cancelled;
+
+    private static bool IsFailed(AgentWorkState state) =>
+        state is AgentWorkState.Failed or AgentWorkState.Cancelled or AgentWorkState.Blocked;
+
+    private readonly record struct DetailRegion(string Heading, string Prefix, string Note);
+
+    private static DetailRegion[] DetailRegions() =>
+    [
+        new("Structured plan", "plan", "The plan view renders once create_plan and revise_plan expose a read contract."),
+        new("Messages", "message", "Agent inbox and guidance messages render once the message read contract lands."),
+        new("Reservations", "reservation", "Reservation leases render once the reservation read contract lands."),
+        new("Diff summary", "diff", "Per-request diff summaries render once inspect_project_diff results are projected."),
+    ];
+
+    private static string Relative(DateTimeOffset instant, DateTimeOffset now)
+    {
+        var delta = now - instant;
+        if (delta < TimeSpan.Zero)
+        {
+            delta = TimeSpan.Zero;
+        }
+
+        if (delta.TotalSeconds < 60)
+        {
+            return $"{(int)delta.TotalSeconds}s ago";
+        }
+
+        if (delta.TotalMinutes < 60)
+        {
+            return $"{(int)delta.TotalMinutes}m ago";
+        }
+
+        if (delta.TotalHours < 24)
+        {
+            return $"{(int)delta.TotalHours}h ago";
+        }
+
+        return $"{(int)delta.TotalDays}d ago";
+    }
+}

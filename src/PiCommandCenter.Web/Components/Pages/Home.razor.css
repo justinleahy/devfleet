@@ -183,6 +183,14 @@ h2 {
     color: var(--neutral-foreground-hint);
 }
 
+.panel-lead {
+    margin: 0 0 calc(var(--design-unit) * 2px);
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
 .node-list {
     display: flex;
     flex-direction: column;

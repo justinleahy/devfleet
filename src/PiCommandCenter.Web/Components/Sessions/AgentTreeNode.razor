@@ -1,0 +1,112 @@
+@namespace PiCommandCenter.Web.Components.Sessions
+@using PiCommandCenter.Application.Sessions
+@using PiCommandCenter.Domain.Sessions
+
+@*
+    One node of the root/child agent tree. Recurses through ChildrenOf so the rendered markup is a
+    genuine nested list: assistive technology walks the same hierarchy the operator sees.
+*@
+
+<li role="treeitem" aria-expanded="@(_children.Count > 0 ? "true" : null)">
+    <div class="agent-node">
+        <div class="agent-head">
+            <span class="@LivenessClass(Session.Liveness)" aria-hidden="true"></span>
+            <span class="agent-name">@Session.AgentName</span>
+            <span class="agent-role">@Session.Role</span>
+            <FluentBadge Appearance="@(IsSettled(Session.WorkState) ? Appearance.Neutral : Appearance.Accent)">
+                @Session.WorkState
+            </FluentBadge>
+            <FluentBadge Appearance="Appearance.Neutral">@Session.Activity</FluentBadge>
+            @if (Session.Attention != AgentAttention.None)
+            {
+                <FluentBadge Appearance="Appearance.Accent">@Session.Attention</FluentBadge>
+            }
+        </div>
+
+        @if (Session.CurrentOperation is { Length: > 0 } operation)
+        {
+            <p class="agent-reason">@operation</p>
+        }
+        else if (!string.IsNullOrWhiteSpace(Session.StatusReason))
+        {
+            <p class="agent-reason">@Session.StatusReason</p>
+        }
+
+        <div class="agent-meta">
+            <span>@Session.Liveness</span>
+            <span>@Session.Runtime / @Session.RuntimeProfile</span>
+            <span class="agent-id">@Session.Id</span>
+            <span>
+                <span class="visually-hidden">Last heartbeat</span>
+                @(Session.LastHeartbeatAt is { } beat ? Relative(beat, Now) : "no heartbeat")
+            </span>
+            @if (Session.ProcessId is { } processId)
+            {
+                <span>pid @processId</span>
+            }
+        </div>
+    </div>
+
+    @if (_children.Count > 0)
+    {
+        <ul class="subtree" role="group">
+            @foreach (var child in _children)
+            {
+                <AgentTreeNode Session="child" ChildrenOf="ChildrenOf" Now="Now" />
+            }
+        </ul>
+    }
+</li>
+
+@code {
+    private IReadOnlyList<AgentSessionDto> _children = Array.Empty<AgentSessionDto>();
+
+    [Parameter]
+    [EditorRequired]
+    public AgentSessionDto Session { get; set; } = default!;
+
+    [Parameter]
+    [EditorRequired]
+    public Func<string, IReadOnlyList<AgentSessionDto>> ChildrenOf { get; set; } = default!;
+
+    [Parameter]
+    public DateTimeOffset Now { get; set; }
+
+    protected override void OnParametersSet() => _children = ChildrenOf(Session.Id);
+
+    private static bool IsSettled(AgentWorkState state) =>
+        state is AgentWorkState.Completed or AgentWorkState.Failed or AgentWorkState.Cancelled;
+
+    private static string LivenessClass(AgentLiveness liveness) => liveness switch
+    {
+        AgentLiveness.Online => "liveness-dot is-online",
+        AgentLiveness.Disconnected or AgentLiveness.Exited => "liveness-dot is-gone",
+        _ => "liveness-dot",
+    };
+
+    private static string Relative(DateTimeOffset instant, DateTimeOffset now)
+    {
+        var delta = now - instant;
+        if (delta < TimeSpan.Zero)
+        {
+            delta = TimeSpan.Zero;
+        }
+
+        if (delta.TotalSeconds < 60)
+        {
+            return $"{(int)delta.TotalSeconds}s ago";
+        }
+
+        if (delta.TotalMinutes < 60)
+        {
+            return $"{(int)delta.TotalMinutes}m ago";
+        }
+
+        if (delta.TotalHours < 24)
+        {
+            return $"{(int)delta.TotalHours}h ago";
+        }
+
+        return $"{(int)delta.TotalDays}d ago";
+    }
+}

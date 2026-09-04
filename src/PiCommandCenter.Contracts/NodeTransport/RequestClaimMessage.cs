@@ -9,4 +9,10 @@ public sealed record RequestClaimMessage(
     Guid NodeId,
     string ClaimToken,
     DateTimeOffset ClaimedAt,
-    DateTimeOffset LeaseExpiresAt);
+    DateTimeOffset LeaseExpiresAt,
+    string RepositoryPath,
+    string DefaultBranch,
+    string Title,
+    string Prompt,
+    string Kind,
+    string RiskLevel);

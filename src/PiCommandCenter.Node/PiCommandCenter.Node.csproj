@@ -14,9 +14,10 @@
     <PackageReference Include="Microsoft.Data.Sqlite" />
   </ItemGroup>
 
-
   <ItemGroup>
+    <ProjectReference Include="..\PiCommandCenter.Application\PiCommandCenter.Application.csproj" />
     <ProjectReference Include="..\PiCommandCenter.Contracts\PiCommandCenter.Contracts.csproj" />
+    <ProjectReference Include="..\PiCommandCenter.Domain\PiCommandCenter.Domain.csproj" />
   </ItemGroup>
 
 </Project>

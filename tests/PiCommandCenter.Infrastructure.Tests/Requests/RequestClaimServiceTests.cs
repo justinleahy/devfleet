@@ -229,6 +229,28 @@ public class RequestClaimServiceTests : IDisposable
         await Assert.ThrowsAsync<ArgumentException>(() => service.ClaimNextAsync(nodeId, TimeSpan.Zero));
     }
 
+    [Fact]
+    public async Task Claim_carries_the_assignment_fields_needed_to_start_root_work()
+    {
+        var db = CreateContext();
+        var nodeId = TestNodes.NewNodeId();
+        TestNodes.SeedNode(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, nodeId, _clock);
+        TestNodes.SeedRequest(db, project, _clock, WorkRequestKind.Review, title: "Review the diff");
+        await TestNodes.SaveAsync(db);
+        var service = new RequestClaimService(_clock, db);
+
+        var claim = await service.ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
+
+        Assert.NotNull(claim);
+        Assert.Equal(project.RepositoryPath, claim.RepositoryPath);
+        Assert.Equal(project.DefaultBranch, claim.DefaultBranch);
+        Assert.Equal("Review the diff", claim.Title);
+        Assert.Equal("Do the thing", claim.Prompt);
+        Assert.Equal(WorkRequestKind.Review.ToString(), claim.Kind);
+        Assert.Equal(RiskLevel.Standard.ToString(), claim.RiskLevel);
+    }
+
     private static string KindOf(ControlPlaneDbContext db, Guid requestId) =>
         db.WorkRequests.Single(r => r.Id == new WorkRequestId(requestId)).Kind.ToString();
 }

@@ -7,8 +7,10 @@ using PiCommandCenter.Application.Requests;
 using PiCommandCenter.Application.Transport;
 using PiCommandCenter.Infrastructure.Nodes;
 using PiCommandCenter.Infrastructure.Persistence;
+using PiCommandCenter.Application.Sessions;
 using PiCommandCenter.Infrastructure.Projects;
 using PiCommandCenter.Infrastructure.Requests;
+using PiCommandCenter.Infrastructure.Sessions;
 using PiCommandCenter.Infrastructure.Transport;
 
 namespace PiCommandCenter.Infrastructure;
@@ -44,6 +46,7 @@ public static class DependencyInjection
         services.AddScoped<INodeRegistry, NodeRegistry>();
         services.AddScoped<IRequestClaimService, RequestClaimService>();
         services.AddScoped<INodeEventSink, NodeEventSink>();
+        services.AddScoped<IAgentSessionStore, AgentSessionStore>();
 
         return services;
     }

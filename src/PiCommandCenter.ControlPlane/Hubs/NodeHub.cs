@@ -145,7 +145,13 @@ public sealed class NodeHub(
         claim.NodeId,
         claim.ClaimToken,
         claim.ClaimedAt,
-        claim.LeaseExpiresAt);
+        claim.LeaseExpiresAt,
+        claim.RepositoryPath,
+        claim.DefaultBranch,
+        claim.Title,
+        claim.Prompt,
+        claim.Kind,
+        claim.RiskLevel);
 
     private static NodeEventDto ToDto(NodeEventMessage message) => new(
         message.EventId,

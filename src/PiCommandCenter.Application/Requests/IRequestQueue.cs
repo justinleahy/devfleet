@@ -1,5 +1,6 @@
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Projects;
+using PiCommandCenter.Domain.Requests;
 
 namespace PiCommandCenter.Application.Requests;
 
@@ -17,4 +18,8 @@ public interface IRequestQueue
     /// <exception cref="Application.Projects.ProjectNotFoundException">No project with the given id exists.</exception>
     /// <exception cref="ArgumentException">The command violates a request invariant.</exception>
     Task<WorkRequestDto> EnqueueAsync(ProjectId projectId, QueueWorkRequestCommand command, CancellationToken cancellationToken = default);
+
+    /// <summary>Gets a single request by id.</summary>
+    /// <exception cref="RequestNotFoundException">No work request with the given id exists.</exception>
+    Task<WorkRequestDto> GetAsync(WorkRequestId requestId, CancellationToken cancellationToken = default);
 }

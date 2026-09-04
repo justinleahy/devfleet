@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Configuration;
+using PiCommandCenter.Application.Runtime;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
@@ -26,9 +27,20 @@ public static class NodeServiceCollectionExtensions
             .Services
             .AddSingleton<IValidateOptions<NodeOptions>, NodeOptionsValidator>()
             .AddSingleton<IPostConfigureOptions<NodeOptions>, NodeOptionsPostConfigure>()
+            .AddOptions<PiWorkerOptions>()
+            .BindConfiguration(PiWorkerOptions.SectionName)
+            .ValidateOnStart()
+            .Services
+            .AddSingleton<IValidateOptions<PiWorkerOptions>, PiWorkerOptionsValidator>()
+            .AddSingleton<IPostConfigureOptions<PiWorkerOptions>, PiWorkerOptionsPostConfigure>()
             .AddSingleton<SqliteNodeEventSpool>()
             .AddSingleton<INodeEventSpool>(static sp => sp.GetRequiredService<SqliteNodeEventSpool>())
             .AddSingleton<NodeTransportClient>()
+            .AddSingleton<Runtime.IPiWorkerProcessFactory, Runtime.NodeWorkerProcessFactory>()
+            .AddSingleton<Runtime.IPiOrchestrationRequestHandler, Runtime.PiOrchestrationRequestHandler>()
+            .AddSingleton<Runtime.PiRuntimeAdapter>()
+            .AddSingleton<IAgentRuntimeAdapter>(static sp => sp.GetRequiredService<Runtime.PiRuntimeAdapter>())
+            .AddSingleton<PiRootSessionSupervisor>()
             .AddSingleton<NodeWorker>()
             .AddHostedService(static sp => sp.GetRequiredService<NodeWorker>());
 

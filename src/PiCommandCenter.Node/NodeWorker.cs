@@ -8,8 +8,10 @@ namespace PiCommandCenter.Node;
 /// <summary>
 /// Node background service: connects outbound to the Control Plane, registers on
 /// every connection, replays locally spooled unacknowledged events, heartbeats,
-/// and claims work when idle. Active claims are renewed before expiry; session
-/// completion events are only ever produced by a real runtime session.
+/// and claims work when idle. Each claimed assignment starts exactly one
+/// restricted Pi root session via <see cref="PiRootSessionSupervisor"/>; active
+/// claims are renewed before expiry; session completion events are only ever
+/// produced by the real runtime session.
 /// </summary>
 public sealed class NodeWorker : BackgroundService
 {
@@ -20,6 +22,7 @@ public sealed class NodeWorker : BackgroundService
     private readonly NodeOptions _options;
     private readonly NodeTransportClient _transport;
     private readonly INodeEventSpool _spool;
+    private readonly PiRootSessionSupervisor _supervisor;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<NodeWorker> _logger;
     private readonly object _claimLock = new();
@@ -29,17 +32,20 @@ public sealed class NodeWorker : BackgroundService
         IOptions<NodeOptions> options,
         NodeTransportClient transport,
         INodeEventSpool spool,
+        PiRootSessionSupervisor supervisor,
         TimeProvider timeProvider,
         ILogger<NodeWorker> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(spool);
+        ArgumentNullException.ThrowIfNull(supervisor);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
         _options = options.Value;
         _transport = transport;
         _spool = spool;
+        _supervisor = supervisor;
         _timeProvider = timeProvider;
         _logger = logger;
 
@@ -71,7 +77,8 @@ public sealed class NodeWorker : BackgroundService
                     _logger.LogWarning(ex, "Node loop failed; retrying in {Backoff}.", ReconnectBackoff);
                 }
 
-                ClearActiveClaim();
+                // A disconnected transport no longer owns the claim; stop the session it ran.
+                await DropActiveClaimAsync("transport_disconnected").ConfigureAwait(false);
                 await _transport.StopAsync(CancellationToken.None).ConfigureAwait(false);
                 await SafeDelayAsync(ReconnectBackoff, stoppingToken).ConfigureAwait(false);
             }
@@ -79,7 +86,9 @@ public sealed class NodeWorker : BackgroundService
         finally
         {
             _transport.Connected -= OnConnectedAsync;
+            await DropActiveClaimAsync("node_shutdown").ConfigureAwait(false);
             await _transport.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            await _supervisor.DisposeAsync().ConfigureAwait(false);
             await _spool.DisposeAsync().ConfigureAwait(false);
             _logger.LogInformation("Node {NodeId} stopped.", _options.Id);
         }
@@ -88,7 +97,7 @@ public sealed class NodeWorker : BackgroundService
     private async Task OnConnectedAsync()
     {
         // A fresh (re)connection resets claim ownership and replays anything spooled.
-        ClearActiveClaim();
+        await DropActiveClaimAsync("reconnect").ConfigureAwait(false);
         await ReplayPendingEventsAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
@@ -102,8 +111,10 @@ public sealed class NodeWorker : BackgroundService
 
             if (now - lastHeartbeat >= TimeSpan.FromSeconds(_options.HeartbeatSeconds))
             {
-                // Only real locally-active runtime sessions are reported; none exist yet.
-                await _transport.HeartbeatAsync([], CancellationToken.None).ConfigureAwait(false);
+                // Report the real locally-active runtime session ids.
+                var activeSessionIds = _supervisor.ActiveSessionIds;
+                await _transport.HeartbeatAsync(activeSessionIds, CancellationToken.None)
+                    .ConfigureAwait(false);
                 lastHeartbeat = now;
             }
 
@@ -118,7 +129,7 @@ public sealed class NodeWorker : BackgroundService
         var claim = _activeClaim;
         if (claim is not null)
         {
-            // Renew before expiry: renew at two-thirds of the remaining lease window.
+            // Renew before expiry: renew at half of the remaining lease window.
             var remaining = claim.LeaseExpiresAt - now;
             var halfLife = remaining >= TimeSpan.Zero ? remaining / 2 : TimeSpan.Zero;
             if (remaining <= halfLife)
@@ -133,7 +144,7 @@ public sealed class NodeWorker : BackgroundService
                     _logger.LogInformation(
                         "Claim for request {RequestId} was not renewed; it was lost or expired.",
                         claim.RequestId);
-                    ClearActiveClaim();
+                    await DropActiveClaimAsync("claim_lost").ConfigureAwait(false);
                 }
             }
 
@@ -142,14 +153,31 @@ public sealed class NodeWorker : BackgroundService
 
         var newClaim = await _transport.ClaimNextAsync(_options.ClaimLeaseSeconds, cancellationToken)
             .ConfigureAwait(false);
-        if (newClaim is not null)
+        if (newClaim is null)
         {
-            _logger.LogInformation(
-                "Claimed request {RequestId} (project {ProjectId}) until {LeaseExpiresAt}.",
-                newClaim.RequestId,
-                newClaim.ProjectId,
-                newClaim.LeaseExpiresAt);
-            SetActiveClaim(newClaim);
+            return;
+        }
+
+        _logger.LogInformation(
+            "Claimed request {RequestId} (project {ProjectId}) until {LeaseExpiresAt}.",
+            newClaim.RequestId,
+            newClaim.ProjectId,
+            newClaim.LeaseExpiresAt);
+        SetActiveClaim(newClaim);
+
+        try
+        {
+            // One restricted Pi root session per claimed assignment; its lifecycle events are
+            // appended durably by the supervisor.
+            await _supervisor.StartForClaimAsync(newClaim, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "Failed to start the root session for request {RequestId}; releasing the claim.",
+                newClaim.RequestId);
+            await DropActiveClaimAsync("root_session_start_failed").ConfigureAwait(false);
         }
     }
 
@@ -177,19 +205,26 @@ public sealed class NodeWorker : BackgroundService
         }
     }
 
+    private async Task DropActiveClaimAsync(string reason)
+    {
+        RequestClaimMessage? claim;
+        lock (_claimLock)
+        {
+            claim = _activeClaim;
+            _activeClaim = null;
+        }
+
+        if (claim is not null)
+        {
+            await _supervisor.StopForRequestAsync(claim.RequestId, reason).ConfigureAwait(false);
+        }
+    }
+
     private void SetActiveClaim(RequestClaimMessage claim)
     {
         lock (_claimLock)
         {
             _activeClaim = claim;
-        }
-    }
-
-    private void ClearActiveClaim()
-    {
-        lock (_claimLock)
-        {
-            _activeClaim = null;
         }
     }
 

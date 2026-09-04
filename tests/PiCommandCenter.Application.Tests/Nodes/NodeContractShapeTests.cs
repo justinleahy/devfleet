@@ -39,10 +39,18 @@ public class NodeContractShapeTests
     {
         var claimedAt = DateTimeOffset.UtcNow;
         var dto = new RequestClaimDto(
-            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "token", claimedAt, claimedAt.AddMinutes(1));
+            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "token", claimedAt, claimedAt.AddMinutes(1),
+            "/repos/hub", "main", "Hub request", "Do hub work", "Development", "Standard");
 
         Assert.False(string.IsNullOrWhiteSpace(dto.ClaimToken));
         Assert.True(dto.LeaseExpiresAt > dto.ClaimedAt);
+        Assert.Equal("/repos/hub", dto.RepositoryPath);
+        Assert.Equal("main", dto.DefaultBranch);
+        Assert.Equal("Hub request", dto.Title);
+        Assert.Equal("Do hub work", dto.Prompt);
+        Assert.Equal("Development", dto.Kind);
+        Assert.Equal("Standard", dto.RiskLevel);
+
     }
 
     [Fact]

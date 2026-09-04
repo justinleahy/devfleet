@@ -5,12 +5,15 @@
 @using PiCommandCenter.Application.Nodes
 @using PiCommandCenter.Application.Projects
 @using PiCommandCenter.Application.Requests
+@using PiCommandCenter.Application.Sessions
 @using PiCommandCenter.Domain
 @using PiCommandCenter.Domain.Nodes
 @using PiCommandCenter.Domain.Requests
+@using PiCommandCenter.Domain.Sessions
 @inject IProjectCatalog Catalog
 @inject IRequestQueue Queue
 @inject INodeRegistry NodeRegistry
+@inject IAgentSessionStore SessionStore
 @inject IClock Clock
 @inject IToastService ToastService
 
@@ -44,9 +47,9 @@
                 <dd>@_activeProjects</dd>
             </div>
             <div class="metric">
-                <dt>Online nodes</dt>
-                <dd>@_onlineNodes</dd>
-                <p class="metric-note">@NodeCountNote()</p>
+                <dt>Active agents</dt>
+                <dd>@_activeSessions</dd>
+                <p class="metric-note">@SessionCountNote()</p>
             </div>
             <div class="metric">
                 <dt>Queued requests</dt>
@@ -54,14 +57,15 @@
             </div>
             <div class="metric">
                 <dt>Needs attention</dt>
-                <dd>0</dd>
-                <p class="metric-note">No signals are collected yet.</p>
+                <dd>@_attentionSessions</dd>
+                <p class="metric-note">@AttentionNote()</p>
             </div>
         </dl>
     </section>
 
     <section aria-labelledby="nodes-heading">
         <h2 id="nodes-heading">Nodes</h2>
+        <p class="panel-lead">@NodeCountNote()</p>
 
         @if (_nodeError is not null)
         {
@@ -325,6 +329,7 @@
     private DateTimeOffset _snapshot;
     private string? _loadError;
     private string? _nodeError;
+    private string? _sessionError;
     private bool _loading = true;
     private bool _submitting;
     private bool _validationPassed;
@@ -332,6 +337,9 @@
     private int _activeProjects;
     private int _queuedRequests;
     private int _onlineNodes;
+    private int _activeSessions;
+    private int _attentionSessions;
+    private int _trackedSessions;
 
     protected override Task OnInitializedAsync() => ReloadAsync();
 
@@ -349,17 +357,27 @@
             _counts.Clear();
 
             var queued = 0;
+            var agents = 0;
+            var attention = 0;
+            var tracked = 0;
+            _sessionError = null;
             foreach (var project in projects)
             {
                 var requests = await Queue.ListAsync(new ProjectId(project.Id), CancellationToken.None);
-                var counts = Tally(requests);
+                var counts = await TallyAsync(requests);
                 _counts[project.Id] = counts;
                 queued += counts.Queued;
+                agents += counts.Agents;
+                attention += counts.Attention;
+                tracked += counts.TrackedSessions;
             }
 
             _projects = projects;
             _activeProjects = projects.Count(p => p.Enabled);
             _queuedRequests = queued;
+            _activeSessions = agents;
+            _attentionSessions = attention;
+            _trackedSessions = tracked;
         }
         catch (Exception ex)
         {
@@ -368,6 +386,9 @@
             _counts.Clear();
             _activeProjects = 0;
             _queuedRequests = 0;
+            _activeSessions = 0;
+            _attentionSessions = 0;
+            _trackedSessions = 0;
         }
         finally
         {
@@ -422,6 +443,33 @@
             1 => "of 1 known node",
             _ => $"of {_nodes.Count} known nodes",
         };
+    }
+
+    private string SessionCountNote()
+    {
+        if (_sessionError is not null)
+        {
+            return "Session projection unavailable.";
+        }
+
+        return _trackedSessions switch
+        {
+            0 => "No agent session has registered.",
+            1 => "of 1 tracked session",
+            _ => $"of {_trackedSessions} tracked sessions",
+        };
+    }
+
+    private string AttentionNote()
+    {
+        if (_sessionError is not null)
+        {
+            return "Session projection unavailable.";
+        }
+
+        return _attentionSessions == 0
+            ? "No agent reports input, approval, conflict, or error."
+            : "Agent sessions are reporting an attention signal.";
     }
 
     private static Appearance BadgeAppearance(NodeStatus status) =>
@@ -536,11 +584,14 @@
         }
     }
 
-    private static QueueCounts Tally(IReadOnlyList<WorkRequestDto> requests)
+    private async Task<QueueCounts> TallyAsync(IReadOnlyList<WorkRequestDto> requests)
     {
         var active = 0;
         var blocked = 0;
         var queued = 0;
+        var agents = 0;
+        var attention = 0;
+        var tracked = 0;
 
         foreach (var request in requests)
         {
@@ -562,18 +613,56 @@
                 default:
                     break;
             }
+
+            foreach (var session in await ListSessionsAsync(request.Id))
+            {
+                tracked++;
+                if (IsRunning(session))
+                {
+                    agents++;
+                }
+
+                if (session.Attention != AgentAttention.None)
+                {
+                    attention++;
+                }
+            }
         }
 
-        return new QueueCounts(active, blocked, queued);
+        return new QueueCounts(active, blocked, queued, agents, attention, tracked);
     }
+
+    private async Task<IReadOnlyList<AgentSessionDto>> ListSessionsAsync(Guid requestId)
+    {
+        try
+        {
+            return await SessionStore.ListAsync(new WorkRequestId(requestId), CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _sessionError ??= ex.Message;
+            return Array.Empty<AgentSessionDto>();
+        }
+    }
+
+    private static bool IsRunning(AgentSessionDto session) =>
+        session.EndedAt is null
+        && session.Liveness != AgentLiveness.Exited
+        && session.WorkState is not (AgentWorkState.Completed or AgentWorkState.Failed or AgentWorkState.Cancelled);
 
     private string Summarize(Guid projectId)
     {
         var counts = _counts.TryGetValue(projectId, out var value) ? value : default;
-        return $"{counts.Active} active \u00b7 {counts.Blocked} blocked \u00b7 {counts.Queued} queued";
+        return $"{counts.Active} active \u00b7 {counts.Blocked} blocked \u00b7 {counts.Queued} queued \u00b7 {counts.Agents} agents";
     }
 
-    private readonly record struct QueueCounts(int Active, int Blocked, int Queued);
+    private readonly record struct QueueCounts(
+        int Active,
+        int Blocked,
+        int Queued,
+        int Agents,
+        int Attention,
+        int TrackedSessions);
 
     private sealed class RegistrationForm
     {

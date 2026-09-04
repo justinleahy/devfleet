@@ -1,13 +1,18 @@
 using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Application.Transport;
 using PiCommandCenter.Infrastructure.Persistence;
+using PiCommandCenter.Infrastructure.Sessions;
 
 namespace PiCommandCenter.Infrastructure.Transport;
 
 /// <summary>
 /// EF Core backed event sink. Events are appended transactionally; the primary key on
 /// <c>SessionEvents.EventId</c> makes redelivery idempotent — duplicates are skipped, and
-/// every delivered id (new and duplicate) is acknowledged exactly once per batch.
+/// every delivered id (new and duplicate) is acknowledged exactly once per batch. Each newly
+/// appended event is, in the same <c>SaveChanges</c> transaction, applied to the
+/// <c>AgentSessions</c> projection: recognized lifecycle types drive the aggregate's status
+/// dimensions, unknown types are stored but change no status, and a duplicate event id never
+/// re-applies.
 /// </summary>
 public sealed class NodeEventSink(TimeProvider clock, ControlPlaneDbContext db) : INodeEventSink
 {
@@ -48,10 +53,20 @@ public sealed class NodeEventSink(TimeProvider clock, ControlPlaneDbContext db) 
                 ReceivedAtUtcTicks = receivedAtUtcTicks,
                 PayloadJson = nodeEvent.PayloadJson,
             });
+
+            // Mark the id seen so a second event with the same id inside this batch is
+            // collapsed instead of colliding on the tracked primary key.
             knownIdSet.Add(nodeEvent.EventId);
+
+            // Projection transition for the same event, committed atomically with the append.
+            if (!string.IsNullOrWhiteSpace(nodeEvent.SessionId))
+            {
+                var normalized = AgentSessionProjector.ToNormalizedEvent(nodeEvent);
+                await AgentSessionProjector.ApplyAsync(db, normalized, cancellationToken);
+            }
         }
 
-        // A single SaveChanges persists all new rows in one transaction.
+        // A single SaveChanges persists all new rows and projection transitions in one transaction.
         await db.SaveChangesAsync(cancellationToken);
 
         // Duplicate deliveries are acknowledged like fresh events: the sender spool clears.
