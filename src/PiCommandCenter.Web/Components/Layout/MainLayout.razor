@@ -25,11 +25,7 @@
         <FluentStack Class="shell" Orientation="Orientation.Horizontal" HorizontalGap="0" Width="100%">
             <nav class="shell-nav" aria-label="Command center sections">
                 <FluentNavMenu Width="240" Title="Command center sections">
-                    <FluentNavLink Href="/" Match="NavLinkMatch.All">Overview</FluentNavLink>
-                    <FluentNavLink Disabled="true"
-                                   Tooltip="Fleet inventory arrives with node enrollment.">
-                        Fleet
-                    </FluentNavLink>
+                    <FluentNavLink Href="/" Match="NavLinkMatch.All">Fleet</FluentNavLink>
                     <FluentNavLink Disabled="true"
                                    Tooltip="Attention queue arrives with request routing.">
                         Attention
@@ -51,7 +47,7 @@
                          Width="100%">
                 <span>Pi Command Center</span>
                 <FluentSpacer />
-                <span>Scaffold surface &mdash; only control-plane self-reported state is shown.</span>
+                <span>Projects and request queues are live; sessions and attention signals are not collected yet.</span>
             </FluentStack>
         </FluentFooter>
     </FluentLayout>

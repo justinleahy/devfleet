@@ -1,0 +1,384 @@
+@page "/projects/{ProjectId:guid}"
+@namespace PiCommandCenter.Web.Components.Pages
+@rendermode InteractiveServer
+@using PiCommandCenter.Application
+@using PiCommandCenter.Application.Projects
+@using PiCommandCenter.Application.Requests
+@using PiCommandCenter.Domain
+@using PiCommandCenter.Domain.Requests
+@inject IProjectCatalog Catalog
+@inject IRequestQueue Queue
+@inject IClock Clock
+@inject IToastService ToastService
+
+<PageTitle>@(_project?.DisplayName ?? "Project") &middot; Pi Command Center</PageTitle>
+
+@if (_loading)
+{
+    <div class="state-block" role="status">
+        <FluentProgressRing aria-label="Loading project" />
+        <span>Loading project</span>
+    </div>
+}
+else if (_project is null)
+{
+    <FluentStack Orientation="Orientation.Vertical" VerticalGap="16" Width="100%">
+        <h1>Project not found</h1>
+        <p class="page-lead">No project is registered with that id.</p>
+        <a class="back-link" href="/">Back to fleet</a>
+    </FluentStack>
+}
+else
+{
+    var project = _project;
+
+    <FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+
+        <header class="page-head">
+            <a class="back-link" href="/">Back to fleet</a>
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="12"
+                         Width="100%">
+                <h1>@project.DisplayName</h1>
+                <FluentBadge Appearance="@(project.Enabled ? Appearance.Accent : Appearance.Neutral)">
+                    @(project.Enabled ? "Enabled" : "Disabled")
+                </FluentBadge>
+                <FluentSpacer />
+                <FluentButton Appearance="Appearance.Stealth" OnClick="ReloadAsync" Disabled="@_submitting">
+                    Reload
+                </FluentButton>
+            </FluentStack>
+            <p class="page-lead">
+                Queue ordering is priority first, then creation time. Snapshot @_snapshot.ToString("u").
+            </p>
+        </header>
+
+        @if (_loadError is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Could not load requests"
+                              AllowDismiss="false">
+                @_loadError
+            </FluentMessageBar>
+        }
+
+        <FluentCard>
+            <section class="panel" aria-labelledby="metadata-heading">
+                <h2 id="metadata-heading" class="visually-hidden">Project metadata</h2>
+                <dl class="facts">
+                    <dt>Repository path</dt>
+                    <dd class="path">@project.RepositoryPath</dd>
+                    <dt>Default branch</dt>
+                    <dd>@project.DefaultBranch</dd>
+                    <dt>Node</dt>
+                    <dd class="path">@project.NodeId</dd>
+                    <dt>Node status</dt>
+                    <dd>Not reporting</dd>
+                    <dt>Write slots</dt>
+                    <dd>@project.MaxActiveWriteRequests</dd>
+                    <dt>Read-only slots</dt>
+                    <dd>@project.MaxReadOnlyRequests</dd>
+                    <dt>Child agents per request</dt>
+                    <dd>@project.MaxChildAgentsPerRequest</dd>
+                </dl>
+            </section>
+        </FluentCard>
+
+        <FluentCard>
+            <section class="panel" aria-labelledby="composer-heading">
+                <h2 id="composer-heading">New request</h2>
+                <p class="panel-lead">
+                    A queued request waits for a node to claim it. Development work may change files;
+                    analysis and review are read-only.
+                </p>
+
+                @if (_composerErrors.Count > 0)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Error"
+                                      Title="Could not queue request"
+                                      AllowDismiss="false">
+                        @if (_composerErrors.Count == 1)
+                        {
+                            @_composerErrors[0]
+                        }
+                        else
+                        {
+                            <ul class="error-list">
+                                @foreach (var error in _composerErrors)
+                                {
+                                    <li>@error</li>
+                                }
+                            </ul>
+                        }
+                    </FluentMessageBar>
+                }
+
+                @if (_queuedTitle is not null)
+                {
+                    <div role="status">
+                        <FluentMessageBar Intent="MessageIntent.Success" AllowDismiss="false">
+                            Queued @_queuedTitle
+                        </FluentMessageBar>
+                    </div>
+                }
+
+                <FluentTextField @bind-Value="_title"
+                                 Label="Title"
+                                 Required="true"
+                                 Placeholder="Add strict reservation handoff"
+                                 Class="field field-wide" />
+
+                <FluentTextArea @bind-Value="_prompt"
+                                Label="Prompt"
+                                Required="true"
+                                Rows="5"
+                                Placeholder="Implement atomic reservation handoff with stale-token rejection."
+                                Class="field field-wide" />
+
+                <div class="form-grid">
+                    <FluentSelect TOption="string"
+                                  Label="Kind"
+                                  Items="@KindNames"
+                                  OptionText="@(name => name)"
+                                  OptionValue="@(name => name)"
+                                  @bind-Value="_kind"
+                                  Class="field" />
+                    <FluentSelect TOption="string"
+                                  Label="Priority"
+                                  Items="@PriorityNames"
+                                  OptionText="@(name => name)"
+                                  OptionValue="@(name => name)"
+                                  @bind-Value="_priority"
+                                  Class="field" />
+                    <FluentSelect TOption="string"
+                                  Label="Risk"
+                                  Items="@RiskNames"
+                                  OptionText="@(name => name)"
+                                  OptionValue="@(name => name)"
+                                  @bind-Value="_risk"
+                                  Class="field" />
+                </div>
+
+                <FluentStack Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
+                    <FluentButton Appearance="Appearance.Accent" OnClick="EnqueueAsync" Loading="@_submitting">
+                        Queue request
+                    </FluentButton>
+                </FluentStack>
+            </section>
+        </FluentCard>
+
+        @foreach (var group in RequestGroups())
+        {
+            <section aria-labelledby="@group.HeadingId">
+                <h2 id="@group.HeadingId">@group.Heading</h2>
+                @if (group.Requests.Count == 0)
+                {
+                    <p class="panel-empty">@group.EmptyText</p>
+                }
+                else
+                {
+                    <ul class="request-list">
+                        @foreach (var request in group.Requests)
+                        {
+                            <li>
+                                <FluentCard>
+                                    <article class="request-row">
+                                        <FluentStack Orientation="Orientation.Horizontal"
+                                                     VerticalAlignment="VerticalAlignment.Center"
+                                                     HorizontalGap="8">
+                                            <h3>@request.Title</h3>
+                                            <FluentSpacer />
+                                            <FluentBadge Appearance="Appearance.Accent">@request.StatusName</FluentBadge>
+                                            <FluentBadge Appearance="Appearance.Neutral">@request.PriorityName</FluentBadge>
+                                            <FluentBadge Appearance="Appearance.Neutral">@request.KindName</FluentBadge>
+                                            <FluentBadge Appearance="Appearance.Neutral">@request.RiskLevelName</FluentBadge>
+                                        </FluentStack>
+                                        <p class="request-prompt">@request.Prompt</p>
+                                        <p class="request-meta">
+                                            Created @request.CreatedAt.ToString("u")
+                                            @if (request.BlockedPhaseName is not null)
+                                            {
+                                                <span>&nbsp;&middot; blocked in @request.BlockedPhaseName</span>
+                                            }
+                                        </p>
+                                    </article>
+                                </FluentCard>
+                            </li>
+                        }
+                    </ul>
+                }
+            </section>
+        }
+
+        <section aria-labelledby="reservations-heading">
+            <h2 id="reservations-heading">Active reservations</h2>
+            <p class="panel-empty">
+                0 reservations. Leases are issued when sessions start, which is not wired yet.
+            </p>
+        </section>
+    </FluentStack>
+}
+
+@code {
+    private static readonly string[] KindNames = Enum.GetNames<WorkRequestKind>();
+    private static readonly string[] PriorityNames = Enum.GetNames<RequestPriority>();
+    private static readonly string[] RiskNames = Enum.GetNames<RiskLevel>();
+
+    [Parameter]
+    public Guid ProjectId { get; set; }
+
+    private List<WorkRequestDto> _active = [];
+    private List<WorkRequestDto> _queued = [];
+    private List<WorkRequestDto> _closed = [];
+
+    private IReadOnlyList<string> _composerErrors = Array.Empty<string>();
+    private ProjectDto? _project;
+    private DateTimeOffset _snapshot;
+    private string? _loadError;
+    private string? _queuedTitle;
+    private string? _title = string.Empty;
+    private string? _prompt = string.Empty;
+    private string? _kind = nameof(WorkRequestKind.Development);
+    private string? _priority = nameof(RequestPriority.Normal);
+    private string? _risk = nameof(RiskLevel.Standard);
+    private bool _loading = true;
+    private bool _submitting;
+
+    protected override Task OnParametersSetAsync() => ReloadAsync();
+
+    private readonly record struct RequestGroup(
+        string HeadingId,
+        string Heading,
+        string EmptyText,
+        IReadOnlyList<WorkRequestDto> Requests);
+
+    private RequestGroup[] RequestGroups() =>
+    [
+        new("active-heading", "Active", "No active request.", _active),
+        new("queue-heading", "Queue", "Nothing queued.", _queued),
+        new("completed-heading", "Recently completed", "No completed requests yet.", _closed),
+    ];
+
+    private async Task ReloadAsync()
+    {
+        _loading = true;
+        _loadError = null;
+        Partition(Array.Empty<WorkRequestDto>());
+        StateHasChanged();
+
+        try
+        {
+            if (ProjectId == Guid.Empty)
+            {
+                _project = null;
+                return;
+            }
+
+            var id = new ProjectId(ProjectId);
+            _project = await Catalog.GetAsync(id, CancellationToken.None);
+            Partition(await Queue.ListAsync(id, CancellationToken.None));
+        }
+        catch (ProjectNotFoundException)
+        {
+            _project = null;
+        }
+        catch (Exception ex)
+        {
+            _loadError = ex.Message;
+        }
+        finally
+        {
+            _snapshot = Clock.UtcNow;
+            _loading = false;
+        }
+    }
+
+    private void Partition(IReadOnlyList<WorkRequestDto> requests)
+    {
+        _active = [];
+        _queued = [];
+        _closed = [];
+
+        foreach (var request in requests)
+        {
+            switch ((WorkRequestStatus)request.Status)
+            {
+                case WorkRequestStatus.Queued:
+                    _queued.Add(request);
+                    break;
+                case WorkRequestStatus.Completed:
+                case WorkRequestStatus.Failed:
+                case WorkRequestStatus.Cancelled:
+                    _closed.Add(request);
+                    break;
+                default:
+                    _active.Add(request);
+                    break;
+            }
+        }
+    }
+
+    private async Task EnqueueAsync()
+    {
+        _composerErrors = Array.Empty<string>();
+        _queuedTitle = null;
+
+        var errors = new List<string>(2);
+        if (string.IsNullOrWhiteSpace(_title))
+        {
+            errors.Add("Title is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(_prompt))
+        {
+            errors.Add("Prompt is required.");
+        }
+
+        if (errors.Count > 0)
+        {
+            _composerErrors = errors;
+            return;
+        }
+
+        _submitting = true;
+        try
+        {
+            var command = new QueueWorkRequestCommand(
+                Parse(_kind, WorkRequestKind.Development),
+                Parse(_priority, RequestPriority.Normal),
+                Parse(_risk, RiskLevel.Standard),
+                _title!.Trim(),
+                _prompt!.Trim());
+
+            var request = await Queue.EnqueueAsync(new ProjectId(ProjectId), command, CancellationToken.None);
+
+            _queuedTitle = request.Title;
+            _title = string.Empty;
+            _prompt = string.Empty;
+            _kind = nameof(WorkRequestKind.Development);
+            _priority = nameof(RequestPriority.Normal);
+            _risk = nameof(RiskLevel.Standard);
+
+            ToastService.ShowSuccess($"Queued {request.Title}");
+            Partition(await Queue.ListAsync(new ProjectId(ProjectId), CancellationToken.None));
+            _snapshot = Clock.UtcNow;
+        }
+        catch (ProjectNotFoundException)
+        {
+            _composerErrors = new[] { "This project is no longer registered." };
+        }
+        catch (Exception ex)
+        {
+            _composerErrors = new[] { ex.Message };
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+
+    private static TEnum Parse<TEnum>(string? name, TEnum fallback)
+        where TEnum : struct, Enum =>
+        Enum.TryParse<TEnum>(name, out var parsed) ? parsed : fallback;
+}

@@ -2,119 +2,499 @@
 @namespace PiCommandCenter.Web.Components.Pages
 @rendermode InteractiveServer
 @using PiCommandCenter.Application
+@using PiCommandCenter.Application.Projects
+@using PiCommandCenter.Application.Requests
+@using PiCommandCenter.Domain
+@using PiCommandCenter.Domain.Requests
+@inject IProjectCatalog Catalog
+@inject IRequestQueue Queue
 @inject IClock Clock
 @inject IToastService ToastService
 
-<PageTitle>Overview &middot; Pi Command Center</PageTitle>
+<PageTitle>Fleet &middot; Pi Command Center</PageTitle>
 
 <FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
 
     <header class="page-head">
-        <h1>Pi Command Center</h1>
-        <p class="page-lead">
-            Control plane is running. Protocol version: @(PiCommandCenter.Contracts.ProtocolVersion.Current).
-            Server time: @_snapshot.ToString("u")
-        </p>
+        <FluentStack Orientation="Orientation.Horizontal"
+                     VerticalAlignment="VerticalAlignment.Bottom"
+                     HorizontalGap="16"
+                     Width="100%">
+            <FluentStack Orientation="Orientation.Vertical" VerticalGap="4" Width="auto">
+                <h1>Fleet dashboard</h1>
+                <p class="page-lead">
+                    Registered projects and their queued work, read straight from the control-plane
+                    database. Snapshot @_snapshot.ToString("u").
+                </p>
+            </FluentStack>
+            <FluentSpacer />
+            <FluentButton Appearance="Appearance.Accent" OnClick="OpenRegistration">
+                Register project
+            </FluentButton>
+        </FluentStack>
     </header>
 
-    <FluentMessageBar Intent="MessageIntent.Info"
-                      Title="Scaffold surface"
-                      AllowDismiss="false">
-        Everything below reports control-plane state only. Node enrollment, project workspaces and
-        request routing are not wired yet, so no fleet telemetry is collected or displayed.
-    </FluentMessageBar>
+    <section class="metrics" aria-label="Fleet summary">
+        <dl class="metric-row">
+            <div class="metric">
+                <dt>Active projects</dt>
+                <dd>@_activeProjects</dd>
+            </div>
+            <div class="metric">
+                <dt>Active agents</dt>
+                <dd>0</dd>
+                <p class="metric-note">Sessions are not started yet.</p>
+            </div>
+            <div class="metric">
+                <dt>Queued requests</dt>
+                <dd>@_queuedRequests</dd>
+            </div>
+            <div class="metric">
+                <dt>Needs attention</dt>
+                <dd>0</dd>
+                <p class="metric-note">No signals are collected yet.</p>
+            </div>
+        </dl>
+    </section>
 
-    <FluentGrid Spacing="3" Justify="JustifyContent.FlexStart" Width="100%">
+    <section aria-labelledby="projects-heading">
+        <FluentStack Orientation="Orientation.Horizontal"
+                     VerticalAlignment="VerticalAlignment.Center"
+                     HorizontalGap="12"
+                     Width="100%">
+            <h2 id="projects-heading">Projects</h2>
+            <FluentSpacer />
+            <FluentButton Appearance="Appearance.Stealth" OnClick="ReloadAsync" Disabled="@_loading">
+                Reload
+            </FluentButton>
+        </FluentStack>
 
-        <FluentGridItem xs="12" md="6" xl="4">
-            <FluentCard Height="100%">
-                <section class="card-body" aria-labelledby="card-fleet">
-                    <FluentStack Orientation="Orientation.Horizontal"
-                                 VerticalAlignment="VerticalAlignment.Center"
-                                 HorizontalGap="8">
-                        <h2 id="card-fleet">Fleet</h2>
-                        <FluentSpacer />
-                        <FluentBadge Appearance="Appearance.Neutral">No nodes enrolled</FluentBadge>
-                    </FluentStack>
+        @if (_loadError is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Could not load projects"
+                              AllowDismiss="false">
+                @_loadError
+            </FluentMessageBar>
+        }
+        else if (_loading)
+        {
+            <div class="state-block" role="status">
+                <FluentProgressRing aria-label="Loading projects" />
+                <span>Loading projects</span>
+            </div>
+        }
+        else if (_projects.Count == 0)
+        {
+            <FluentCard Class="empty-card">
+                <div class="state-empty">
+                    <h3>No projects registered</h3>
                     <p>
-                        Nodes appear here once the agent transport is in place and a device completes
-                        enrollment against this control plane.
+                        Register a local Git repository to give the fleet somewhere to work. The path
+                        must exist on this machine and contain a repository.
                     </p>
-                    <FluentButton Class="card-action"
-                                  Appearance="Appearance.Neutral"
-                                  Disabled="true"
-                                  Title="Enrollment ships with the node agent transport.">
-                        Enroll a node
+                    <FluentButton Appearance="Appearance.Accent" OnClick="OpenRegistration">
+                        Register project
                     </FluentButton>
-                </section>
+                </div>
             </FluentCard>
-        </FluentGridItem>
+        }
+        else
+        {
+            <FluentGrid Spacing="3" Justify="JustifyContent.FlexStart" Width="100%">
+                @foreach (var project in _projects)
+                {
+                    <FluentGridItem xs="12" md="6" xl="4">
+                        <FluentCard Height="100%">
+                            <article class="project-card">
+                                <FluentStack Orientation="Orientation.Horizontal"
+                                             VerticalAlignment="VerticalAlignment.Center"
+                                             HorizontalGap="8">
+                                    <h3>
+                                        <a href="@($"/projects/{project.Id}")">@project.DisplayName</a>
+                                    </h3>
+                                    <FluentSpacer />
+                                    <FluentBadge Appearance="@(project.Enabled ? Appearance.Accent : Appearance.Neutral)">
+                                        @(project.Enabled ? "Enabled" : "Disabled")
+                                    </FluentBadge>
+                                </FluentStack>
 
-        <FluentGridItem xs="12" md="6" xl="4">
-            <FluentCard Height="100%">
-                <section class="card-body" aria-labelledby="card-attention">
-                    <FluentStack Orientation="Orientation.Horizontal"
-                                 VerticalAlignment="VerticalAlignment.Center"
-                                 HorizontalGap="8">
-                        <h2 id="card-attention">Attention</h2>
-                        <FluentSpacer />
-                        <FluentBadge Appearance="Appearance.Neutral">Not collecting signals</FluentBadge>
-                    </FluentStack>
-                    <p>
-                        Approvals, failed runs and stalled requests will queue here. Nothing is being
-                        watched yet, so an empty queue is not evidence of a healthy fleet.
-                    </p>
-                    <FluentButton Class="card-action"
-                                  Appearance="Appearance.Neutral"
-                                  Disabled="true"
-                                  Title="The attention queue ships with request routing.">
-                        Open queue
-                    </FluentButton>
-                </section>
-            </FluentCard>
-        </FluentGridItem>
+                                <p class="project-summary">@Summarize(project.Id)</p>
 
-        <FluentGridItem xs="12" md="12" xl="4">
-            <FluentCard Height="100%">
-                <section class="card-body" aria-labelledby="card-plane">
-                    <FluentStack Orientation="Orientation.Horizontal"
-                                 VerticalAlignment="VerticalAlignment.Center"
-                                 HorizontalGap="8">
-                        <h2 id="card-plane">Control plane</h2>
-                        <FluentSpacer />
-                        <FluentBadge Appearance="Appearance.Accent">Serving this session</FluentBadge>
-                    </FluentStack>
-                    <dl class="facts">
-                        <dt>Render mode</dt>
-                        <dd>Interactive Server</dd>
-                        <dt>Protocol</dt>
-                        <dd>v@(PiCommandCenter.Contracts.ProtocolVersion.Current)</dd>
-                        <dt>Snapshot taken</dt>
-                        <dd>@_snapshot.ToString("u")</dd>
-                    </dl>
-                    <FluentStack Class="card-action" Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
-                        <FluentButton Appearance="Appearance.Accent" OnClick="Refresh">
-                            Refresh snapshot
-                        </FluentButton>
-                        <FluentAnchor Href="/health" Appearance="Appearance.Outline" Target="_blank">
-                            Health endpoint
-                        </FluentAnchor>
-                    </FluentStack>
-                </section>
-            </FluentCard>
-        </FluentGridItem>
+                                <dl class="facts">
+                                    <dt>Repository path</dt>
+                                    <dd class="path">@project.RepositoryPath</dd>
+                                    <dt>Default branch</dt>
+                                    <dd>@project.DefaultBranch</dd>
+                                    <dt>Node</dt>
+                                    <dd class="path">@project.NodeId</dd>
+                                </dl>
 
-    </FluentGrid>
+                                <FluentStack Class="card-action" Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
+                                    <FluentAnchor Href="@($"/projects/{project.Id}")" Appearance="Appearance.Outline">
+                                        Open project
+                                    </FluentAnchor>
+                                </FluentStack>
+                            </article>
+                        </FluentCard>
+                    </FluentGridItem>
+                }
+            </FluentGrid>
+        }
+    </section>
 </FluentStack>
 
+<FluentDialog @bind-Hidden="_registrationHidden"
+              Modal="true"
+              TrapFocus="true"
+              PreventScroll="true"
+              AriaLabelledby="register-heading">
+    <div class="dialog-shell">
+        <h2 id="register-heading">Register project</h2>
+        <p class="dialog-lead">
+            The repository path is validated on this node before anything is written. Registration
+            binds the project to this control plane's node identity.
+        </p>
+
+        @if (_registrationErrors.Count > 0)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Registration failed"
+                              AllowDismiss="false">
+                @if (_registrationErrors.Count == 1)
+                {
+                    @_registrationErrors[0]
+                }
+                else
+                {
+                    <ul class="error-list">
+                        @foreach (var error in _registrationErrors)
+                        {
+                            <li>@error</li>
+                        }
+                    </ul>
+                }
+            </FluentMessageBar>
+        }
+
+        @if (_validationPassed)
+        {
+            <FluentMessageBar Intent="MessageIntent.Success"
+                              Title="Validation passed"
+                              AllowDismiss="false">
+                The repository path and branch satisfy every registration rule.
+            </FluentMessageBar>
+        }
+
+        <div class="form-grid">
+            <FluentTextField @bind-Value="_form.DisplayName"
+                             Label="Display name"
+                             Required="true"
+                             Placeholder="Agent Command Center"
+                             Class="field" />
+            <FluentTextField @bind-Value="_form.RepositoryPath"
+                             Label="Repository path"
+                             Required="true"
+                             Placeholder="/home/user/Developer/project"
+                             Class="field field-wide" />
+            <FluentTextField @bind-Value="_form.DefaultBranch"
+                             Label="Default branch"
+                             Required="true"
+                             Placeholder="main"
+                             Class="field" />
+            <FluentNumberField @bind-Value="_form.MaxActiveWriteRequests"
+                               Label="Write slots"
+                               Min="0"
+                               Max="512"
+                               Class="field" />
+            <FluentNumberField @bind-Value="_form.MaxReadOnlyRequests"
+                               Label="Read-only slots"
+                               Min="0"
+                               Max="512"
+                               Class="field" />
+            <FluentNumberField @bind-Value="_form.MaxChildAgentsPerRequest"
+                               Label="Child agents per request"
+                               Min="0"
+                               Max="512"
+                               Class="field" />
+        </div>
+
+        <fieldset class="switch-set">
+            <legend>Repository policy</legend>
+            <FluentSwitch @bind-Value="_form.Enabled" Label="Enabled" />
+            <FluentSwitch @bind-Value="_form.RequireCleanStart" Label="Require clean start" />
+            <FluentSwitch @bind-Value="_form.CreateRequestBranch" Label="Create request branch" />
+            <FluentSwitch @bind-Value="_form.CreateRequestCommit" Label="Create request commit" />
+            <FluentSwitch @bind-Value="_form.AutoMerge" Label="Auto merge" />
+        </fieldset>
+
+        <FluentStack Class="dialog-actions"
+                     Orientation="Orientation.Horizontal"
+                     HorizontalGap="8"
+                     Width="100%">
+            <FluentButton Appearance="Appearance.Accent" OnClick="RegisterAsync" Loading="@_submitting">
+                Register project
+            </FluentButton>
+            <FluentButton Appearance="Appearance.Outline" OnClick="ValidateAsync" Disabled="@_submitting">
+                Validate path
+            </FluentButton>
+            <FluentSpacer />
+            <FluentButton Appearance="Appearance.Stealth" OnClick="CloseRegistration" Disabled="@_submitting">
+                Cancel
+            </FluentButton>
+        </FluentStack>
+    </div>
+</FluentDialog>
+
 @code {
+    private readonly RegistrationForm _form = new();
+    private readonly Dictionary<Guid, QueueCounts> _counts = [];
+
+    private IReadOnlyList<ProjectDto> _projects = Array.Empty<ProjectDto>();
+    private IReadOnlyList<string> _registrationErrors = Array.Empty<string>();
     private DateTimeOffset _snapshot;
+    private string? _loadError;
+    private bool _loading = true;
+    private bool _submitting;
+    private bool _validationPassed;
+    private bool _registrationHidden = true;
+    private int _activeProjects;
+    private int _queuedRequests;
 
-    protected override void OnInitialized() => _snapshot = Clock.UtcNow;
+    protected override Task OnInitializedAsync() => ReloadAsync();
 
-    private void Refresh()
+    private async Task ReloadAsync()
     {
-        _snapshot = Clock.UtcNow;
-        ToastService.ShowSuccess($"Control-plane snapshot refreshed at {_snapshot:HH:mm:ss} UTC");
+        _loading = true;
+        _loadError = null;
+        StateHasChanged();
+
+        try
+        {
+            var projects = await Catalog.ListAsync(CancellationToken.None);
+            _counts.Clear();
+
+            var queued = 0;
+            foreach (var project in projects)
+            {
+                var requests = await Queue.ListAsync(new ProjectId(project.Id), CancellationToken.None);
+                var counts = Tally(requests);
+                _counts[project.Id] = counts;
+                queued += counts.Queued;
+            }
+
+            _projects = projects;
+            _activeProjects = projects.Count(p => p.Enabled);
+            _queuedRequests = queued;
+        }
+        catch (Exception ex)
+        {
+            _loadError = ex.Message;
+            _projects = Array.Empty<ProjectDto>();
+            _counts.Clear();
+            _activeProjects = 0;
+            _queuedRequests = 0;
+        }
+        finally
+        {
+            _snapshot = Clock.UtcNow;
+            _loading = false;
+        }
+    }
+
+    private void OpenRegistration()
+    {
+        _registrationErrors = Array.Empty<string>();
+        _validationPassed = false;
+        _registrationHidden = false;
+    }
+
+    private void CloseRegistration() => _registrationHidden = true;
+
+    private async Task ValidateAsync()
+    {
+        _validationPassed = false;
+        _registrationErrors = Array.Empty<string>();
+
+        var local = _form.LocalErrors();
+        if (local.Count > 0)
+        {
+            _registrationErrors = local;
+            return;
+        }
+
+        _submitting = true;
+        try
+        {
+            var report = await Catalog.ValidateAsync(_form.ToCommand(), CancellationToken.None);
+            if (report.IsValid)
+            {
+                _validationPassed = true;
+            }
+            else
+            {
+                _registrationErrors = report.Errors;
+            }
+        }
+        catch (Exception ex)
+        {
+            _registrationErrors = new[] { ex.Message };
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+
+    private async Task RegisterAsync()
+    {
+        _validationPassed = false;
+        _registrationErrors = Array.Empty<string>();
+
+        var local = _form.LocalErrors();
+        if (local.Count > 0)
+        {
+            _registrationErrors = local;
+            return;
+        }
+
+        _submitting = true;
+        try
+        {
+            var project = await Catalog.RegisterAsync(_form.ToCommand(), CancellationToken.None);
+            _registrationHidden = true;
+            _form.Reset();
+            ToastService.ShowSuccess($"Registered {project.DisplayName}");
+            await ReloadAsync();
+        }
+        catch (ProjectValidationException ex)
+        {
+            _registrationErrors = ex.Errors;
+        }
+        catch (DuplicateProjectException)
+        {
+            _registrationErrors = new[] { "A project is already registered for that repository path." };
+        }
+        catch (Exception ex)
+        {
+            _registrationErrors = new[] { ex.Message };
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+
+    private static QueueCounts Tally(IReadOnlyList<WorkRequestDto> requests)
+    {
+        var active = 0;
+        var blocked = 0;
+        var queued = 0;
+
+        foreach (var request in requests)
+        {
+            switch ((WorkRequestStatus)request.Status)
+            {
+                case WorkRequestStatus.Queued:
+                    queued++;
+                    break;
+                case WorkRequestStatus.Blocked:
+                    blocked++;
+                    break;
+                case WorkRequestStatus.Starting:
+                case WorkRequestStatus.Planning:
+                case WorkRequestStatus.Executing:
+                case WorkRequestStatus.Reviewing:
+                case WorkRequestStatus.Verifying:
+                    active++;
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        return new QueueCounts(active, blocked, queued);
+    }
+
+    private string Summarize(Guid projectId)
+    {
+        var counts = _counts.TryGetValue(projectId, out var value) ? value : default;
+        return $"{counts.Active} active \u00b7 {counts.Blocked} blocked \u00b7 {counts.Queued} queued";
+    }
+
+    private readonly record struct QueueCounts(int Active, int Blocked, int Queued);
+
+    private sealed class RegistrationForm
+    {
+        public string? DisplayName { get; set; } = string.Empty;
+
+        public string? RepositoryPath { get; set; } = string.Empty;
+
+        public string? DefaultBranch { get; set; } = "main";
+
+        public bool Enabled { get; set; } = true;
+
+        public int MaxActiveWriteRequests { get; set; } = 1;
+
+        public int MaxReadOnlyRequests { get; set; } = 2;
+
+        public int MaxChildAgentsPerRequest { get; set; } = 4;
+
+        public bool RequireCleanStart { get; set; } = true;
+
+        public bool CreateRequestBranch { get; set; } = true;
+
+        public bool CreateRequestCommit { get; set; } = true;
+
+        public bool AutoMerge { get; set; }
+
+        public IReadOnlyList<string> LocalErrors()
+        {
+            var errors = new List<string>(3);
+            if (string.IsNullOrWhiteSpace(DisplayName))
+            {
+                errors.Add("Display name is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(RepositoryPath))
+            {
+                errors.Add("Repository path is required.");
+            }
+
+            if (string.IsNullOrWhiteSpace(DefaultBranch))
+            {
+                errors.Add("Default branch is required.");
+            }
+
+            return errors;
+        }
+
+        public RegisterProjectCommand ToCommand() => new(
+            (DisplayName ?? string.Empty).Trim(),
+            (RepositoryPath ?? string.Empty).Trim(),
+            (DefaultBranch ?? string.Empty).Trim(),
+            Enabled,
+            MaxActiveWriteRequests,
+            MaxReadOnlyRequests,
+            MaxChildAgentsPerRequest,
+            RequireCleanStart,
+            CreateRequestBranch,
+            CreateRequestCommit,
+            AutoMerge);
+
+        public void Reset()
+        {
+            DisplayName = string.Empty;
+            RepositoryPath = string.Empty;
+            DefaultBranch = "main";
+            Enabled = true;
+            MaxActiveWriteRequests = 1;
+            MaxReadOnlyRequests = 2;
+            MaxChildAgentsPerRequest = 4;
+            RequireCleanStart = true;
+            CreateRequestBranch = true;
+            CreateRequestCommit = true;
+            AutoMerge = false;
+        }
     }
 }

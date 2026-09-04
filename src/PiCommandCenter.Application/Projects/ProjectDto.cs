@@ -1,0 +1,22 @@
+namespace PiCommandCenter.Application.Projects;
+
+/// <summary>
+/// Read model of a registered project.
+/// </summary>
+public sealed record ProjectDto(
+    Guid Id,
+    Guid NodeId,
+    string DisplayName,
+    string RepositoryPath,
+    string DefaultBranch,
+    bool Enabled,
+    int MaxActiveWriteRequests,
+    int MaxReadOnlyRequests,
+    int MaxChildAgentsPerRequest,
+    bool RequireCleanStart,
+    bool CreateRequestBranch,
+    bool CreateRequestCommit,
+    bool AutoMerge,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    long Version);
