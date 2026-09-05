@@ -84,9 +84,9 @@ async function collect(
 // Z.AI — GET /api/monitor/usage/quota/limit
 // ---------------------------------------------------------------------------
 
-const ZAI_RENDERED_TYPES = ["TOKENS_LIMIT", "TIME_LIMIT"] as const;
+const ZAI_RENDERED_TYPES = ["TOKENS_LIMIT", "TIME_LIMIT", "CREDIT_LIMIT"] as const;
 
-/** A `data.limits` entry we render: token or request quota with a percentage. */
+/** A `data.limits` entry we render: token, credit, or request quota with a percentage. */
 const ZaiRenderedLimit = Type.Object({
   type: Type.Union(ZAI_RENDERED_TYPES.map((type) => Type.Literal(type))),
   percentage: Type.Number({ minimum: 0 }),
@@ -155,6 +155,14 @@ function zaiLimit(item: ZaiRenderedLimit): UsageLimit {
       label: `${windowLabel} token quota`,
       window,
       amount: { ...amount, unit: "tokens" },
+    };
+  }
+  if (item.type === "CREDIT_LIMIT") {
+    return {
+      id: `zai:credits:${windowId}`,
+      label: `${windowLabel} credit quota`,
+      window,
+      amount: { ...amount, unit: "credits" },
     };
   }
   const zread = isZaiZreadLimit(item);

@@ -223,35 +223,25 @@ internal sealed class NodeSystemResourceMonitor : INodeSystemResourceMonitor
             return ReadHostMemory();
         }
 
-        var currentPath = Path.Combine(cgroupPath, "memory.current");
-        if (!File.Exists(currentPath))
+        var maximumPath = Path.Combine(cgroupPath, "memory.max");
+        if (!TryReadText(maximumPath, out var maximumText)
+            || maximumText.Trim().Equals("max", StringComparison.Ordinal))
         {
             return ReadHostMemory();
         }
 
-        if (!TryReadNonNegativeInt64(currentPath, out var used))
+        if (!long.TryParse(
+                maximumText.Trim(),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var total)
+            || total < 0)
         {
             return null;
         }
 
-        var maximumPath = Path.Combine(cgroupPath, "memory.max");
-        long total;
-        if (!TryReadText(maximumPath, out var maximumText)
-            || maximumText.Trim().Equals("max", StringComparison.Ordinal))
-        {
-            if (ReadHostMemoryTotal() is not { } hostTotal)
-            {
-                return null;
-            }
-
-            total = hostTotal;
-        }
-        else if (!long.TryParse(
-                     maximumText.Trim(),
-                     NumberStyles.None,
-                     CultureInfo.InvariantCulture,
-                     out total)
-                 || total < 0)
+        var currentPath = Path.Combine(cgroupPath, "memory.current");
+        if (!TryReadNonNegativeInt64(currentPath, out var used))
         {
             return null;
         }
@@ -278,24 +268,6 @@ internal sealed class NodeSystemResourceMonitor : INodeSystemResourceMonitor
         }
     }
 
-    private long? ReadHostMemoryTotal()
-    {
-        if (!TryReadMemoryInfoValues(out var values)
-            || !values.TryGetValue("MemTotal", out var parsedTotal)
-            || parsedTotal is not { } totalKilobytes)
-        {
-            return null;
-        }
-
-        try
-        {
-            return checked(totalKilobytes * 1024);
-        }
-        catch (OverflowException)
-        {
-            return null;
-        }
-    }
 
     private bool TryReadMemoryInfo(out long totalKilobytes, out long availableKilobytes)
     {

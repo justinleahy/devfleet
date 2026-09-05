@@ -49,14 +49,35 @@ public class RuntimeContractTests
     }
 
     [Fact]
-    public void AgentModelSelector_runtime_allowlist_names_every_hosted_adapter_once()
+    public void AgentModelSelector_reserves_exactly_the_official_harness_providers()
     {
         Assert.Equal(
-            [AgentModelSelector.Codex, AgentModelSelector.ClaudeCode, AgentModelSelector.Antigravity, AgentModelSelector.Muse],
-            AgentModelSelector.Runtimes);
+            [AgentModelSelector.ClaudeCode, AgentModelSelector.Antigravity, AgentModelSelector.Muse],
+            AgentModelSelector.OfficialHarnessProviders);
         Assert.Equal(AgentRuntimeKinds.ClaudeCode, AgentModelSelector.ClaudeCode);
         Assert.Equal(AgentRuntimeKinds.Antigravity, AgentModelSelector.Antigravity);
         Assert.Equal(AgentRuntimeKinds.Muse, AgentModelSelector.Muse);
+    }
+
+    [Theory]
+    [InlineData("codex/gpt-5.6-sol", "codex", true, "openai-codex")]
+    [InlineData("codex/default", "codex", true, "openai-codex")]
+    [InlineData("zai/glm-4.7", "zai", true, "zai")]
+    [InlineData("kimi-coding/k3", "kimi-coding", true, "kimi-coding")]
+    [InlineData("opencode-go/big-pickle", "opencode-go", true, "opencode-go")]
+    [InlineData("xai/grok-4", "xai", true, "xai")]
+    [InlineData("local/qwen3-32b", "local", true, "local")]
+    [InlineData("claude-code/fable-5-1", "claude-code", false, "claude-code")]
+    [InlineData("antigravity/default", "antigravity", false, "antigravity")]
+    [InlineData("muse/muse-1", "muse", false, "muse")]
+    public void AgentModelSelector_routes_flat_providers_to_pi_or_the_reserved_harnesses(
+        string value, string provider, bool usesPiRuntime, string piProviderId)
+    {
+        var selector = AgentModelSelector.Parse(value);
+
+        Assert.Equal(provider, selector.Provider);
+        Assert.Equal(usesPiRuntime, selector.UsesPiRuntime);
+        Assert.Equal(piProviderId, selector.PiProviderId);
     }
 
     [Theory]
@@ -68,7 +89,7 @@ public class RuntimeContractTests
     {
         var selector = AgentModelSelector.Parse(value);
 
-        Assert.Equal(AgentModelSelector.Muse, selector.Runtime);
+        Assert.Equal(AgentModelSelector.Muse, selector.Provider);
         Assert.Equal(modelId, selector.ModelId);
         Assert.Equal(value.Trim(), selector.Value);
         Assert.Equal(modelId == AgentModelSelector.DefaultModelId, selector.IsProviderDefault);
@@ -79,7 +100,7 @@ public class RuntimeContractTests
     {
         var selector = AgentModelSelector.Parse("  codex/openai/gpt-6-astra  ");
 
-        Assert.Equal("codex", selector.Runtime);
+        Assert.Equal("codex", selector.Provider);
         Assert.Equal("openai/gpt-6-astra", selector.ModelId);
         Assert.Equal("codex/openai/gpt-6-astra", selector.Value);
         Assert.Equal(selector.Value, selector.ToString());
@@ -115,6 +136,7 @@ public class RuntimeContractTests
     [InlineData("codex/ ")]
     [InlineData("/gpt-6-astra")]
     [InlineData("pi/gpt-6-astra")]
+    [InlineData("pi/default")]
     [InlineData("Codex/gpt-6-astra")]
     [InlineData("local-pi")]
     [InlineData("muse")]
@@ -123,13 +145,25 @@ public class RuntimeContractTests
     [InlineData("Muse/default")]
     [InlineData("MUSE/gpt-5.4")]
     [InlineData(" muse /default")]
-    [InlineData("muse-code/default")]
     [InlineData("muse:default")]
-    public void AgentModelSelector_fails_closed_on_malformed_or_unknown_values(string? value)
+    [InlineData("-muse/default")]
+    [InlineData("muse-/default")]
+    [InlineData("muse--code/default")]
+    [InlineData("kimi_coding/k3")]
+    [InlineData("z ai/glm-4.7")]
+    public void AgentModelSelector_fails_closed_on_malformed_or_reserved_values(string? value)
     {
         Assert.False(AgentModelSelector.TryParse(value, out var selector));
         Assert.Null(selector);
         Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse(value));
+    }
+
+    [Fact]
+    public void AgentModelSelector_rejects_pi_because_pi_is_a_runtime_not_a_provider()
+    {
+        Assert.False(AgentModelSelector.TryParse("pi/default", out _));
+        var error = Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("pi/gpt-6-astra"));
+        Assert.Contains("runtime", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -177,8 +211,8 @@ public class RuntimeContractTests
     [Theory]
     [InlineData(" ")]
     [InlineData("gpt-6-astra")]
-    [InlineData("local-pi")]
-    [InlineData("claude-reserved-write/fable-5-1")]
+    [InlineData("pi/gpt-6-astra")]
+    [InlineData("claude-reserved-write--/fable-5-1")]
     public void AgentStartRequest_requires_a_canonical_model_selector(string model)
     {
         Assert.Throws<ArgumentException>(() => new AgentStartRequest(

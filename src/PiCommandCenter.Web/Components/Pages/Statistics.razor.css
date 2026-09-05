@@ -1,0 +1,264 @@
+/* The button's shadow-root content keeps its intrinsic width, so a shrunken host clips
+   the label: let the copy absorb the squeeze instead. */
+.page-head ::deep .page-head-row,
+.page-head ::deep .page-head-copy {
+    min-width: 0;
+}
+
+.page-head ::deep .page-head-action {
+    flex-shrink: 0;
+}
+
+.page-head h1 {
+    font-size: var(--type-ramp-plus-4-font-size);
+    line-height: var(--type-ramp-plus-4-line-height);
+    letter-spacing: -0.02em;
+    margin: 0;
+}
+
+.page-lead {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+}
+
+section {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+}
+
+h2 {
+    margin: 0;
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
+    font-weight: 600;
+    letter-spacing: -0.015em;
+}
+
+/* Summary counters: a dense strip, not hero tiles. Eight counters over a fixed four
+   tracks fill two whole rows, so the strip never ends in stranded empty cells. */
+.metric-row {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: calc(var(--design-unit) * 1px);
+    margin: 0;
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--layer-corner-radius) * 1px);
+    background-color: var(--neutral-stroke-divider-rest);
+    overflow: hidden;
+}
+
+.metric {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 5px);
+    background-color: var(--neutral-layer-1);
+}
+
+.metric dt {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.metric dd {
+    margin: 0;
+    font-size: var(--type-ramp-plus-3-font-size);
+    line-height: var(--type-ramp-plus-3-line-height);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    /* Exact counters are shown in full, so a fleet total wider than its cell wraps within the
+       cell instead of running under the neighbour and losing its trailing digits. */
+    overflow-wrap: anywhere;
+}
+
+/* An unreported counter is a word, not a figure: it reads at hint weight rather than
+   shouting a headline that happens not to be a number. */
+.metric dd.absent,
+.runtime-metric dd.absent {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-base-font-size);
+    font-weight: 400;
+}
+
+.metric dd.absent {
+    line-height: var(--type-ramp-plus-3-line-height);
+}
+
+.cost-note {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.coverage {
+    margin: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Runtime breakdown: one runtime per row, its identity line above its own counters.
+   Rows are separated by a rule rather than nested cards. */
+.runtime-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.runtime-row {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    padding-block: calc(var(--design-unit) * 4px);
+    border-top: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.runtime-row:last-child {
+    border-bottom: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.runtime-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 3px);
+    min-width: 0;
+}
+
+.runtime-name {
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.runtime-counts {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+    font-variant-numeric: tabular-nums;
+}
+
+.runtime-metrics {
+    display: grid;
+    /* Capped tracks keep the strip dense and left-aligned on wide screens instead of
+       stretching six figures across the whole viewport. */
+    grid-template-columns: repeat(auto-fit, minmax(132px, 176px));
+    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 5px);
+    margin: 0;
+}
+
+.runtime-metric {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 0.5px);
+    min-width: 0;
+}
+
+.runtime-metric dt {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.runtime-metric dd {
+    margin: 0;
+    font-size: var(--type-ramp-base-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+/* Loading / empty */
+.state-block {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--design-unit) * 3px);
+    padding-block: calc(var(--design-unit) * 6px);
+    color: var(--neutral-foreground-hint);
+}
+
+.state-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: calc(var(--design-unit) * 3px);
+    padding: calc(var(--design-unit) * 6px);
+}
+
+.state-empty h3 {
+    margin: 0;
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+    font-weight: 600;
+}
+
+.state-empty p {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+}
+
+.panel-empty {
+    margin: 0;
+    padding-block: calc(var(--design-unit) * 3px);
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+}
+
+/* Below four comfortable tracks the strip halves rather than reflowing to an odd
+   count: two columns still divide the eight counters evenly. */
+@media (max-width: 980px) {
+    .metric-row {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 620px) {
+    /* Phone widths cannot hold heading + action side by side: stack them.
+       align-items is inline on the FluentStack host, hence !important. */
+    .page-head ::deep .page-head-row {
+        flex-direction: column;
+        align-items: flex-start !important;
+        row-gap: calc(var(--design-unit) * 3px);
+    }
+
+    .metric {
+        padding: calc(var(--design-unit) * 3px);
+    }
+
+    /* The summary figure drops a ramp step so a seven-digit token total still fits. */
+    .metric dd,
+    .metric dd.absent {
+        font-size: var(--type-ramp-plus-2-font-size);
+        line-height: var(--type-ramp-plus-2-line-height);
+    }
+
+    .metric dd.absent {
+        font-size: var(--type-ramp-base-font-size);
+    }
+
+    .runtime-metrics {
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+    }
+
+    .state-empty {
+        padding: calc(var(--design-unit) * 4px);
+    }
+}

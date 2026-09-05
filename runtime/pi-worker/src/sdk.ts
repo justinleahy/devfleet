@@ -117,8 +117,8 @@ export type ModelCatalog = Pick<ModelRuntime, "getModel" | "getAvailable">;
  * Resolve a `provider/model` override to a model authenticated on this node.
  * `provider/default` picks the first authenticated model of exactly that
  * provider; an explicit id must exist in the catalog and be authenticated.
- * The SDK's own initial-model fallback (any authenticated provider) is never
- * consulted, so a `codex` selector can only ever land on `openai-codex`.
+ * DevFleet decodes its flat `<provider>/<model>` selector before this boundary,
+ * so this resolver receives the exact Pi provider and model chosen by the operator.
  */
 export async function resolveConfiguredModel(modelRuntime: ModelCatalog, value: string) {
   const separator = value.indexOf("/");

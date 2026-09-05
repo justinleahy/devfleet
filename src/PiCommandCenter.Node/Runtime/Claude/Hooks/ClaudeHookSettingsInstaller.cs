@@ -30,7 +30,7 @@ public sealed class ClaudeHookSettingsInstaller
         _root = dataRoot
             ?? Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "pi-command-center",
+                "devfleet",
                 "claude-runtime");
     }
 

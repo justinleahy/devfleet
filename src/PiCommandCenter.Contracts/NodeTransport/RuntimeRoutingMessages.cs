@@ -11,9 +11,9 @@ public sealed record RuntimeRoleRouteMessage(
 /// <summary>One model reported as callable by a node runtime.</summary>
 public sealed record RuntimeModelMessage(string Id, string DisplayName, string? Provider);
 
-/// <summary>Models discovered for one runtime, or its discovery error.</summary>
+/// <summary>Models discovered for one provider, or its discovery error.</summary>
 public sealed record RuntimeModelCatalogMessage(
-    string Runtime,
+    string Provider,
     IReadOnlyList<RuntimeModelMessage> Models,
     string? Error);
 

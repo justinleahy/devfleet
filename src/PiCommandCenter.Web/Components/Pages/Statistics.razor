@@ -1,0 +1,278 @@
+@page "/statistics"
+@namespace PiCommandCenter.Web.Components.Pages
+@rendermode InteractiveServer
+@using System.Globalization
+@using PiCommandCenter.Application
+@using PiCommandCenter.Application.Live
+@using PiCommandCenter.Application.Statistics
+@using PiCommandCenter.Web.Components.Live
+@implements IAsyncDisposable
+@inject IFleetStatisticsService FleetStatistics
+@inject IProjectionNotifier Notifier
+@inject IClock Clock
+
+<PageTitle>Fleet statistics &middot; DevFleet</PageTitle>
+
+<FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+
+    <header class="page-head">
+        <FluentStack Class="page-head-row"
+                     Orientation="Orientation.Horizontal"
+                     VerticalAlignment="VerticalAlignment.Bottom"
+                     HorizontalGap="16"
+                     Width="100%">
+            <FluentStack Class="page-head-copy" Orientation="Orientation.Vertical" VerticalGap="4" Width="auto">
+                <h1>Fleet statistics</h1>
+                <p class="page-lead">
+                    Persisted totals for every agent session the fleet has recorded. Token counters are
+                    the figures each runtime itself reported when a turn finished; a counter no runtime
+                    reported reads <em>Unavailable</em> rather than zero.
+                </p>
+            </FluentStack>
+            <FluentSpacer />
+            <FluentButton Class="page-head-action"
+                          Appearance="Appearance.Stealth"
+                          OnClick="ReloadAsync"
+                          Disabled="@_busy">
+                Reload
+            </FluentButton>
+        </FluentStack>
+    </header>
+
+    @* One chain: a failed read is never followed by figures that would read as current. *@
+    @{ var stats = _statistics; }
+    @if (_error is not null)
+    {
+        <FluentMessageBar Intent="MessageIntent.Error"
+                          Title="Could not read fleet statistics"
+                          AllowDismiss="false">
+            @_error
+        </FluentMessageBar>
+    }
+    else if (stats is null)
+    {
+        <div class="state-block" role="status">
+            <FluentProgressRing aria-label="Reading fleet statistics" />
+            <span>Reading fleet statistics</span>
+        </div>
+    }
+    else
+    {
+        <section aria-labelledby="summary-heading">
+            <h2 id="summary-heading">Summary</h2>
+
+            <dl class="metric-row">
+                <div class="metric">
+                    <dt>Tracked agents</dt>
+                    <dd>@Number(stats.TrackedAgents)</dd>
+                </div>
+                <div class="metric">
+                    <dt>Active agents</dt>
+                    <dd>@Number(stats.ActiveAgents)</dd>
+                </div>
+                @foreach (var counter in Counters(stats.Tokens))
+                {
+                    <div class="metric">
+                        <dt>@counter.Label</dt>
+                        <dd class="@Absent(counter.Value)">@(counter.Value ?? Unavailable)</dd>
+                    </div>
+                }
+                <div class="metric">
+                    <dt>Estimated cost (USD)</dt>
+                    @{ var cost = Money(stats.EstimatedCostUsd); }
+                    <dd class="@Absent(cost)">@(cost ?? Unavailable)</dd>
+                </div>
+            </dl>
+
+            <p class="cost-note">@CostNote(stats)</p>
+            <p class="coverage" role="status" aria-live="polite">@Coverage(stats)</p>
+        </section>
+
+        <section aria-labelledby="runtime-heading">
+            <h2 id="runtime-heading">By runtime</h2>
+
+            @if (stats.TrackedAgents == 0)
+            {
+                <FluentCard>
+                    <div class="state-empty">
+                        <h3>No agent session recorded yet</h3>
+                        <p>
+                            Nothing has run, so no runtime has reported a token counter or an estimated
+                            cost. Queue a request and dispatch it to a node; the totals here fill in as
+                            each turn finishes.
+                        </p>
+                        <FluentAnchor Href="/" Appearance="Appearance.Outline">Back to fleet</FluentAnchor>
+                    </div>
+                </FluentCard>
+            }
+            else if (stats.Runtimes.Count == 0)
+            {
+                <p class="panel-empty">
+                    No session carries a runtime name, so the totals above cannot be split up.
+                </p>
+            }
+            else
+            {
+                <ul class="runtime-list">
+                    @foreach (var runtime in stats.Runtimes)
+                    {
+                        <li class="runtime-row">
+                            <div class="runtime-head">
+                                <span class="runtime-name">@runtime.Runtime</span>
+                                <span class="runtime-counts">@RuntimeCounts(runtime)</span>
+                            </div>
+                            <dl class="runtime-metrics">
+                                @foreach (var counter in Counters(runtime.Tokens))
+                                {
+                                    <div class="runtime-metric">
+                                        <dt>@counter.Label</dt>
+                                        <dd class="@Absent(counter.Value)">@(counter.Value ?? Unavailable)</dd>
+                                    </div>
+                                }
+                                <div class="runtime-metric">
+                                    <dt>Estimated cost (USD)</dt>
+                                    @{ var runtimeCost = Money(runtime.EstimatedCostUsd); }
+                                    <dd class="@Absent(runtimeCost)">@(runtimeCost ?? Unavailable)</dd>
+                                </div>
+                            </dl>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+    }
+</FluentStack>
+
+@code {
+    /// <summary>Shown for any counter or cost no runtime reported: absent is not zero.</summary>
+    private const string Unavailable = "Unavailable";
+
+    private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
+
+    private FleetStatisticsDto? _statistics;
+    private LiveView? _live;
+    private DateTimeOffset _readAt;
+    private string? _error;
+    private bool _busy;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender && _live is null)
+        {
+            // Any committed write can add a session or land a usage event, so this view listens
+            // fleet-wide and lets LiveView collapse a burst of writes into one re-read.
+            _live = new LiveView(
+                Notifier,
+                change => change.AffectsFleet,
+                () => InvokeAsync(async () =>
+                {
+                    await LoadAsync();
+                    StateHasChanged();
+                }));
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        var live = _live;
+        _live = null;
+        if (live is not null)
+        {
+            await live.DisposeAsync();
+        }
+    }
+
+    private Task ReloadAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        try
+        {
+            _statistics = await FleetStatistics.GetAsync(CancellationToken.None);
+            _readAt = Clock.UtcNow;
+            _error = null;
+        }
+        catch (Exception ex)
+        {
+            // The previous totals are dropped: a stale figure left under an error reads as a
+            // current one.
+            _statistics = null;
+            _error = ex.Message;
+        }
+        finally
+        {
+            _busy = false;
+        }
+    }
+
+    /// <summary>
+    /// The five token series in the order a turn produces them, each already summed by the
+    /// aggregator and each absent on its own.
+    /// </summary>
+    private static (string Label, string? Value)[] Counters(TokenTotalsDto tokens) =>
+    [
+        ("Input tokens", Number(tokens.Input)),
+        ("Output tokens", Number(tokens.Output)),
+        ("Cache read", Number(tokens.CacheRead)),
+        ("Cache write", Number(tokens.CacheWrite)),
+        ("Thinking tokens", Number(tokens.Thinking)),
+    ];
+
+    private static string Number(int value) => value.ToString("N0", Invariant);
+
+    private static string? Number(long? value) => value?.ToString("N0", Invariant);
+
+    /// <summary>The smallest cost the four-place form can state outright.</summary>
+    private const decimal SmallestShownCost = 0.0001m;
+
+    /// <summary>
+    /// A reported zero is the figure itself. A cost the runtimes did read but rounded below a
+    /// cent is shown to four places, and one smaller than the four-place form can state reads as
+    /// a bound, so a real estimate is never displayed as 0.00 or 0.0000.
+    /// </summary>
+    private static string? Money(decimal? value) => value switch
+    {
+        null => null,
+        0m => "0",
+        { } cost when Math.Abs(cost) < SmallestShownCost => cost > 0m ? "< 0.0001" : "> -0.0001",
+        { } cost when Math.Abs(cost) < 0.01m => cost.ToString("N4", Invariant),
+        { } cost => cost.ToString("N2", Invariant),
+    };
+
+    /// <summary>An absent figure is a word, not a number: it drops out of the figure ramp.</summary>
+    private static string? Absent(string? value) => value is null ? "absent" : null;
+
+    private static string CostNote(FleetStatisticsDto stats)
+    {
+        const string Caveat = "Estimated cost is each runtime's own client-side catalogue estimate, "
+            + "not a billing figure.";
+
+        return stats.TrackedAgents == 0
+            ? Caveat
+            : $"{Caveat} Estimated by {stats.AgentsWithEstimatedCost} of {stats.TrackedAgents} agent(s).";
+    }
+
+    private string Coverage(FleetStatisticsDto stats)
+    {
+        var telemetry = stats.LatestTelemetryAt is { } latest
+            ? $"latest agent report {TimeText.Relative(latest, Clock.UtcNow)}"
+            : "no agent report recorded";
+
+        return $"{stats.AgentsWithReportedTokens} of {stats.TrackedAgents} agent(s) reported tokens \u00b7 "
+            + $"{stats.IgnoredTelemetryEvents} malformed telemetry event(s) ignored \u00b7 "
+            + $"{telemetry} \u00b7 re-read as writes commit and at least every "
+            + $"{LiveView.SafetyInterval.TotalSeconds:0}s, last {TimeText.Relative(_readAt, Clock.UtcNow)}";
+    }
+
+    private static string RuntimeCounts(RuntimeStatisticsDto runtime) =>
+        $"{runtime.TrackedAgents} tracked \u00b7 {runtime.ActiveAgents} active \u00b7 "
+            + $"{runtime.AgentsWithReportedTokens} reporting tokens";
+}

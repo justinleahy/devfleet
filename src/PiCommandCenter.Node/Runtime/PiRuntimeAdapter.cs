@@ -18,23 +18,22 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
     public const string RootSessionIdPrefix = "pi-root-";
     public const string ChildSessionIdPrefix = "pi-child-";
 
-    /// <summary>Pi SDK provider prefix that a <c>codex/&lt;id&gt;</c> selector maps onto.</summary>
-    internal const string PiCodexProviderPrefix = "openai-codex/";
-
     /// <summary>
-    /// Pi-native model override for a selector: <c>openai-codex/&lt;id&gt;</c>. The provider default
-    /// is sent as <c>openai-codex/default</c> so the worker resolves it inside that provider instead
-    /// of letting the SDK fall back to any authenticated provider. Rejects non-codex runtimes.
+    /// Pi-native model override for a selector. Every Pi-backed flat selector
+    /// <c>&lt;provider&gt;/&lt;model&gt;</c> becomes the exact SDK <c>&lt;provider&gt;/&lt;model&gt;</c>
+    /// through the shared selector contract: <c>codex/&lt;id&gt;</c> maps onto
+    /// <c>openai-codex/&lt;id&gt;</c>; every other Pi provider passes through identically
+    /// (<c>zai/glm-4.7</c> stays <c>zai/glm-4.7</c>). Rejects non-Pi providers.
     /// </summary>
     internal static string ResolveModelOverride(AgentModelSelector selector)
     {
-        if (selector.Runtime != AgentModelSelector.Codex)
+        if (!selector.UsesPiRuntime)
         {
             throw new NotSupportedException(
-                $"Pi runtime only accepts '{AgentModelSelector.Codex}/<model>' selectors; got '{selector}'.");
+                $"Pi runtime only accepts Pi-backed '<provider>/<model>' selectors; got '{selector}'.");
         }
 
-        return PiCodexProviderPrefix + selector.ModelId;
+        return selector.PiProviderId + "/" + selector.ModelId;
     }
 
     private readonly PiWorkerOptions _options;

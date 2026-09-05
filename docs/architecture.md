@@ -6,7 +6,7 @@ Pi Command Center is a single-user, single-node proof of concept: a Blazor comma
 
 | Component | Process | Authority |
 |---|---|---|
-| `PiCommandCenter.Web` | In-process with Control Plane | Blazor Interactive Server UI (fleet, project, request, `/attention`, `/usage`) |
+| `PiCommandCenter.Web` | In-process with Control Plane | Blazor Interactive Server UI (fleet, project, request, `/attention`, `/usage`, `/statistics`) |
 | `PiCommandCenter.ControlPlane` | ASP.NET Core (`net10.0`) | Authoritative SQLite store; HTTP API; SignalR `/nodeHub`; migrations at startup |
 | `PiCommandCenter.Application` / `Domain` / `Infrastructure` | Libraries | Domain model, use cases, EF Core |
 | `PiCommandCenter.Contracts` | Library | SignalR DTOs only (`PiCommandCenter.Contracts.NodeTransport`) |
@@ -35,20 +35,25 @@ Canonical project repository (supervisor-owned Git)
 ```
 
 ```text
-Browser  GET /usage  (Blazor Interactive Server; manual Refresh only, no polling)
+Browser  GET /usage  (Blazor Interactive Server; load or manual Refresh)
     │  INodeSubscriptionUsageGateway.GetAsync(nodeId)
     ▼
 Control Plane  NodeSubscriptionUsageGateway
     │  SignalR Clients.Client(connectionId).InvokeCoreAsync
     │  method GetSubscriptionUsage  (no arguments)
     ▼
-Node worker  IRuntimeSubscriptionUsageProbe.GetAsync
-    ├─ Pi sidecar  node /app/runtime/pi-worker/src/usage.ts
+Node worker  in-memory subscription-usage cache (latest snapshot)
+    │  reads only; does not start sidecars, HTTP, or CLIs
+
+Node worker  background collector (immediate, then every five minutes)
+    │  IRuntimeSubscriptionUsageProbe.GetAsync  (sole collector)
+    ├─ Pi sidecar  installed usage.ts under ~/.local/lib/devfleet
     │              (openai-codex, anthropic, kimi-code, zai, xai-oauth, opencode-go)
     ├─ Anthropic   owner-only .credentials.json ──► https://api.anthropic.com
     └─ Antigravity official agy -p /usage --print-timeout 8s
-All three start concurrently; supplements replace the same provider id or append
-in registration order. Only normalized windows cross SignalR.
+All three start concurrently on each cache refresh; supplements replace the
+same provider id or append in registration order. Only normalized windows
+cross SignalR. Failed refresh keeps the last successful snapshot.
 ```
 ```text
 Node worker  INodeSystemResourceMonitor.Capture()  (on existing HeartbeatSeconds tick only)
@@ -74,8 +79,8 @@ Null fields render as Unavailable, never as zero.
 
 - Control-plane connection string: `ConnectionStrings:ControlPlane` (default `Data Source=controlplane.db;Cache=Shared` in `src/PiCommandCenter.ControlPlane/appsettings.json`).
 - Startup applies EF Core migrations (`Program` logs “Applying control-plane database migrations”).
-- Node event spool: `Node:EventSpoolPath` default `~/.local/share/pi-command-center/node-spool.db`.
-- Application data directory used by setup/demo: `~/.local/share/pi-command-center` (`PI_CC_DATA`), mode `0700`.
+- Node event spool: `Node:EventSpoolPath` default `~/.local/share/devfleet/node-spool.db`.
+- Application data directory used by setup and the systemd daemon: `~/.local/share/devfleet` (`0700`). Protected install root: `~/.local/lib/devfleet`.
 - Fleet node latest resources: `FleetNodes.ResourceSnapshotJson` (nullable JSON of `NodeResourceSnapshotDto`). Heartbeat **replaces** the column; there is no time series. A null `Resources` payload stores null (does not keep the previous snapshot).
 
 
@@ -109,17 +114,21 @@ Provider authentication missing is **not** a generic crash. Adapters emit `sessi
 
 ## Role model routing
 
-Sessions carry `Runtime` (trusted adapter key) and `Model` (canonical `<runtime>/<model>` selector; the prefix before the first `/` always equals `Runtime`). Trusted prefixes are `codex`, `claude-code`, `antigravity`, and `muse`; the model id after the prefix is provider-native and opaque, and `default` asks the provider for its default model. There are no runtime profiles: the selector alone picks the adapter (`AgentRuntimeRegistry.Resolve`), and everything else about a session is derived from that adapter's fixed policy.
+Sessions carry `Runtime` (session runtime kind) and `Model` (canonical `<provider>/<model>` selector). The provider prefix is lowercase ASCII alphanumeric with interior hyphens; `pi` is rejected because Pi is a runtime, not a provider. The reserved prefixes `claude-code`, `antigravity`, and `muse` select their dedicated official-harness adapters; every other valid prefix resolves to Pi as the runtime adapter (`AgentRuntimeRegistry.Resolve`), so every Pi-backed session's `RuntimeKind` stays `pi`. The model id after the first `/` is provider-native and opaque (it may itself contain slashes), and `default` asks the provider for its default model. There are no runtime profiles: the selector alone picks the provider and model, and everything else about a session is derived from that adapter's fixed policy.
 
 `Pi:Model` is the canonical root selector (`codex/default`).
 
-Each role in `Pi:AllowedChildRoles` (`root`, `architect`, `implementer`, `reviewer`, `verifier`) maps to an ordered candidate list in `Pi:RoleRoutes`, e.g. `architect: claude-code/default → antigravity/default → muse/default → codex/default`. Defaults offer `muse/default` only on the read-oriented `architect` and `reviewer` routes, after the Claude and Antigravity candidates and before the Codex fallback; `implementer` and `verifier` never list it. The supervisor tries candidates in order and skips one that fails to start, cannot obtain a required reservation, or is read-only while write scopes were requested (`runtime_route_exhausted` when all fail). Spawn requests name only a role; agent content can never pick an executable, credential path, or runtime outside the prefix allowlist.
+Pi is the runtime adapter behind every non-reserved provider. Selector decoding: `codex` aliases the Pi SDK provider `openai-codex`, so `codex/default` and `codex/gpt-5.6-sol` resolve to Pi's `openai-codex/default` and `openai-codex/gpt-5.6-sol`; every other Pi provider prefix passes through identically (`zai/glm-4.7` resolves to Pi's `zai/glm-4.7`). Any other syntactically valid provider still goes only to Pi and fails closed unless the Pi worker has that provider authenticated and available. Pi discovery returns one catalog per authenticated Pi provider (the Pi SDK provider `openai-codex` is reported under its `codex` alias), alongside the external Claude Code, Antigravity, and Muse catalogs — every reported selector is runnable.
+
+`RuntimeModelDiscovery` keeps the completed Pi, Antigravity, and Muse discovery results in node memory for five minutes. Concurrent cache misses share one discovery wave; cancellation or an escaping exception does not populate the cache. Provider-level error catalogs are completed results and remain cached for the same interval. Claude Code is excluded from that snapshot because its catalog includes configured route selectors, so `ClaudeCatalog()` is recomputed from live routing on every request. The cache is process-local and is empty after a node restart.
+
+Each role in `Pi:AllowedChildRoles` (`root`, `architect`, `implementer`, `reviewer`, `verifier`) maps to an ordered candidate list in `Pi:RoleRoutes`, e.g. `architect: claude-code/default → antigravity/default → muse/default → codex/default`. Defaults offer `muse/default` only on the read-oriented `architect` and `reviewer` routes, after the Claude and Antigravity candidates and before the Codex fallback; `implementer` and `verifier` never list it. The supervisor tries candidates in order and skips one that fails to start, cannot obtain a required reservation, or is read-only while write scopes were requested (`runtime_route_exhausted` when all fail). Spawn requests name only a role; agent content can never pick an executable, credential path, or provider outside the node's routing configuration.
 
 Write permission is not a route property: it is derived from the reservation leases the supervisor acquires for the child plus the adapter's own policy (Pi and Claude Code edit only under a lease; Antigravity and Muse Code are always read-only). Verification profiles are a separate concept (SPEC §20).
 
-Routes are node-owned and live: the control plane invokes client callbacks `GetRuntimeConfiguration` (→ `NodeRuntimeConfigurationMessage`: `NodeId`, `AllowedRoles`, `RoleRoutes[]{Role, Candidates[]{Model}}`), `DiscoverRuntimeModels` (→ `RuntimeModelCatalogMessage[]`: `Runtime`, `Models[]{Id, DisplayName, Provider}`, `Error`), and `UpdateRuntimeConfiguration(UpdateNodeRuntimeConfigurationMessage{RoleRoutes})`. The node validates (allowed roles only, 1–16 canonical, deduplicated candidates per role) and persists owner-only to `Pi:AgentDataDirectory/role-routes.json`. The routing page offers discovered canonical ids directly with free-text fallback. Discovery returns one catalog per trusted prefix: `codex` from the worker's `modelCatalog.ts`, `claude-code` from already-configured non-default candidates (Claude has no authenticated list command), `antigravity` from `agy models`, and `muse` from `IMuseModelCatalogReader` (fresh `muse serve` host, `initialize`, `model/list`, terminate; ids are prefixed to `muse/<model-id>`). The Muse catalog fails closed: a reader error, or a read that yields no canonical `muse/` selector, is reported as the catalog `Error`, never as an empty success. Discovery never starts a Muse session and never reads credentials.
+Routes are node-owned and live: the control plane invokes client callbacks `GetRuntimeConfiguration` (→ `NodeRuntimeConfigurationMessage`: `NodeId`, `AllowedRoles`, `RoleRoutes[]{Role, Candidates[]{Model}}`), `DiscoverRuntimeModels` (→ `RuntimeModelCatalogMessage[]`: `Provider`, `Models[]{Id, DisplayName, Provider}`, `Error`), and `UpdateRuntimeConfiguration(UpdateNodeRuntimeConfigurationMessage{RoleRoutes})`. The node validates (allowed roles only, 1–16 canonical, deduplicated candidates per role) and persists owner-only to `Pi:AgentDataDirectory/role-routes.json`. The routing page renders whatever provider catalogs the node reports and offers discovered canonical ids directly with free-text fallback. Discovery returns one catalog per provider: one per authenticated Pi provider from the worker's `modelCatalog.ts` (a discovery process failure is reported as the `codex` catalog's error), `claude-code` from already-configured non-default candidates (Claude has no authenticated list command), `antigravity` from `agy models`, and `muse` from `IMuseModelCatalogReader` (fresh `muse serve` host, `initialize`, `model/list`, terminate; ids are prefixed to `muse/<model-id>`). The Muse catalog fails closed: a reader error, or a read that yields no canonical `muse/` selector, is reported as the catalog `Error`, never as an empty success. Discovery never starts a Muse session and never reads credentials.
 
-Claude hooks and `--settings` live under `$XDG_DATA_HOME/pi-command-center/claude-runtime/<session>/` (owner-only). The hook validator is loopback HTTP only (`http://127.0.0.1:<ephemeral>/pcc-claude-hook/`). Antigravity is read-only in this PoC.
+Claude hooks and `--settings` live under `$XDG_DATA_HOME/devfleet/claude-runtime/<session>/` (owner-only). The hook validator is loopback HTTP only (`http://127.0.0.1:<ephemeral>/pcc-claude-hook/`). Antigravity is read-only in this PoC.
 
 ### Muse Code (`muse/<model-id>`)
 
@@ -140,21 +149,28 @@ Authentication is host-native: the operator runs `muse login` locally before man
 ## Subscription usage (`/usage`)
 
 Operator page for **normalized** remaining subscription windows per provider on
-the connected node. Pi remains the orchestrator: each manual refresh starts the
-bundled Pi-SDK sidecar and the registered provider-native supplemental readers
-concurrently. There is no Pi quota command and no production OMP CLI. A source
-that is missing or drifts fails closed without suppressing the other sources;
-numbers are never guessed or carried over.
+the connected node. Pi remains the orchestrator: the node runs the bundled
+Pi-SDK sidecar and the registered provider-native supplemental readers
+concurrently once immediately and then every five minutes into an in-memory
+cache. Browser load, manual Refresh, and the SignalR `GetSubscriptionUsage`
+callback read that cache; they do not start sidecars, HTTP calls, or CLIs.
+There is no Pi quota command and no production OMP CLI. There is no
+persistence, no new wire message, and no configurable interval: five minutes
+is the product policy. A source that is missing or drifts fails closed without
+suppressing the other sources; numbers are never guessed. A failed cache
+refresh keeps the last successful snapshot; `ObservedAt` on each provider row
+exposes data age.
 
 Research and the public-vs-private classification:
 [research/subscription-usage.md](research/subscription-usage.md).
 
 ### Flow
 
-1. Browser loads `/usage` (cookie admin, Interactive Server) and presses Refresh.
-2. Control plane `INodeSubscriptionUsageGateway` (`PiCommandCenter.ControlPlane.SubscriptionUsage.NodeSubscriptionUsageGateway`) looks up the node's SignalR connection and invokes the **client callback** `GetSubscriptionUsage` (empty argument list). Hub round-trip timeout is 35 s.
-3. The node handler calls `PiCommandCenter.Node.SubscriptionUsage.IRuntimeSubscriptionUsageProbe.GetAsync`. It starts the configured Pi sidecar and ordered `ISupplementalSubscriptionUsageSource` implementations concurrently with one observation time.
-4. Sidecar reports keep their JSON order. Each non-null supplement replaces the sidecar row with the same exact provider id or appends in registration order. A supplemental exception is isolated; malformed sidecar output still leaves configured supplements available.
+1. The node starts one immediate collection through `PiCommandCenter.Node.SubscriptionUsage.IRuntimeSubscriptionUsageProbe.GetAsync`, then refreshes the in-memory cache every five minutes on a non-overlapping cadence. Successful snapshots atomically replace the cache. A failed refresh preserves the last successful snapshot and retries on the next cadence.
+2. Browser loads `/usage` (cookie admin, Interactive Server) or presses Refresh. That read does not collect.
+3. Control plane `INodeSubscriptionUsageGateway` (`PiCommandCenter.ControlPlane.SubscriptionUsage.NodeSubscriptionUsageGateway`) looks up the node's SignalR connection and invokes the **client callback** `GetSubscriptionUsage` (empty argument list). Hub round-trip timeout is 35 s.
+4. The node handler returns the latest cached `NodeSubscriptionUsageMessage`. Before the first successful refresh, a read waits for initial data and honors caller cancellation. It never invokes the probe.
+5. Each collection starts the configured Pi sidecar and ordered `ISupplementalSubscriptionUsageSource` implementations concurrently with one observation time. Sidecar reports keep their JSON order. Each non-null supplement replaces the sidecar row with the same exact provider id or appends in registration order. A supplemental exception is isolated; malformed sidecar output still leaves configured supplements available.
 
 ### Sources per provider
 
@@ -188,37 +204,47 @@ same-id sidecar report. Cursor remains unsupported.
 - Process runner: `ProcessStartInfo.ArgumentList` only (**no shell**), stdin closed, host wall timeout and combined-output cap, process-tree kill on timeout.
 - Claude credential reads are regular-file-only and bounded; HTTP uses exact HTTPS origins, no redirects, bounded bodies, and one operation deadline. Antigravity output is accepted only through the pinned four-column grammar.
 
-### Deployment (`compose.yaml`)
+### Deployment (systemd user daemon)
 
-Only the `node` service sees provider state; the control plane and browser never
-do. Compose requires **no OMP binary or `~/.omp` state**. It configures the
-bundled Pi sidecar, `SubscriptionUsage__ClaudeCredentialPath`, and the official
-`agy` executable. The node container (`HOME=/home/node`) bind-mounts required
-directories (`:z`):
+Production is **only** Fedora systemd user units `pi-command-center-control-plane.service` and `pi-command-center-node.service`. There is no Compose or container runtime. The node process sees host-native provider state; the control plane and browser never do. No OMP binary or `~/.omp` state is required. Bind defaults to loopback; `DEVFLEET_BIND_ADDRESS` selects a specific address.
 
-| Host path | Container path | Why |
-|---|---|---|
-| `${HOME}/.pi/agent` | `/home/node/.pi/agent` | Pi ModelRuntime provider auth store; **not** labeled as Pi quota |
-| `${HOME}/.claude` and `${HOME}/.claude.json` | under `/home/node` | Claude runtime state and the owner-only OAuth credential used by the Anthropic supplemental reader |
-| `${HOME}/.gemini` | `/home/node/.gemini` | Native Antigravity state read only by the mounted `agy` process |
-| `${HOME}/.config/muse` | `/home/node/.config/muse` | Muse Code host-native login state for `muse serve` sessions only; Muse has no usage card |
+| Host path | Why |
+|---|---|
+| `~/.local/share/devfleet` | SQLite, spool, auth files, Data Protection keys, Pi agent data |
+| `~/.local/lib/devfleet` | Published Control Plane, Node, and production npm worker |
+| `~/.pi/agent` | Pi ModelRuntime provider auth store; **not** labeled as Pi quota |
+| `~/.claude` and `~/.claude.json` | Claude runtime state and the owner-only OAuth credential used by the Anthropic supplemental reader |
+| `~/.gemini` | Native Antigravity credentials, cache, and logs; the `agy` sandbox grants this provider-owned directory its only writable home-state bind |
+| `~/.config/muse` | Muse Code host-native login state for `muse serve`; Muse has no usage card |
+| `~/Developer` | Approved project roots (writable as required by units) |
 
 #### Trust boundary inside the node
 
-The node container is one trust domain: the operator's own subscriptions, on a machine they own. Mounting those host directories exposes them to the node process so ModelRuntime can authenticate. That exposure is **not** extended to model-driven subprocesses:
+The node is one trust domain: the operator's own subscriptions, on a machine they own. Host-native CLIs and credential stores are used in place; that exposure is **not** extended to model-driven subprocesses:
 
-- **Pi worker** (`runtime/pi-worker`): its SDK store is `Pi__AgentDataDirectory` (`/data/pi-agent`). Root and child sessions run with **no built-in tools**; `read`/`grep`/`find`/`ls` are node-owned custom tools that round-trip to the node and resolve through `RepositoryPathPolicy` (repository-relative, no symlink escape).
+- **Pi worker** (`runtime/pi-worker`): its SDK store is `Pi:AgentDataDirectory` (`~/.local/share/devfleet/pi-agent`). Root and child sessions run with **no built-in tools**; `read`/`grep`/`find`/`ls` are node-owned custom tools that round-trip to the node and resolve through `RepositoryPathPolicy` (repository-relative, no symlink escape).
 - **Claude Code**: model tools are limited by the host-owned `--settings` allowlist (`Read`/`Glob`/`Grep`, plus `Edit`/`Write` only under a lease) and the PreToolUse hook denies inspect paths outside the repository; `Bash` is not allowed.
-- **Antigravity**: `AntigravityReadOnlySandbox` (bwrap) binds the host root read-only and then mounts private empty `tmpfs` over the sibling credential stores that are not required for `agy` itself (`MaskedSecretLocations`: `/provider-auth`, `/home/node/.claude`, `/home/node/.config/muse`); its own `/home/node/.gemini` stays readable. A mask location that exists but is not a directory, or a repository path that falls inside a masked location, makes sandbox setup throw and the session fail closed.
+- **Antigravity**: `AntigravityReadOnlySandbox` (bwrap) binds the host root and repository read-only, then grants a writable bind only to its own `~/.gemini` credential/cache/log directory so the official CLI can maintain native state. Private empty `tmpfs` mounts mask sibling credential stores (`MaskedSecretLocations` includes Pi, Claude, and Muse homes). A mask or state location that exists but is not a directory, a repository inside a mask, or any overlap between the repository and writable state makes sandbox setup throw and the session fail closed.
 - **Muse Code**: the `muse serve` host is launched with `--disable-write --disable-shell --no-session-log` and `denyUnmatched` approvals, so the model has no write or shell tool and no approval prompt to escalate through. The host reads its own `~/.config/muse` login state; DevFleet never opens it and never passes credentials on argv, stdin, or environment. There is no DevFleet-side hook layer for Muse: the read-only boundary is the host's own tool policy.
-- **Quota probe**: the node process runs the Pi sidecar, the Anthropic credential/HTTPS reader, and official `agy` usage report concurrently. Credential and raw provider output remain inside their source boundary and never cross the normalized DTO.
+- **Quota probe**: the node process is the only collector. On the five-minute cache cadence it runs the installed Pi sidecar, the Anthropic credential/HTTPS reader, and official `agy` usage report concurrently. Browser and SignalR reads never start those processes. Credential and raw provider output remain inside their source boundary and never cross the normalized DTO.
 
 ### Normalized DTO (`PiCommandCenter.Contracts.NodeTransport`)
 
-- `NodeSubscriptionUsageMessage`: `NodeId`, `Providers`.
-- `ProviderSubscriptionUsageMessage`: `Provider`, `Status` (`available` \| `unavailable` \| `error`), optional `Authenticated` / `PlanLabel` / `Version`, `Windows`, `ObservedAt`, `Source`, `Diagnostic`. No runtime-profile field.
+- `NodeSubscriptionUsageMessage`: `NodeId`, `Providers`. Unchanged wire callback.
+- `ProviderSubscriptionUsageMessage`: `Provider`, `Status` (`available` \| `unavailable` \| `error`), optional `Authenticated` / `PlanLabel` / `Version`, `Windows`, `ObservedAt`, `Source`, `Diagnostic`. No runtime-profile field. `ObservedAt` is the observation time of the cached snapshot and exposes data age.
 - `SubscriptionUsageWindowMessage`: `Name`, `PercentUsed` and/or `PercentRemaining`, optional `ResetsAt`.
-- Node-internal: `IRuntimeSubscriptionUsageProbe.GetAsync` and the `SubscriptionUsage` options section (`NodeExecutable`, `ScriptPath`).
+- Node-internal: `IRuntimeSubscriptionUsageProbe.GetAsync` (sole collector for the in-memory cache) and the `SubscriptionUsage` options section (`NodeExecutable`, `ScriptPath`).
+
+## Fleet statistics (`/statistics`)
+
+Authenticated operators open `/statistics`. `IFleetStatisticsService` (`FleetStatisticsService`) reads `AgentSessions` plus known append-only `SessionEvents` telemetry. Subscription quota (`/usage`) is out of scope.
+
+Fleet DTO: `TrackedAgents`, `ActiveAgents` (no end time, liveness not `Exited`, work state not `Completed`/`Failed`/`Cancelled`), `AgentsWithReportedTokens`, `AgentsWithEstimatedCost`, nullable `Tokens` (input, output, cache-read, cache-write, thinking), nullable `EstimatedCostUsd`, `IgnoredTelemetryEvents`, `LatestTelemetryAt`, and `Runtimes` ordered by runtime id. Each runtime row repeats agent counts, tokens, and estimated cost. Null is not zero; a reported zero stays zero.
+
+Pi **adds** final `message.completed` / `compaction.completed` usage. Claude, Antigravity, and Muse **replace** with the latest per-session cumulative (`result.completed` / turn or cancel usage / `session.usage`). Malformed known telemetry is skipped whole and counted; unknown types are ignored. Cost is only a runtime-reported client/catalog estimate already on the event — never an invoice, never computed from tokens or rates.
+
+Research: [research/agent-token-cost-statistics.md](research/agent-token-cost-statistics.md).
+
 
 ## HTTP surface (cookie admin unless noted)
 
@@ -241,17 +267,18 @@ The node container is one trust domain: the operator's own subscriptions, on a m
 | POST | `/api/reservations/{leaseId}/force-release` | Human-only |
 | GET/POST | `/account/login` | Antiforgery form; fields `username`, `password`, `returnUrl` |
 | POST | `/account/logout` | Antiforgery; `returnUrl` |
-| GET | `/usage` | Blazor remaining subscription windows; manual Refresh only |
+| GET | `/usage` | Blazor remaining subscription windows; load and Refresh read the node cache |
+| GET | `/statistics` | Blazor all-history session token and client-estimate cost totals |
 | Hub | `/nodeHub` | Node token policy only; never browsed |
 
-Blazor pages: `/` (fleet), project and request routes, `/attention`, `/usage`, `/login`.
+Blazor pages: `/` (fleet), project and request routes, `/attention`, `/usage`, `/statistics`, `/login`.
 
 
 ## Node system resources (Fleet `/`)
 
 The node captures a **fail-closed, nullable** snapshot on the existing heartbeat only (`INodeSystemResourceMonitor.Capture` → `NodeWorker` → `NodeHub.Heartbeat`). No extra timer. Previous CPU counters live in process memory so utilization is an interval since the last tick; the **first** `CpuUsagePercent` after process start is `null`.
 
-Sources (unprivileged): cgroup v2 via `/proc/self/cgroup` when the current cgroup has real charge/limits (`cpu.stat`/`cpu.max`, `memory.current`/`memory.max`); otherwise host procfs (`/proc/stat`, `/proc/meminfo`). Disk is `DriveInfo("/")` (`IsReady`, `TotalSize`, `AvailableFreeSpace`). Load and uptime are **host** `/proc/loadavg` and `/proc/uptime` field 1 — not container age. Unlimited `cpu.max`/`memory.max` fall back to procfs, never a fake 1-CPU or 0-byte budget.
+Sources (unprivileged): cgroup v2 via `/proc/self/cgroup` when the current cgroup has real charge/limits (`cpu.stat`/`cpu.max`, `memory.current`/`memory.max`); otherwise host procfs (`/proc/stat`, `/proc/meminfo`). Disk is `DriveInfo("/")` (`IsReady`, `TotalSize`, `AvailableFreeSpace`). Load and uptime are **host** `/proc/loadavg` and `/proc/uptime` field 1. Unlimited `cpu.max`/`memory.max` fall back to procfs, never a fake 1-CPU or 0-byte budget.
 
 Wire/application types: `NodeResourceSnapshotMessage` / `NodeResourceSnapshotDto` — required UTC `ObservedAt`; nullable `CpuUsagePercent` (0–100), `MemoryUsedBytes`/`MemoryTotalBytes`, `DiskUsedBytes`/`DiskTotalBytes`, `LoadAverageOneMinute`, `UptimeSeconds`. Per-field null on missing file, parse failure, non-finite, negative, `used > total`, or CPU outside `[0, 100]`. Never reuse a stale reading. Control plane persists latest JSON only; `NodeDto.Resources` feeds `/`. Missing meters show **Unavailable**.
 
@@ -263,5 +290,5 @@ SPEC §43 / §46 require the first demonstration **through the web UI** (login, 
 
 - `scripts/demo.sh --smoke` (default quota-free path): starts Control Plane + Node on loopback `127.0.0.1:${PI_CC_PORT:-5057}`, may copy `demo/health-details-fixture` under the approved root, and may `POST /api/projects` for bootstrap. It does **not** launch Pi, `claude`, `agy`, or `muse`, and HTTP register/enqueue is **not** request completion.
 - Live providers are opt-in only: `RUN_REAL_PI_TESTS=1`, `RUN_REAL_CLAUDE_TESTS=1`, `RUN_REAL_ANTIGRAVITY_TESTS=1`, `RUN_REAL_MUSE_TESTS=1` on `dotnet test` (subscription quota). Completing SPEC §43 still means the browser, not curl.
-- Blazor surfaces: `/` fleet, `/projects/{id}` queue and composer, request page (plan, diff, verification, result, reservations, mail), `/attention`, `/usage`.
+- Blazor surfaces: `/` fleet, `/projects/{id}` queue and composer, request page (plan, diff, verification, result, reservations, mail), `/attention`, `/usage`, `/statistics`.
 

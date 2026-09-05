@@ -62,6 +62,17 @@ const zaiFixture = {
         nextResetTime: 1_800_400_000_000,
       },
       {
+        type: "CREDIT_LIMIT",
+        unit: 5,
+        number: 1,
+        percentage: 30,
+        usage: 300,
+        currentValue: 300,
+        remaining: 700,
+        nextResetTime: 1_800_500_000,
+      },
+      { type: "CREDIT_LIMIT", unit: 6, number: 1, percentage: 75 },
+      {
         type: "TIME_LIMIT",
         unit: 5,
         number: 1,
@@ -75,7 +86,7 @@ const zaiFixture = {
 };
 
 describe("zaiUsage", () => {
-  it("renders 5h and weekly token quotas plus request quotas from a valid payload", async () => {
+  it("renders 5h and weekly token quotas plus credit and request quotas from a valid payload", async () => {
     const calls: RecordedCall[] = [];
     const report = await zaiUsage(auth, fakeRequest({ status: 200, body: zaiFixture }, calls), AbortSignal.timeout(1000));
 
@@ -100,6 +111,18 @@ describe("zaiUsage", () => {
         label: "Weekly token quota",
         window: { label: "Weekly", resetsAt: 1_800_400_000_000 },
         amount: { usedFraction: 1, remainingFraction: 0, unit: "tokens" },
+      },
+      {
+        id: "zai:credits:1mo",
+        label: "Monthly credit quota",
+        window: { label: "Monthly", resetsAt: 1_800_500_000_000 },
+        amount: { usedFraction: 0.3, remainingFraction: 0.7, unit: "credits" },
+      },
+      {
+        id: "zai:credits:1w",
+        label: "Weekly credit quota",
+        window: { label: "Weekly" },
+        amount: { usedFraction: 0.75, remainingFraction: 0.25, unit: "credits" },
       },
       {
         id: "zai:features:zread:1mo",

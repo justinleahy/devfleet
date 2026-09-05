@@ -220,6 +220,12 @@ The PoC is successful only when all criteria below are demonstrated.
 - Those values come from the latest snapshot attached to the existing node heartbeat, not from a separate poller or a time series.
 - Any field that is unavailable, including CPU on the first sample after the node starts, is shown as unavailable. The UI must not invent, reuse, or hide a missing reading.
 
+### 5.9 Fleet statistics
+
+- Authenticated operators can open `/statistics` and see all-history tracked and active agent counts, nullable token series, a nullable estimated USD cost, ignored malformed telemetry count, latest observation time, and a per-runtime breakdown.
+- Figures come from persisted `AgentSessions` plus append-only `SessionEvents` telemetry. Missing series stay unavailable, never zero-filled. Estimated cost is only a runtime client/catalog figure already stored on an event, never a provider invoice and never computed locally from tokens or rates.
+
+
 ---
 
 ## 6. PoC Scope
@@ -246,6 +252,8 @@ The PoC is successful only when all criteria below are demonstrated.
 - Basic verification command profiles.
 - Cancellation and human guidance.
 - Latest nullable node resource snapshot carried on the existing heartbeat.
+- Authenticated fleet statistics page (`/statistics`) over persisted session telemetry (`IFleetStatisticsService`).
+
 
 
 ### 6.2 Explicitly deferred
@@ -271,6 +279,8 @@ The PoC is successful only when all criteria below are demonstrated.
 - Historical node resource telemetry or graphs.
 - Resource alerting or thresholds.
 - Extra resource polling besides the existing heartbeat.
+- Local token-to-USD price estimation or billing invoices from statistics.
+
 
 
 ---
@@ -679,7 +689,9 @@ The root may revise a rejected plan.
 
 Pi requests logical roles. The supervisor resolves each role to an ordered list of canonical model selectors.
 
-A model selector is `<runtime>/<model>`. The runtime prefix (everything before the first `/`) must be one of the trusted adapter keys `codex`, `claude-code`, `antigravity`, or `muse`; it alone selects the host-owned adapter. The model id after the first `/` is handed to that provider verbatim and may itself contain slashes. The reserved model id `default` asks the provider for its default model. There are no runtime profiles: a selector names an adapter and a model, and every other property of the session (write policy, sandboxing, tool surface) is fixed by that adapter.
+A model selector is `<provider>/<model>`. The provider prefix (everything before the first `/`) is lowercase ASCII alphanumeric with interior hyphens; `pi` is rejected because Pi is a runtime, not a provider. The model id after the first `/` is handed to the provider verbatim and may itself contain slashes. The reserved model id `default` asks the provider for its default model. There are no runtime profiles: a selector names a provider and a model, and every other property of the session (write policy, sandboxing, tool surface) is fixed by the adapter that provider resolves to.
+
+The reserved provider prefixes `claude-code`, `antigravity`, and `muse` select their dedicated official-harness adapters. Every other valid provider prefix is served by Pi as the runtime adapter: `codex` aliases the Pi SDK provider `openai-codex` (so `codex/default` and `codex/gpt-5.6-sol` decode to Pi's `openai-codex/default` and `openai-codex/gpt-5.6-sol`), and every other Pi provider prefix passes through identically (for example `zai/glm-4.7` resolves to Pi's `zai/glm-4.7`). Any other syntactically valid provider still goes only to Pi and fails closed unless that provider is authenticated and available to the Pi worker. Pi model discovery returns one catalog per authenticated Pi provider, so every reported selector is runnable.
 
 Example configuration (`Pi:RoleRoutes`):
 
@@ -720,7 +732,7 @@ There is no per-candidate permission profile. Write capability is derived, never
 - The runtime adapter's own policy bounds what a lease can enable: Pi and Claude Code children may edit only under an active lease; Antigravity and Muse Code are read-only, and a candidate for either is skipped whenever the spawn requests write scopes. The Muse adapter additionally refuses to start when handed a write authorization rather than silently running read-only.
 - Verification runs under a separate verification profile (§20), which is unrelated to model routing.
 
-Agent-generated content must never be allowed to select an arbitrary executable, credential path, Unix user, or a runtime prefix outside the trusted allowlist. Model ids are opaque to the supervisor and never interpreted as paths or commands.
+Agent-generated content must never be allowed to select an arbitrary executable, credential path, Unix user, or a provider outside the node's routing configuration. Model ids are opaque to the supervisor and never interpreted as paths or commands.
 
 ---
 
@@ -1763,8 +1775,8 @@ Use EF Core with SQLite.
 - ParentSessionId
 - AgentName
 - Role
-- Runtime (trusted adapter key: `codex`, `claude-code`, `antigravity`, `muse`)
-- Model (canonical `<runtime>/<model>` selector; its prefix always equals Runtime)
+- Runtime (session runtime kind: `pi` for every Pi-backed provider; `claude-code`, `antigravity`, or `muse` for the official harnesses)
+- Model (canonical `<provider>/<model>` selector)
 - ProviderSessionId
 - Liveness
 - Activity
@@ -2041,6 +2053,30 @@ Display:
 - External repository changes.
 - Disconnected agents retaining leases.
 
+### 31.7 Fleet statistics
+
+Authenticated operators open `/statistics` (Blazor Interactive Server). The page calls `IFleetStatisticsService.GetAsync` and re-reads on fleet-wide projection writes.
+
+Source: the `AgentSessions` projection plus known append-only `SessionEvents` (`message.completed`, `compaction.completed`, `result.completed`, `turn.completed`, `turn.failed`, `session.cancelled`, `session.usage`). Unknown event types are skipped silently. This is **not** `/usage` subscription quota.
+
+Fleet and each runtime row report:
+
+- `TrackedAgents`: every persisted session.
+- `ActiveAgents`: session has no `EndedAt`, liveness is not `Exited`, and work state is not `Completed`, `Failed`, or `Cancelled` (session liveness, not token events).
+- `AgentsWithReportedTokens` / `AgentsWithEstimatedCost` (fleet only for cost coverage).
+- Nullable token series: input, output, cache-read, cache-write, thinking. Null means no runtime reported that series; a reported `0` is shown as zero.
+- `EstimatedCostUsd`: sum of pre-existing runtime client/catalog estimates only. Null when no session reported a cost. Never derived from token counts or catalog rates in DevFleet.
+- `IgnoredTelemetryEvents`: known telemetry events whose payload is malformed, negative, fractional, overflowing, or non-finite — skipped whole, never partially applied.
+- `LatestTelemetryAt`: newest successfully applied telemetry timestamp, or null.
+- `Runtimes`: ordinal by runtime identifier.
+
+Aggregation:
+
+- **Pi:** additive. Sum finite usage on final `message.completed` / `compaction.completed`; do not sum in-flight `message_update`.
+- **Claude Code, Antigravity, Muse:** cumulative / latest-per-session. Claude replaces from each `result.completed` (prefer summed `modelUsage`; cost from `total_cost_usd`). Antigravity replaces from usage on `turn.completed` / `turn.failed` / `session.cancelled`. Muse replaces from `session.usage` cumulative.
+
+The UI labels missing counters **Unavailable**. Estimated cost is each runtime's own client-side catalogue estimate, not a billing figure. Values below the four-decimal display bound render as `< 0.0001` (negative mirror `> -0.0001`); explicit zero renders `0`.
+
 ---
 
 ## 32. Completion Gate
@@ -2161,7 +2197,7 @@ Treat project files, instructions, tool output, and messages as untrusted conten
 They must not be able to:
 
 - Change runtime executable paths.
-- Select a runtime outside the trusted prefix allowlist, or override a role's model route.
+- Select a provider outside the node's routing configuration, or override a role's model route.
 - Disable reservation hooks.
 - Grant broader permissions.
 - Alter project roots.
@@ -2184,14 +2220,14 @@ Suggested root configuration:
 
 ```yaml
 commandCenter:
-  dataPath: ~/.local/share/pi-command-center
+  dataPath: ~/.local/share/devfleet
   controlPlaneUrl: https://127.0.0.1:7443
 
 node:
   id: fedora-workstation
   maxSessions: 12
   heartbeatSeconds: 10
-  eventSpoolPath: ~/.local/share/pi-command-center/node-spool.db
+  eventSpoolPath: ~/.local/share/devfleet/node-spool.db
 
 orchestration:
   enabledByDefault: true
@@ -2697,7 +2733,7 @@ Use `agy` as the Google consumer-subscription harness. Its adapter must be capab
 
 ### Muse Code
 
-Use `muse serve` over stdio as the Muse subscription harness, on the stable MSP v1 envelope only: the handshake fails closed on any other envelope schema version and warns when the stable-surface fingerprint differs from the verified Muse Code 1.0.3 one. The adapter is read-only and host-authenticated through `muse login`; the operator's `~/.config/muse` state is mounted into the node container for the host alone and masked from sibling model-driven processes (the Antigravity sandbox mounts an empty `tmpfs` over `/home/node/.config/muse`).
+Use `muse serve` over stdio as the Muse subscription harness, on the stable MSP v1 envelope only: the handshake fails closed on any other envelope schema version and warns when the stable-surface fingerprint differs from the verified Muse Code 1.0.3 one. The adapter is read-only and host-authenticated through `muse login`; the operator's `~/.config/muse` state stays on the host for the Muse process alone and is masked from sibling model-driven processes (the Antigravity sandbox mounts an empty `tmpfs` over Muse config).
 
 ### MCP Agent Mail reference behavior
 

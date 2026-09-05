@@ -4,10 +4,9 @@ using PiCommandCenter.Node.Runtime.Antigravity;
 namespace PiCommandCenter.Node.Tests;
 
 /// <summary>
-/// Proves the Antigravity bwrap boundary masks cross-provider OAuth stores. Production
-/// locations cannot be created on the test host, so argv tests substitute temporary
-/// directories through the <c>maskedLocations</c> seam; the constants themselves are asserted
-/// separately. No provider network or credentials.
+/// Proves the Antigravity bwrap boundary masks cross-provider OAuth stores while preserving
+/// writable host-native Antigravity state. Temporary paths exercise the real mount behavior
+/// without provider network or credentials.
 /// </summary>
 [Collection("Antigravity process tests")]
 public sealed class AntigravityReadOnlySandboxTests : IDisposable
@@ -27,18 +26,19 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
     }
 
     [Fact]
-    public void Production_masks_cover_claude_pi_provider_auth_and_muse_but_keep_gemini()
+    public void Production_paths_use_the_current_users_provider_stores()
     {
-        string[] masks = [.. AntigravityReadOnlySandbox.MaskedSecretLocations];
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        Assert.Equal(Path.Combine(home, ".gemini"), AntigravityReadOnlySandbox.StateLocation);
         Assert.Equal(
             [
                 "/provider-auth",
-                "/home/node/.pi/agent",
-                "/home/node/.claude",
-                "/home/node/.config/muse",
+                Path.Combine(home, ".pi", "agent"),
+                Path.Combine(home, ".claude"),
+                Path.Combine(home, ".config", "muse"),
             ],
-            masks);
-        Assert.DoesNotContain("/home/node/.gemini", masks);
+            AntigravityReadOnlySandbox.MaskedSecretLocations);
+        Assert.DoesNotContain(AntigravityReadOnlySandbox.StateLocation, AntigravityReadOnlySandbox.MaskedSecretLocations);
     }
 
     [Fact]
@@ -49,6 +49,7 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
         var piAgent = Directory.CreateDirectory(Path.Combine(_root, "home", "node", ".pi", "agent")).FullName;
         var claudeHome = Directory.CreateDirectory(Path.Combine(_root, "home", "node", ".claude")).FullName;
         var museConfig = Directory.CreateDirectory(Path.Combine(_root, "home", "node", ".config", "muse")).FullName;
+        var geminiStore = Directory.CreateDirectory(Path.Combine(_root, "home", "node", ".gemini")).FullName;
         var psi = new ProcessStartInfo { FileName = "agy" };
         psi.ArgumentList.Add("--output-format");
         psi.ArgumentList.Add("stream-json");
@@ -57,7 +58,8 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
             psi,
             repo,
             "/usr/bin/bwrap",
-            [providerAuth, piAgent, claudeHome, museConfig]);
+            [providerAuth, piAgent, claudeHome, museConfig],
+            geminiStore);
 
         Assert.Equal("/usr/bin/bwrap", psi.FileName);
         string[] argv = [.. psi.ArgumentList];
@@ -68,6 +70,7 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
                 "--dev", "/dev",
                 "--proc", "/proc",
                 "--ro-bind", repo, repo,
+                "--bind", geminiStore, geminiStore,
                 "--tmpfs", providerAuth,
                 "--tmpfs", piAgent,
                 "--tmpfs", claudeHome,
@@ -95,13 +98,15 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
         var missingPiAgent = Path.Combine(_root, "home", "node", ".pi", "agent");
         var missingClaudeHome = Path.Combine(_root, "home", "node", ".claude");
         var missingMuseConfig = Path.Combine(_root, "home", "node", ".config", "muse");
+        var missingGeminiStore = Path.Combine(_root, "home", "node", ".gemini");
         var psi = new ProcessStartInfo { FileName = "agy" };
 
         AntigravityReadOnlySandbox.Apply(
             psi,
             repo,
             "/usr/bin/bwrap",
-            [providerAuth, missingPiAgent, missingClaudeHome, missingMuseConfig]);
+            [providerAuth, missingPiAgent, missingClaudeHome, missingMuseConfig],
+            missingGeminiStore);
 
         string[] argv = [.. psi.ArgumentList];
         Assert.Equal(
@@ -149,7 +154,53 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
     }
 
     [Fact]
-    public async Task Masked_stores_are_empty_while_gemini_store_and_repository_stay_readable()
+    public void Writable_state_overlapping_repository_fails_closed()
+    {
+        var repo = Directory.CreateDirectory(Path.Combine(_root, "repo")).FullName;
+        var state = Directory.CreateDirectory(Path.Combine(repo, ".gemini")).FullName;
+
+        AssertWritableStateOverlapFails(repo, state);
+    }
+
+    [Fact]
+    public void Writable_state_with_a_symlinked_ancestor_targeting_repository_fails_closed()
+    {
+        var repo = Directory.CreateDirectory(Path.Combine(_root, "repo")).FullName;
+        Directory.CreateDirectory(Path.Combine(repo, ".gemini"));
+        var stateAlias = Directory.CreateSymbolicLink(Path.Combine(_root, "state-alias"), repo).FullName;
+
+        AssertWritableStateOverlapFails(repo, Path.Combine(stateAlias, ".gemini"));
+    }
+
+    [Fact]
+    public void Repository_with_a_symlinked_ancestor_targeting_writable_state_fails_closed()
+    {
+        var state = Directory.CreateDirectory(Path.Combine(_root, "state")).FullName;
+        Directory.CreateDirectory(Path.Combine(state, "repo"));
+        var repoAlias = Directory.CreateSymbolicLink(Path.Combine(_root, "repo-alias"), state).FullName;
+
+        AssertWritableStateOverlapFails(Path.Combine(repoAlias, "repo"), state);
+    }
+
+    private static void AssertWritableStateOverlapFails(string repo, string state)
+    {
+        var psi = new ProcessStartInfo { FileName = "agy" };
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            AntigravityReadOnlySandbox.Apply(
+                psi,
+                repo,
+                "/usr/bin/bwrap",
+                maskedLocations: [],
+                writableStateLocation: state));
+
+        Assert.Contains("BLOCKED", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("overlaps", ex.Message, StringComparison.Ordinal);
+        Assert.Equal("agy", psi.FileName);
+    }
+
+    [Fact]
+    public async Task Masked_stores_are_empty_while_gemini_state_is_writable_and_repository_stays_read_only()
     {
         var providerAuth = Directory.CreateDirectory(Path.Combine(_root, "provider-auth")).FullName;
         var providerAuthSecret = Path.Combine(providerAuth, "pi-auth.json");
@@ -163,8 +214,9 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
         var museConfig = Directory.CreateDirectory(Path.Combine(_root, "home", "node", ".config", "muse")).FullName;
         var museSecret = Path.Combine(museConfig, "oauth.json");
         await File.WriteAllTextAsync(museSecret, "{\"refresh_token\":\"muse-secret\"}");
-        var geminiStore = Directory.CreateDirectory(Path.Combine(_root, "home", "node", ".gemini", "antigravity-cli")).FullName;
-        var geminiToken = Path.Combine(geminiStore, "token");
+        var geminiState = Directory.CreateDirectory(Path.Combine(_root, "home", "node", ".gemini")).FullName;
+        var geminiCliStore = Directory.CreateDirectory(Path.Combine(geminiState, "antigravity-cli")).FullName;
+        var geminiToken = Path.Combine(geminiCliStore, "token");
         await File.WriteAllTextAsync(geminiToken, "gemini-token-visible");
         var repo = Directory.CreateDirectory(Path.Combine(_root, "repo")).FullName;
         var readme = Path.Combine(repo, "README.md");
@@ -192,13 +244,15 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
             [ -z "$(ls -A "$7")" ] || exit 16
             [ -z "$(ls -A "$8")" ] || exit 17
             [ -z "$(ls -A "$9")" ] || exit 18
-            cat "${10}" "${11}"
+            printf writable > "${10}/antigravity-cli/write-test"
+            printf forbidden > "${11}/write-test" 2>/dev/null && exit 19
+            cat "${10}/antigravity-cli/token" "${11}/README.md" "${10}/antigravity-cli/write-test"
             """);
         psi.ArgumentList.Add("sh");
         string[] arguments =
         [
             providerAuthSecret, piSecret, claudeSecret, museSecret, leakedSecret,
-            providerAuth, piAgent, claudeHome, museConfig, geminiToken, readme,
+            providerAuth, piAgent, claudeHome, museConfig, geminiState, repo,
         ];
         foreach (var argument in arguments)
         {
@@ -208,7 +262,8 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
         AntigravityReadOnlySandbox.Apply(
             psi,
             repo,
-            maskedLocations: [providerAuth, piAgent, claudeHome, museConfig]);
+            maskedLocations: [providerAuth, piAgent, claudeHome, museConfig],
+            writableStateLocation: geminiState);
 
         using var process = Process.Start(psi);
         Assert.NotNull(process);
@@ -218,6 +273,7 @@ public sealed class AntigravityReadOnlySandboxTests : IDisposable
 
         Assert.True(process.ExitCode == 0, $"exit {process.ExitCode}: {stderr}");
         Assert.Contains("gemini-token-visible", stdout, StringComparison.Ordinal);
+        Assert.Contains("writable", stdout, StringComparison.Ordinal);
         Assert.Contains("repo-visible", stdout, StringComparison.Ordinal);
         Assert.DoesNotContain("secret", stdout, StringComparison.Ordinal);
     }

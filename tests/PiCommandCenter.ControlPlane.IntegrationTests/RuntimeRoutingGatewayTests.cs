@@ -57,6 +57,7 @@ public sealed class RuntimeRoutingGatewayTests : IClassFixture<ControlPlaneFixtu
         Assert.Equal(configuration.AllowedRoles, loaded.AllowedRoles);
         Assert.Equal("codex/gpt-6-astra", loaded.RoleRoutes.Single().Candidates.Single().Model);
         Assert.Equal("codex/gpt-6-astra", discovered.Single().Models.Single().Id);
+        Assert.Equal("codex", discovered.Single().Provider);
         Assert.Equal(nodeId, saved.NodeId);
         Assert.NotNull(receivedUpdate);
         Assert.Equal("reviewer", receivedUpdate.RoleRoutes.Single().Role);

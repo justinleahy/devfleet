@@ -23,7 +23,7 @@ public sealed class NodeTransportClient : INodeHubOps
     private readonly ILogger<NodeTransportClient> _logger;
     private readonly INodeRuntimeRoutingStore _routing;
     private readonly IRuntimeModelDiscovery _models;
-    private readonly IRuntimeSubscriptionUsageProbe _usage;
+    private readonly ISubscriptionUsageCache _usage;
     private HubConnection? _connection;
     private NodeCredential? _credential;
 
@@ -42,7 +42,7 @@ public sealed class NodeTransportClient : INodeHubOps
         NodeCredentialLoader credentials,
         INodeRuntimeRoutingStore routing,
         IRuntimeModelDiscovery models,
-        IRuntimeSubscriptionUsageProbe usage,
+        ISubscriptionUsageCache usage,
         ILogger<NodeTransportClient> logger)
     {
         ArgumentNullException.ThrowIfNull(options);

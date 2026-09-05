@@ -42,7 +42,7 @@ public sealed class MuseCodeRuntimeAdapter : IAgentRuntimeAdapter
     /// </summary>
     internal static string? ResolveModelArgument(AgentModelSelector selector)
     {
-        if (selector.Runtime != AgentModelSelector.Muse)
+        if (selector.Provider != AgentModelSelector.Muse)
         {
             throw new NotSupportedException(
                 $"Muse runtime only accepts '{AgentModelSelector.Muse}/<model>' selectors; got '{selector}'.");

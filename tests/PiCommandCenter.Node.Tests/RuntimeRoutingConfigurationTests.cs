@@ -20,18 +20,18 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
         var replacement = new UpdateNodeRuntimeConfigurationMessage(
             store.Current.AllowedRoles.Select(role => new RuntimeRoleRouteMessage(
                 role,
-                [new RuntimeRouteCandidateMessage(role == "reviewer" ? " codex/provider/reviewer " : "codex/default")]))
+                [new RuntimeRouteCandidateMessage(role == "reviewer" ? " codex/gpt-reviewer " : "codex/default")]))
             .ToArray());
 
         var saved = await store.UpdateAsync(replacement);
         using var reloaded = new NodeRuntimeRoutingStore(node, Options.Create(worker));
 
-        Assert.Equal("codex/provider/reviewer", saved.RoleRoutes.Single(route => route.Role == "reviewer").Candidates[0].Model);
+        Assert.Equal("codex/gpt-reviewer", saved.RoleRoutes.Single(route => route.Role == "reviewer").Candidates[0].Model);
         Assert.Equal(
             saved.RoleRoutes.SelectMany(route => route.Candidates.Select(candidate => (route.Role, candidate.Model))),
             reloaded.Current.RoleRoutes.SelectMany(route => route.Candidates.Select(candidate => (route.Role, candidate.Model))));
         var json = File.ReadAllText(Path.Combine(worker.AgentDataDirectory, "role-routes.json"));
-        Assert.Contains("\"model\": \"codex/provider/reviewer\"", json, StringComparison.Ordinal);
+        Assert.Contains("\"model\": \"codex/gpt-reviewer\"", json, StringComparison.Ordinal);
         Assert.DoesNotContain("runtimeProfile", json, StringComparison.OrdinalIgnoreCase);
         if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
         {
@@ -41,7 +41,7 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
     }
 
     [Theory]
-    [InlineData("browser-runtime/default")]
+    [InlineData("pi/default")]
     [InlineData("opus")]
     [InlineData("")]
     public async Task Invalid_update_does_not_replace_current_routes(string model)
@@ -55,7 +55,7 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
 
         var error = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(invalid));
 
-        Assert.Contains("canonical '<runtime>/<model>' selector", error.Message, StringComparison.Ordinal);
+        Assert.Contains("canonical '<provider>/<model>' selector", error.Message, StringComparison.Ordinal);
 
         Assert.Same(before, store.Current);
     }
@@ -114,11 +114,11 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
         var error = Assert.Throws<ArgumentException>(() => new NodeRuntimeRoutingStore(
             Options.Create(new NodeOptions { Id = Guid.NewGuid() }), Options.Create(worker)));
 
-        Assert.Contains("canonical '<runtime>/<model>' selector", error.Message, StringComparison.Ordinal);
+        Assert.Contains("canonical '<provider>/<model>' selector", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task Discovery_reports_canonical_selectors_per_runtime()
+    public async Task Discovery_reports_one_catalog_per_authenticated_provider()
     {
         var worker = Worker();
         worker.RoleRoutes["reviewer"] =
@@ -135,18 +135,24 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
             Options.Create(new AntigravityOptions { Executable = "agy-test" }),
             store,
             runner,
-            new FakeMuseCatalogReader());
+            new FakeMuseCatalogReader(),
+            TimeProvider.System);
 
         var catalogs = await discovery.DiscoverAsync();
 
-        Assert.Equal(AgentModelSelector.Runtimes, catalogs.Select(catalog => catalog.Runtime));
         Assert.Equal(
-            ["codex/gpt-test"],
-            catalogs.Single(catalog => catalog.Runtime == "codex").Models.Select(model => model.Id));
+            ["codex", "zai", "claude-code", "antigravity", "muse"],
+            catalogs.Select(catalog => catalog.Provider));
+        var codex = catalogs.Single(catalog => catalog.Provider == "codex");
+        Assert.Null(codex.Error);
+        Assert.Equal(["codex/gpt-test"], codex.Models.Select(model => model.Id));
+        var zai = catalogs.Single(catalog => catalog.Provider == "zai");
+        Assert.Null(zai.Error);
+        Assert.Equal(["zai/glm-4.7"], zai.Models.Select(model => model.Id));
         Assert.Equal(
             ["antigravity/gemini-test"],
-            catalogs.Single(catalog => catalog.Runtime == "antigravity").Models.Select(model => model.Id));
-        var claude = catalogs.Single(catalog => catalog.Runtime == "claude-code");
+            catalogs.Single(catalog => catalog.Provider == "antigravity").Models.Select(model => model.Id));
+        var claude = catalogs.Single(catalog => catalog.Provider == "claude-code");
         Assert.Equal(
             [
                 "claude-code/claude-opus-test",
@@ -159,7 +165,12 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
             claude.Models.Select(model => model.Id));
         Assert.Null(claude.Error);
         Assert.All(catalogs.SelectMany(catalog => catalog.Models), model => AgentModelSelector.Parse(model.Id));
-        var muse = catalogs.Single(catalog => catalog.Runtime == AgentModelSelector.Muse);
+        Assert.All(
+            catalogs,
+            catalog => Assert.All(
+                catalog.Models,
+                model => Assert.StartsWith(catalog.Provider + "/", model.Id, StringComparison.Ordinal)));
+        var muse = catalogs.Single(catalog => catalog.Provider == AgentModelSelector.Muse);
         Assert.Empty(muse.Models);
         Assert.Equal("Muse model discovery returned no models.", muse.Error);
         Assert.Contains(runner.Commands, command => command.Executable == "node-test");
@@ -188,7 +199,8 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
             Commands.Add((executable, arguments));
             var output = executable == "node-test"
                 ? "[{\"id\":\"codex/gpt-test\",\"displayName\":\"GPT Test\",\"provider\":\"openai-codex\"},"
-                    + "{\"id\":\"anthropic/claude-test\",\"displayName\":\"Claude Test\",\"provider\":\"anthropic\"}]"
+                    + "{\"id\":\"zai/glm-4.7\",\"displayName\":\"GLM 4.7\",\"provider\":\"zai\"},"
+                    + "{\"id\":\"claude-code/claude-test\",\"displayName\":\"Claude Test\",\"provider\":\"anthropic\"}]"
                 : "gemini-test\tGemini Test\n";
             return Task.FromResult(new ModelCommandResult(0, output, string.Empty, false, false));
         }

@@ -89,10 +89,11 @@ public sealed class PiWorkerOptionsValidator : IValidateOptions<PiWorkerOptions>
     private static void ValidateRootModel(string? value, List<string> failures)
     {
         var selector = ValidateSelector(value, $"'Pi:{nameof(PiWorkerOptions.Model)}'", failures);
-        if (selector is not null && selector.Runtime != AgentModelSelector.Codex)
+        if (selector is not null && !selector.UsesPiRuntime)
         {
             failures.Add(
-                $"'Pi:{nameof(PiWorkerOptions.Model)}' must use runtime '{AgentModelSelector.Codex}'; "
+                $"'Pi:{nameof(PiWorkerOptions.Model)}' must name a Pi-backed provider "
+                + $"(not an official harness provider: {string.Join(", ", AgentModelSelector.OfficialHarnessProviders)}); "
                 + $"got '{selector.Value}'.");
         }
     }
@@ -105,8 +106,7 @@ public sealed class PiWorkerOptionsValidator : IValidateOptions<PiWorkerOptions>
         }
 
         failures.Add(
-            $"{subject} must be a canonical '<runtime>/<model>' selector "
-            + $"(runtimes: {string.Join(", ", AgentModelSelector.Runtimes)}); got '{value}'.");
+            $"{subject} must be a canonical '<provider>/<model>' selector; got '{value}'.");
         return null;
     }
 }

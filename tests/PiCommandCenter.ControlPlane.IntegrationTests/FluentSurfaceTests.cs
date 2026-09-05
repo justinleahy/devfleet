@@ -1,6 +1,12 @@
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using PiCommandCenter.Application.Nodes;
+using PiCommandCenter.Application.Runtime;
+using PiCommandCenter.ControlPlane.Security;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Infrastructure.Persistence;
 using System.Net.Http.Json;
 using System.Text.Json;
 
@@ -180,5 +186,161 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
         Assert.Contains("Project not found", html);
         Assert.Contains("No project is registered with that id.", html);
         Assert.Contains("Back to fleet", html);
+    }
+
+    [Fact]
+    public async Task Navigation_offers_statistics_after_usage()
+    {
+        var client = _fixture.CreateClient();
+
+        var html = await GetHtmlAsync(client, "/");
+
+        // "Usage" and "Statistics" are section names; neither word is dashboard copy.
+        var usage = html.IndexOf("Usage", StringComparison.Ordinal);
+        var statistics = html.IndexOf("Statistics", StringComparison.Ordinal);
+        Assert.True(usage >= 0, "Usage nav entry missing");
+        Assert.True(statistics >= 0, "Statistics nav entry missing");
+        Assert.True(usage < statistics, "Statistics must follow Usage in the section list");
+        Assert.Contains("/statistics", html);
+    }
+
+    [Fact]
+    public async Task Statistics_page_renders_every_counter_label_and_the_cost_caveat()
+    {
+        var client = _fixture.CreateClient();
+
+        var html = await GetHtmlAsync(client, "/statistics");
+
+        Assert.Contains("Fleet statistics", html);
+        Assert.Contains("Tracked agents", html);
+        Assert.Contains("Active agents", html);
+        Assert.Contains("Input tokens", html);
+        Assert.Contains("Output tokens", html);
+        Assert.Contains("Cache read", html);
+        Assert.Contains("Cache write", html);
+        Assert.Contains("Thinking tokens", html);
+        Assert.Contains("Estimated cost (USD)", html);
+        Assert.Contains("By runtime", html);
+        // The USD figure is whatever the runtime itself estimated, and the page says so.
+        Assert.Contains("client-side catalogue estimate, not a billing figure.", html);
+    }
+
+    [Fact]
+    public async Task Statistics_page_reads_an_unreported_counter_as_unavailable_and_a_real_zero_as_zero()
+    {
+        var client = _fixture.CreateClient();
+
+        var html = await GetHtmlAsync(client, "/statistics");
+
+        // No session has run, so the agent counts are a measured zero while every token series
+        // and the cost estimate are absent rather than zero.
+        Assert.Contains("0 of 0 agent(s) reported tokens", html);
+        Assert.Contains("0 malformed telemetry event(s) ignored", html);
+        Assert.Contains("no agent report recorded", html);
+        Assert.Contains("Unavailable", html);
+        Assert.Contains("No agent session recorded yet", html);
+        Assert.Contains("Back to fleet", html);
+    }
+
+    /// <summary>
+    /// Boots a second control plane over its own database, so a seeded session never disturbs
+    /// the shared fixture's empty-fleet expectations, records one pi session carrying
+    /// <paramref name="usageJson"/> as its finished-turn usage, and returns the statistics page.
+    /// </summary>
+    private async Task<string> StatisticsHtmlForPiUsageAsync(string usageJson)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pi-cc-statistics", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sqlitePath = Path.Combine(root, "controlplane.db");
+            using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={sqlitePath}");
+                builder.UseSetting("Projects:ApprovedRoots:0", _fixture.ApprovedRoot);
+                builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialFile);
+            });
+
+            var projectId = Guid.NewGuid();
+            var requestId = Guid.NewGuid();
+            var now = DateTimeOffset.UtcNow;
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
+                await db.Database.MigrateAsync();
+                db.AgentSessions.Add(new AgentSessionRow
+                {
+                    Id = "s-figures",
+                    ProjectId = projectId,
+                    RequestId = requestId,
+                    AgentName = "s-figures",
+                    Role = "task",
+                    Runtime = AgentRuntimeKinds.Pi,
+                    Model = "model",
+                    Liveness = "Online",
+                    Activity = "Responding",
+                    Attention = "None",
+                    WorkState = "Executing",
+                    StatusReason = string.Empty,
+                    StartedAtUtcTicks = now.UtcTicks,
+                });
+                db.SessionEvents.Add(new SessionEvent
+                {
+                    EventId = "evt-figures-1",
+                    NodeId = Guid.NewGuid(),
+                    ProjectId = projectId,
+                    RequestId = requestId,
+                    SessionId = "s-figures",
+                    Sequence = 1,
+                    Type = "message.completed",
+                    OccurredAtUtcTicks = now.UtcTicks,
+                    ReceivedAtUtcTicks = now.UtcTicks,
+                    PayloadJson = $$"""
+                        { "data": { "type": "message_end", "message": { "role": "assistant",
+                          "usage": {{usageJson}} } } }
+                        """,
+                });
+                await db.SaveChangesAsync();
+            }
+
+            using var client = _fixture.CreateAuthenticatedClient(factory);
+            return await GetHtmlAsync(client, "/statistics");
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Statistics_page_states_a_billion_scale_counter_in_full()
+    {
+        var html = await StatisticsHtmlForPiUsageAsync(
+            """{ "input": 1234567890, "output": 40, "cacheRead": 0, "cacheWrite": 0 }""");
+
+        // Counters are exact, so every digit of the grouped total is on the page, not a
+        // rounded or abbreviated stand-in.
+        Assert.Contains("1,234,567,890", html);
+    }
+
+    [Fact]
+    public async Task Statistics_page_reads_a_cost_below_four_places_as_a_positive_bound()
+    {
+        var html = await StatisticsHtmlForPiUsageAsync(
+            """
+            { "input": 10, "output": 5, "cacheRead": 0, "cacheWrite": 0,
+              "cost": { "total": 0.00004 } }
+            """);
+
+        // A genuine estimate under the four-place form still reads as money that was spent:
+        // "< 0.0001" (escaped in the markup), never 0.0000 and never a plain 0.
+        Assert.Contains("&lt; 0.0001", html);
+        Assert.DoesNotContain("0.0000", html);
     }
 }

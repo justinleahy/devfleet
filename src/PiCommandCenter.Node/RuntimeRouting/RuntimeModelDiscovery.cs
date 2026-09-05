@@ -148,11 +148,11 @@ public sealed class RuntimeModelCommandRunner : IRuntimeModelCommandRunner
 }
 
 /// <summary>
-/// Queries each <see cref="AgentModelSelector"/> runtime through its node-owned discovery
+/// Queries each <see cref="AgentModelSelector"/> provider through its node-owned discovery
 /// mechanism. Every reported <see cref="RuntimeModelMessage.Id"/> is a canonical selector under
-/// the catalog's <see cref="RuntimeModelCatalogMessage.Runtime"/>, so it can be saved as-is.
+/// the catalog's <see cref="RuntimeModelCatalogMessage.Provider"/>, so it can be saved as-is.
 /// </summary>
-public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery
+public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery, IDisposable
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     // Claude Code cannot export the authenticated /model picker. Keep these stable aliases in
@@ -165,62 +165,134 @@ public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery
         new("claude-code/opus", "Opus (latest)", AgentModelSelector.ClaudeCode),
         new("claude-code/haiku", "Haiku (latest)", AgentModelSelector.ClaudeCode),
     ];
+    private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
     private readonly PiWorkerOptions _pi;
     private readonly AntigravityOptions _antigravity;
     private readonly INodeRuntimeRoutingStore _routes;
     private readonly IRuntimeModelCommandRunner _runner;
     private readonly IMuseModelCatalogReader _muse;
+    private readonly TimeProvider _timeProvider;
+    private readonly SemaphoreSlim _discoveryLock = new(1, 1);
+    private ExternalCatalogs? _cache;
 
     public RuntimeModelDiscovery(
         IOptions<PiWorkerOptions> pi,
         IOptions<AntigravityOptions> antigravity,
         INodeRuntimeRoutingStore routes,
         IRuntimeModelCommandRunner runner,
-        IMuseModelCatalogReader muse)
+        IMuseModelCatalogReader muse,
+        TimeProvider? timeProvider = null)
     {
         _pi = pi.Value;
         _antigravity = antigravity.Value;
         _routes = routes;
         _runner = runner;
         _muse = muse;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
+
+    /// <summary>
+    /// Cached Pi/Antigravity/Muse discovery results, including provider-level error catalogs.
+    /// Valid for <see cref="CacheLifetime"/> from the wave's completed result; Claude is excluded
+    /// because its catalog embeds live configured route selectors.
+    /// </summary>
+    private sealed record ExternalCatalogs(
+        IReadOnlyList<RuntimeModelCatalogMessage> Pi,
+        RuntimeModelCatalogMessage Antigravity,
+        RuntimeModelCatalogMessage Muse,
+        long CreatedTimestamp);
 
     public async Task<IReadOnlyList<RuntimeModelCatalogMessage>> DiscoverAsync(
         CancellationToken cancellationToken = default)
     {
-        var codex = DiscoverCodexAsync(cancellationToken);
-        var antigravity = DiscoverAntigravityAsync(cancellationToken);
-        var muse = DiscoverMuseAsync(cancellationToken);
-        await Task.WhenAll(codex, antigravity, muse).ConfigureAwait(false);
-        return [codex.Result, ClaudeCatalog(), antigravity.Result, muse.Result];
+        var external = await ExternalCatalogsAsync(cancellationToken).ConfigureAwait(false);
+        return [.. external.Pi, ClaudeCatalog(), external.Antigravity, external.Muse];
     }
 
     /// <summary>
-    /// Runs the worker's catalog script, which reports Pi's <c>openai-codex</c> models already
-    /// rewritten as <c>codex/&lt;id&gt;</c>.
+    /// Serves the Pi/Antigravity/Muse wave from the cache when fresh; otherwise runs one wave
+    /// under <see cref="_discoveryLock"/> with a double-checked expiry so concurrent misses
+    /// coalesce onto a single set of discovery processes. Cancellation or an escaping
+    /// exception leaves the cache unpopulated.
     /// </summary>
-    private async Task<RuntimeModelCatalogMessage> DiscoverCodexAsync(CancellationToken cancellationToken)
+    private async Task<ExternalCatalogs> ExternalCatalogsAsync(CancellationToken cancellationToken)
+    {
+        var cached = Volatile.Read(ref _cache);
+        if (IsFresh(cached))
+        {
+            return cached!;
+        }
+        if (!_discoveryLock.Wait(0, CancellationToken.None))
+        {
+            await _discoveryLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        try
+        {
+            cached = _cache;
+            if (IsFresh(cached))
+            {
+                return cached!;
+            }
+            var pi = DiscoverPiAsync(cancellationToken);
+            var antigravity = DiscoverAntigravityAsync(cancellationToken);
+            var muse = DiscoverMuseAsync(cancellationToken);
+            await Task.WhenAll(pi, antigravity, muse).ConfigureAwait(false);
+            var fresh = new ExternalCatalogs(
+                pi.Result, antigravity.Result, muse.Result,
+                _timeProvider.GetTimestamp());
+            Volatile.Write(ref _cache, fresh);
+            return fresh;
+        }
+        finally
+        {
+            _discoveryLock.Release();
+        }
+    }
+
+    private bool IsFresh(ExternalCatalogs? cached) =>
+        cached is not null && _timeProvider.GetElapsedTime(cached.CreatedTimestamp) < CacheLifetime;
+
+    public void Dispose()
+    {
+        _discoveryLock.Dispose();
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// Runs the worker's catalog script, which reports every authenticated Pi model using the
+    /// canonical flat <c>&lt;provider&gt;/&lt;model&gt;</c> selector encoding, and returns one
+    /// catalog per authenticated Pi provider. A discovery process failure degrades to a single
+    /// <c>codex</c> error catalog.
+    /// </summary>
+    private async Task<IReadOnlyList<RuntimeModelCatalogMessage>> DiscoverPiAsync(CancellationToken cancellationToken)
     {
         var script = Path.Combine(Path.GetDirectoryName(_pi.WorkerPath)!, "modelCatalog.ts");
         var result = await _runner.RunAsync(
             _pi.NodeExecutable, [script], _pi.AgentDataDirectory, cancellationToken).ConfigureAwait(false);
         if (result.TimedOut)
         {
-            return Error(AgentModelSelector.Codex, "Pi model discovery timed out.");
+            return [Error(AgentModelSelector.Codex, "Pi model discovery timed out.")];
         }
         if (result.ExitCode != 0 || result.Truncated)
         {
-            return Error(AgentModelSelector.Codex, Failure("Pi model discovery failed", result));
+            return [Error(AgentModelSelector.Codex, Failure("Pi model discovery failed", result))];
         }
         try
         {
             var models = JsonSerializer.Deserialize<List<RuntimeModelMessage>>(
                 result.StandardOutput, JsonOptions) ?? [];
-            return Catalog(AgentModelSelector.Codex, models);
+            return models
+                .Where(model => AgentModelSelector.TryParse(model.Id, out var selector) && selector.UsesPiRuntime)
+                .GroupBy(
+                    model => AgentModelSelector.Parse(model.Id).Provider,
+                    StringComparer.Ordinal)
+                .OrderBy(group => group.Key, StringComparer.Ordinal)
+                .Select(group => Catalog(group.Key, group))
+                .ToArray();
         }
         catch (JsonException ex)
         {
-            return Error(AgentModelSelector.Codex, $"Pi model discovery returned invalid JSON: {ex.Message}");
+            return [Error(AgentModelSelector.Codex, $"Pi model discovery returned invalid JSON: {ex.Message}")];
         }
     }
 
@@ -282,7 +354,7 @@ public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery
         var configured = _routes.Current.RoleRoutes
             .SelectMany(route => route.Candidates)
             .Where(candidate => AgentModelSelector.TryParse(candidate.Model, out var selector)
-                && selector.Runtime == AgentModelSelector.ClaudeCode)
+                && selector.Provider == AgentModelSelector.ClaudeCode)
             .Select(candidate => new RuntimeModelMessage(
                 candidate.Model, candidate.Model, AgentModelSelector.ClaudeCode));
         return Catalog(
@@ -291,30 +363,30 @@ public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery
     }
 
     /// <summary>
-    /// Keeps only ids that parse as canonical selectors under <paramref name="runtime"/>, so a
+    /// Keeps only ids that parse as canonical selectors under <paramref name="provider"/>, so a
     /// catalog can never offer a selector the registry would refuse.
     /// </summary>
     private static RuntimeModelCatalogMessage Catalog(
-        string runtime,
+        string provider,
         IEnumerable<RuntimeModelMessage> models,
         string? error = null)
     {
         var canonical = new Dictionary<string, RuntimeModelMessage>(StringComparer.Ordinal);
         foreach (var model in models)
         {
-            if (AgentModelSelector.TryParse(model.Id, out var selector) && selector.Runtime == runtime)
+            if (AgentModelSelector.TryParse(model.Id, out var selector) && selector.Provider == provider)
             {
                 canonical.TryAdd(selector.Value, model with { Id = selector.Value });
             }
         }
         return new RuntimeModelCatalogMessage(
-            runtime,
+            provider,
             canonical.Values.OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase).ToArray(),
             error);
     }
 
-    private static RuntimeModelCatalogMessage Error(string runtime, string message)
-        => new(runtime, [], message);
+    private static RuntimeModelCatalogMessage Error(string provider, string message)
+        => new(provider, [], message);
 
     private static string Failure(string prefix, ModelCommandResult result)
     {

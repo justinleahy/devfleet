@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { resolveConfiguredModel, type ModelCatalog } from "../src/sdk.ts";
+import { mapModelsToCatalog } from "../src/modelCatalog.ts";
 
 interface FakeModel {
   provider: string;
@@ -62,5 +63,23 @@ describe("model override resolution", () => {
     for (const value of ["default", "openai-codex/", "/gpt-6-astra"]) {
       await assert.rejects(resolveConfiguredModel(catalog, value), /provider\/model format/);
     }
+  });
+});
+
+describe("model catalog mapping", () => {
+  it("emits flat provider selectors with the OpenAI codex shorthand", () => {
+    const catalog = mapModelsToCatalog([
+      { provider: "kimi-coding", id: "k3", name: "Kimi K3" },
+      { provider: "openai-codex", id: "gpt-6-mini" },
+      { provider: "opencode-go", id: "big-pickle" },
+      { provider: "openai-codex", id: "gpt-6-astra", name: "GPT-6 Astra" },
+      { provider: "kimi-coding", id: "k3" },
+    ]);
+    assert.deepEqual(catalog, [
+      { id: "codex/gpt-6-astra", displayName: "GPT-6 Astra", provider: "openai-codex" },
+      { id: "codex/gpt-6-mini", displayName: "gpt-6-mini", provider: "openai-codex" },
+      { id: "kimi-coding/k3", displayName: "Kimi K3", provider: "kimi-coding" },
+      { id: "opencode-go/big-pickle", displayName: "big-pickle", provider: "opencode-go" },
+    ]);
   });
 });

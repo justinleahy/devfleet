@@ -77,7 +77,7 @@ public sealed class ClaudeCodeRuntimeAdapter : IAgentRuntimeAdapter
                 "A child session requires a parent session id.", nameof(request));
         }
 
-        if (request.Model.Runtime != AgentModelSelector.ClaudeCode)
+        if (request.Model.Provider != AgentModelSelector.ClaudeCode)
         {
             throw new NotSupportedException(
                 $"Claude Code adapter only accepts '{AgentModelSelector.ClaudeCode}/<model>' selectors; got '{request.Model}'.");

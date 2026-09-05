@@ -42,7 +42,7 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
     /// </summary>
     internal static string? ResolveModelArgument(AgentModelSelector selector)
     {
-        if (selector.Runtime != AgentModelSelector.Antigravity)
+        if (selector.Provider != AgentModelSelector.Antigravity)
         {
             throw new NotSupportedException(
                 $"Antigravity runtime only accepts '{AgentModelSelector.Antigravity}/<model>' selectors; got '{selector}'.");

@@ -108,6 +108,7 @@ public sealed class AgentSessionStore(
         Sequence = @event.Sequence,
         Type = @event.Type,
         OccurredAtUtcTicks = @event.OccurredAt.UtcTicks,
+        PayloadJson = SerializePayload(@event.Payload),
         ReceivedAtUtcTicks = clock.GetUtcNow().UtcTicks,
     };
 
@@ -155,6 +156,14 @@ public sealed class AgentSessionStore(
                 break;
             case double number:
                 writer.WriteNumberValue(number);
+                break;
+            case decimal number:
+                writer.WriteNumberValue(number);
+                break;
+            case JsonElement element:
+                // Nested telemetry (usage objects, cost breakdowns) arrives as JsonElement;
+                // write the raw value so objects/arrays/numbers survive the round-trip.
+                element.WriteTo(writer);
                 break;
             default:
                 writer.WriteStringValue(value.ToString());

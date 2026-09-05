@@ -152,7 +152,7 @@ memoryUsedBytes  = memory.current          # bytes, integer
 memoryTotalBytes = memory.max              # iff finite unsigned integer
 ```
 
-**Unlimited cgroup fallback:** if `memory.max` is the token `max` or unreadable → `memoryTotalBytes` from **host `MemTotal`** (kB × 1024). Keep `memoryUsedBytes` from `memory.current` when that file exists (container charge). If that makes `used > total` (possible if meminfo is namespaced oddly or current includes unreclaimable charge above reported total) → **null both** rather than invert.
+**Unlimited cgroup fallback:** if `memory.max` is the token `max` or unreadable → **both** `memoryUsedBytes` and `memoryTotalBytes` fall back to **host `/proc/meminfo`** (`MemTotal` / `MemAvailable`, kB × 1024), the same formulas as the host path. Do **not** keep `memoryUsedBytes` from `memory.current` in this case: pairing process-scope charge with host total is the Fedora/systemd unlimited-cgroup lie (tiny used vs host RAM). Finite `memory.max` still uses raw `memory.current` / finite `memory.max`. If after the host formulas `used > total` → **null both** rather than invert.
 
 Do not use `memory.high` (throttle, not hard max) or `memory.min`/`memory.low` (protection).
 
@@ -251,7 +251,7 @@ For every numeric field after the formula:
 | Metric | Bare-metal Fedora | Docker Compose (typical, unlimited) | Docker with cgroup limits |
 |---|---|---|---|
 | CPU % | `/proc/stat` delta | `/proc/stat` delta (`cpu.max` = `max`) | `cpu.stat` `usage_usec` / (`Δt` × quota) |
-| Memory used | `MemTotal − MemAvailable` | `memory.current` | `memory.current` |
+| Memory used | `MemTotal − MemAvailable` | `MemTotal − MemAvailable` (`memory.max` = `max`) | `memory.current` |
 | Memory total | `MemTotal` | `MemTotal` (`memory.max` = `max`) | finite `memory.max` |
 | Disk | `DriveInfo("/")` host root | container writable FS | same |
 | Load 1m | host `/proc/loadavg` | **host** load (not isolated) | **host** load |
@@ -263,9 +263,9 @@ For every numeric field after the formula:
 ## Recommendation
 
 1. Sample **once per existing heartbeat**. Persist only previous CPU counters + timestamp in RAM.
-2. Detect cgroup v2 via `/proc/self/cgroup`. Prefer cgroup files for CPU/memory **when they encode a real limit or charge**; otherwise procfs.
+2. Detect cgroup v2 via `/proc/self/cgroup`. Prefer cgroup files for CPU/memory **when they encode a real finite limit** (`cpu.max` / `memory.max`); otherwise procfs (including unlimited `max`).
 3. **CPU:** two-sample busy percent; **first sample null**; unlimited cgroup → `/proc/stat`; limited → `usage_usec` vs `cpu.max`.
-4. **Memory:** `memory.current` when present; total = finite `memory.max` else `MemTotal`; used on host = `MemTotal − MemAvailable`.
+4. **Memory:** finite `memory.max` → `memory.current` / that limit; unlimited or unreadable `memory.max` → **both** used and total from host `/proc/meminfo` (`MemTotal − MemAvailable`, `MemTotal`); host path is always those meminfo formulas.
 5. **Disk:** `DriveInfo("/")` with `IsReady`, `TotalSize`, `AvailableFreeSpace`.
 6. **Load / uptime:** procfs field 1 each; document as **host** metrics.
 7. Fail closed to `null` per field. No privileged APIs.
@@ -295,4 +295,4 @@ For every numeric field after the formula:
 
 ## Decision
 
-**2026-09-05.** Node system resources are a **nullable, fail-closed snapshot** on the existing heartbeat: procfs for host-global load/uptime and unlimited CPU/memory totals; cgroup v2 for container charge and finite limits; `DriveInfo("/")` for disk. First CPU sample is **null**. Unlimited `memory.max` / `cpu.max` **fall back to host procfs**, never to a fake 1-CPU or 0-byte budget.
+**2026-09-05.** Node system resources are a **nullable, fail-closed snapshot** on the existing heartbeat: procfs for host-global load/uptime and unlimited CPU/memory **used and totals**; cgroup v2 for container charge and finite limits; `DriveInfo("/")` for disk. First CPU sample is **null**. Unlimited `memory.max` / `cpu.max` **fall back to host procfs** (memory: both used and total from `/proc/meminfo`), never to a fake 1-CPU or 0-byte budget, and never pairing `memory.current` with host `MemTotal`.

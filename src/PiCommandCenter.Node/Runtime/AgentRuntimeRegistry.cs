@@ -6,8 +6,9 @@ using PiCommandCenter.Node.Runtime.Muse;
 namespace PiCommandCenter.Node.Runtime;
 
 /// <summary>
-/// Fixed runtime → adapter map keyed on the selector's trusted runtime prefix. Unknown runtimes
-/// are rejected; agents cannot pick executables.
+/// Routes by the selector's provider prefix: reserved official-harness providers map to their
+/// adapters and every other valid provider resolves to Pi. Selectors fail closed at parse time,
+/// so agents can never pick executables.
 /// </summary>
 public sealed class AgentRuntimeRegistry : IAgentRuntimeRegistry
 {
@@ -31,14 +32,12 @@ public sealed class AgentRuntimeRegistry : IAgentRuntimeRegistry
     public IAgentRuntimeAdapter Resolve(AgentModelSelector selector)
     {
         ArgumentNullException.ThrowIfNull(selector);
-        return selector.Runtime switch
+        return selector.Provider switch
         {
-            AgentModelSelector.Codex => _pi,
             AgentModelSelector.ClaudeCode => _claude,
             AgentModelSelector.Antigravity => _antigravity,
             AgentModelSelector.Muse => _muse,
-            _ => throw new NotSupportedException(
-                $"Runtime '{selector.Runtime}' is not in the trusted allowlist."),
+            _ => _pi,
         };
     }
 }

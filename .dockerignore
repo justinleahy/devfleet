@@ -1,8 +1,0 @@
-.git
-**/bin
-**/obj
-**/TestResults
-**/node_modules
-*.db
-*.db-shm
-*.db-wal

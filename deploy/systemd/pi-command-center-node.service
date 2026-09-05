@@ -6,10 +6,9 @@ Requires=pi-command-center-control-plane.service
 
 [Service]
 Type=simple
-WorkingDirectory=%h/.local/share/pi-command-center
-EnvironmentFile=%h/.local/share/pi-command-center/pi-command-center.env
-Environment=DOTNET_ENVIRONMENT=Production
-ExecStart=/usr/bin/dotnet %h/.local/lib/pi-command-center/node/PiCommandCenter.Node.dll
+WorkingDirectory=%h/.local/share/devfleet
+EnvironmentFile=%h/.local/share/devfleet/pi-command-center.env
+ExecStart=/usr/bin/dotnet %h/.local/lib/devfleet/node/PiCommandCenter.Node.dll
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=120
@@ -18,17 +17,19 @@ TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=read-only
-ReadWritePaths=%h/.local/share/pi-command-center %h/Developer
+ReadWritePaths=%h/.local/share/devfleet %h/Developer
+ReadWritePaths=-%h/.pi -%h/.claude -%h/.claude.json -%h/.gemini -%h/.config/muse
+ReadWritePaths=-%h/.cache -%h/.local/state
 ProtectSystem=strict
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=false
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 CapabilityBoundingSet=
+# Namespace-based kernel, control-group, clock, and hostname protections prevent Bubblewrap
+# from mounting the private /proc required by its PID namespace; the empty capability set and
+# inner read-only root already deny those privileged operations to the node and its children.
 SystemCallArchitectures=native
 UMask=0077
 

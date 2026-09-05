@@ -19,7 +19,7 @@ node_modules/
 .vscode/
 .idea/
 
-# Machine-local Docker Compose settings
+# Machine-local environment overrides
 .env
 .DS_Store
 

@@ -78,7 +78,7 @@ Public remaining-quota APIs are still absent. The private Pi/Claude HTTPS reader
 | Identity | One OS-keyring token profile; silent keyring else browser; SSH URL+code | **No** `--profile`, `--config`, documented HOME/XDG auth override, named-account list/select | **One Google identity per OS user/node.** Do not invent HOME-profile switching as a supported API |
 | Config tree | `~/.gemini/antigravity-cli/` settings, keybindings, `cli.log` | Multi-subscription selector | Single `antigravity-readonly` profile per node |
 | Non-subscription | `modelProvider: "gemini"` + `GEMINI_API_KEY` (env only). Enterprise: `gcloud auth application-default login` + `AGY_ADC_AUTH=true` | Treating API key / ADC as Pro/Ultra stacking (plans.md: no BYOK for extra consumer rate limits) | Separate **API/cloud** profiles, not consumer-plan pooling |
-| Quota | TUI `/usage` `/quota` `/credits`; headless **`agy -p /usage`** = **text report** (not stream-json) | Published JSON schema; private `cloudcode-pa.googleapis.com` retrieveUserQuota* | Pinned TSV parser already on node (agy 1.1.27); **manual Refresh only**; DevFleet never parses the oauth file |
+| Quota | TUI `/usage` `/quota` `/credits`; headless **`agy -p /usage`** = **text report** (not stream-json) | Published JSON schema; private `cloudcode-pa.googleapis.com` retrieveUserQuota* | Pinned TSV parser already on node (agy 1.1.27); collected by the five-minute node cache; DevFleet never parses the oauth file |
 
 **Current DevFleet seam:** official `agy` read-only reviewer; Bubblewrap host-root read-only. Usage: `RuntimeSubscriptionUsageProbe` runs `agy --version` then `agy -p /usage --print-timeout 30s`. Compose mounts `${HOME}/.gemini`; **do not** mount session D-Bus ([architecture.md](../architecture.md)). Missing auth → native **agy login**.
 
@@ -87,12 +87,16 @@ Public remaining-quota APIs are still absent. The private Pi/Claude HTTPS reader
 ## Current DevFleet credential / usage seam (as shipped)
 
 ```text
-Browser  GET /usage  (manual Refresh only)
+Browser  GET /usage  (load or manual Refresh)
     → Control Plane  NodeSubscriptionUsageGateway
     → SignalR client callback GetSubscriptionUsage()   // no args, 35s
-    → Node  IRuntimeSubscriptionUsageProbe.GetAsync
-         ├─ ReadPiAsync    (node-local auth.json → private chatgpt.com …/wham/usage)
-         ├─ claude --version; claude auth status; ReadClaudeAsync (private api.anthropic.com/api/oauth/usage)
+    → Node in-memory subscription-usage cache
+         └─ latest successful NodeSubscriptionUsageMessage
+
+Node cache worker  (immediate startup collection, then every five minutes)
+    → IRuntimeSubscriptionUsageProbe.GetAsync
+         ├─ Pi ModelRuntime usage sidecar
+         ├─ Anthropic OAuth usage supplement
          └─ agy -p /usage  (pinned TSV)
 Only normalized windows cross the hub. Credentials never leave the node.
 ```

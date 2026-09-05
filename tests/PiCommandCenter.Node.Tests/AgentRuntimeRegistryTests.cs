@@ -11,7 +11,7 @@ namespace PiCommandCenter.Node.Tests;
 public sealed class AgentRuntimeRegistryTests
 {
     [Fact]
-    public void Resolves_by_exact_runtime_prefix_and_rejects_unknown_runtimes()
+    public void Resolves_reserved_harness_providers_to_adapters_and_everything_else_to_pi()
     {
         var node = Options.Create(new NodeOptions { Id = Guid.NewGuid() });
         var pi = new PiRuntimeAdapter(
@@ -44,17 +44,22 @@ public sealed class AgentRuntimeRegistryTests
         var registry = new AgentRuntimeRegistry(pi, claude, antigravity, muse);
 
         Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("codex/default")));
-        Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("codex/gpt-6-astra")));
+        Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("codex/gpt-5.6-sol")));
+        Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("zai/glm-4.7")));
+        Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("kimi-coding/k3")));
+        Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("opencode-go/big-pickle")));
+        Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("custom-binary/default")));
         Assert.Same(claude, registry.Resolve(AgentModelSelector.Parse("claude-code/default")));
         Assert.Same(claude, registry.Resolve(AgentModelSelector.Parse("claude-code/fable-5-1")));
         Assert.Same(antigravity, registry.Resolve(AgentModelSelector.Parse("antigravity/default")));
         Assert.Same(muse, registry.Resolve(AgentModelSelector.Parse("muse/default")));
         Assert.Same(muse, registry.Resolve(AgentModelSelector.Parse("muse/muse-1")));
 
-        // Selectors fail closed before reaching the registry: no runtime, unknown runtime, or a
-        // case/whitespace variant of a trusted one never resolve to an executable.
+        // Selectors fail closed before reaching the registry: no provider, a malformed slug, a
+        // case/whitespace variant, or the reserved runtime name 'pi' never resolve to an
+        // executable. Unknown but syntactically valid providers route only to Pi.
         Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("custom-binary"));
-        Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("custom-binary/default"));
+        Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("pi/default"));
         Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("Codex/default"));
         Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("codex /default"));
         Assert.Throws<ArgumentNullException>(() => registry.Resolve(null!));

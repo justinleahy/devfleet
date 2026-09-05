@@ -27,6 +27,8 @@ public sealed class AntigravitySubscriptionUsageSourceTests
     {
         ProcessStartInfo? captured = null;
         var bwrap = Environment.ProcessPath!;
+        var geminiState = Directory.CreateDirectory(Path.Combine(
+            "/var/tmp", "pi-cc-agy-usage-tests", Guid.NewGuid().ToString("N"))).FullName;
         var runner = new AntigravitySubscriptionUsageCommandRunner(
             executeAsync: (startInfo, _) =>
             {
@@ -34,7 +36,8 @@ public sealed class AntigravitySubscriptionUsageSourceTests
                 return Task.FromResult(Ok(string.Empty));
             },
             bwrapPath: bwrap,
-            maskedLocations: []);
+            maskedLocations: [],
+            writableStateLocation: geminiState);
 
         await runner.RunAsync("/bin/echo", ["--version"], CancellationToken.None);
 
@@ -48,10 +51,12 @@ public sealed class AntigravitySubscriptionUsageSourceTests
                 "--dev", "/dev",
                 "--proc", "/proc",
                 "--ro-bind", "/tmp", "/tmp",
+                "--bind", geminiState, geminiState,
                 "--chdir", "/tmp",
                 "--", "/bin/echo", "--version",
             ],
             captured.ArgumentList.ToArray());
+        Directory.Delete(geminiState, recursive: true);
     }
 
     [Fact]

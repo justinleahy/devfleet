@@ -41,12 +41,13 @@ Defaults:
 
 | Variable | Default |
 |---|---|
-| `PI_CC_DATA` | `~/.local/share/pi-command-center` (`0700`) |
+| Data root | `~/.local/share/devfleet` (`0700`) |
+| Install root | `~/.local/lib/devfleet` |
 | Admin username | `admin` (`Admin:Username`) |
-| `Admin:PasswordFile` | `$PI_CC_DATA/admin.password.hash` (`0600`, password hash) |
-| `NodeAuthentication:CredentialFile` | `$PI_CC_DATA/node.token` (`0600`) |
+| `Admin:PasswordFile` | `$HOME/.local/share/devfleet/admin.password.hash` (`0600`, password hash) |
+| `NodeAuthentication:CredentialFile` | `$HOME/.local/share/devfleet/node.token` (`0600`) |
 
-The script also writes `$PI_CC_DATA/pi-command-center.env` with expanded absolute paths for the systemd user units. [deploy/pi-command-center.env.example](deploy/pi-command-center.env.example) documents its shape. Typed JSON examples: [deploy/appsettings.ControlPlane.example.json](deploy/appsettings.ControlPlane.example.json), [deploy/appsettings.Node.example.json](deploy/appsettings.Node.example.json).
+`scripts/setup-local.sh` writes owner-only `~/.local/share/devfleet/pi-command-center.env` with host paths for the persistent database, node spool, auth material, Data Protection keys, installed Pi worker and usage sidecar, resolved provider executables, the Claude credential path, and a service `PATH` including `~/.local/bin`. [deploy/pi-command-center.env.example](deploy/pi-command-center.env.example) documents its shape. Typed JSON examples: [deploy/appsettings.ControlPlane.example.json](deploy/appsettings.ControlPlane.example.json), [deploy/appsettings.Node.example.json](deploy/appsettings.Node.example.json).
 
 Install JS deps once:
 
@@ -66,8 +67,7 @@ If a session starts without provider auth, the UI shows blocked + input required
 
 ### Pi model configuration
 
-Configure models through Pi’s own agent data under `Pi:AgentDataDirectory` (default `~/.local/share/pi-command-center/pi-agent`). Do not put provider API keys in SQLite or `appsettings`. `Pi:WorkerPath` may be left empty; the node resolves `runtime/pi-worker/src/index.ts` from the content root.
-
+Configure models through Pi’s own agent data under `Pi:AgentDataDirectory` (default `~/.local/share/devfleet/pi-agent`). Do not put provider API keys in SQLite or `appsettings`. `Pi:WorkerPath` points at the installed worker under `~/.local/lib/devfleet` in production.
 ## Migrations
 
 The Control Plane applies EF Core migrations on startup (`MigrateAsync` in `src/PiCommandCenter.ControlPlane/Program.cs`). There is no separate migrate command for normal operation. Database file: `ConnectionStrings:ControlPlane` (SQLite).
@@ -77,7 +77,7 @@ The Control Plane applies EF Core migrations on startup (`MigrateAsync` in `src/
 Port **5057** on `127.0.0.1` (node default `Node:ControlPlaneUrl` is `http://127.0.0.1:5057`).
 
 ```bash
-export PI_CC_DATA="${PI_CC_DATA:-$HOME/.local/share/pi-command-center}"
+export PI_CC_DATA="${PI_CC_DATA:-$HOME/.local/share/devfleet}"
 export PI_CC_PORT="${PI_CC_PORT:-5057}"
 ./scripts/demo.sh
 ```
@@ -85,6 +85,9 @@ export PI_CC_PORT="${PI_CC_PORT:-5057}"
 `--smoke` uses a temporary data directory, never launches providers, and does **not** count as a completed demonstration.
 
 Open `http://127.0.0.1:5057/login`, sign in as `admin` with the password from `$PI_CC_DATA/admin.password`. Health: `curl -fsS http://127.0.0.1:5057/health`.
+
+After login: `/` fleet, `/attention`, `/usage` (subscription windows), `/statistics` (persisted session token totals and runtime client cost estimates, not invoices), `/routing`.
+
 
 Without the demo script:
 
@@ -97,92 +100,53 @@ dotnet run --project src/PiCommandCenter.Node/PiCommandCenter.Node.csproj --no-l
 
 Pass `Admin__PasswordFile`, `NodeAuthentication__CredentialFile`, and `Node__ControlPlaneUrl` via environment or `--environment` files. Missing auth material outside `Testing` stops the process with a message pointing at `scripts/setup-local.sh`.
 
-## Private-LAN HTTPS (phone)
+## Private-LAN access
 
-Do not bind `0.0.0.0` on HTTP. Use TLS and a certificate you trust on the phone:
+Production stays loopback-only unless installation receives a specific
+`DEVFLEET_BIND_ADDRESS`. Wildcards such as `0.0.0.0` and `::` are rejected. The
+native node still connects over `127.0.0.1`; only the authenticated browser
+surface is added on the selected address.
 
-```bash
-export ASPNETCORE_URLS="https://0.0.0.0:7443"
-export ASPNETCORE_Kestrel__Certificates__Default__Path="$PI_CC_DATA/https/devcert.pfx"
-export ASPNETCORE_Kestrel__Certificates__Default__PasswordFile="$PI_CC_DATA/https/devcert.password"
-```
+The built-in LAN listener is HTTP. Use it only on a trusted private LAN, and
+allow port 5057 only on the intended firewall interface. Put a trusted TLS
+reverse proxy in front before exposing DevFleet beyond that boundary.
 
-Point `ControlPlane:BaseUrl` and `Node:ControlPlaneUrl` at `https://<workstation-lan-ip>:7443`. Keep `NodeAuthentication` and cookie auth enabled. Firewall: allow 7443 only on the intended interface.
+## Production: systemd user daemon
 
-## Docker Compose
-
-The Compose stack publishes both .NET services, installs the Pi worker on Node.js 26,
-persists state under `~/.local/share/devfleet`, and binds the UI to loopback only.
+systemd user units are the **only** production deployment. There is no Docker or Compose stack. Binaries live under the protected install root `~/.local/lib/devfleet`; live state lives under `~/.local/share/devfleet`. Default bind is loopback. Set `DEVFLEET_BIND_ADDRESS` to a specific LAN address when installing to publish there. Provider CLIs and credential stores stay host-native (`claude`, `agy`, `muse`, `~/.pi/agent`, `~/.claude`, `~/.gemini`, `~/.config/muse`); units allow those writable project and provider paths. No container mounts.
 
 ```bash
-PI_CC_DATA="$HOME/.local/share/devfleet" ./scripts/setup-local.sh
-DEVFLEET_BIND_ADDRESS=10.0.0.20 docker compose up --build --detach
-docker compose ps
-docker compose logs --follow
+# Omit DEVFLEET_BIND_ADDRESS for loopback-only deployment.
+DEVFLEET_BIND_ADDRESS=10.0.0.20 ./scripts/install-systemd.sh
+systemctl --user status pi-command-center-control-plane.service pi-command-center-node.service
+journalctl --user -u pi-command-center-control-plane.service -u pi-command-center-node.service -f
+systemctl --user restart pi-command-center-control-plane.service pi-command-center-node.service
 ```
 
-Open `http://<DEVFLEET_BIND_ADDRESS>:5057`. Omit `DEVFLEET_BIND_ADDRESS` to keep
-the deployment loopback-only. The node mounts `~/Developer` at the same absolute
-path, bind-mounts host `~/.local/bin` read-only at `/usr/local/lib/muse` because
-the Muse launcher needs its sibling version metadata and binary
-(`Muse__Executable=/usr/local/lib/muse/muse`, `MUSE_NO_AUTO_UPDATE=1`), and mounts
-host provider state under the node HOME
-(`~/.pi/agent`, `~/.claude`, `~/.claude.json`, `~/.gemini`, `~/.config/muse`)
-using `:z`. No D-Bus, keyring, OMP binary, or `~/.omp/agent` mounts. Muse
-authenticates through its own `~/.config/muse` state from a host `muse login`.
-Pi remains the production orchestrator. Remaining quota starts with the bundled
-Pi-SDK sidecar configured by `SubscriptionUsage__NodeExecutable=node` and
-`SubscriptionUsage__ScriptPath=/app/runtime/pi-worker/src/usage.ts`; the image
-does not need a host Pi or OMP quota command. The sidecar can report
-`openai-codex`, `anthropic`, `kimi-code`, `zai`, `xai-oauth`, and `opencode-go`
-through Pi `ModelRuntime`.
+`install-systemd.sh` runs idempotent local setup, publishes Control Plane, Node, and `runtime/` production npm dependencies under `~/.local/lib/devfleet`, installs hardened user units `pi-command-center-control-plane.service` and `pi-command-center-node.service`, reloads systemd, and enables/restarts both services. Units load `~/.local/share/devfleet/pi-command-center.env`. Default bind is `127.0.0.1`; `DEVFLEET_BIND_ADDRESS` adds one specific LAN listener while retaining loopback for the local node connection.
 
-Two provider-native readers run concurrently with that sidecar on each manual
-Refresh. Anthropic uses the owner-only Claude Code OAuth store at
-`SubscriptionUsage__ClaudeCredentialPath` (Compose:
-`/home/node/.claude/.credentials.json`) and the exact Anthropic usage/token
-origins. Google Antigravity uses the mounted official `agy` binary and its
-`~/.gemini` state to run the bounded `agy -p /usage --print-timeout 8s` report.
-Their cards replace a same-id sidecar card or append in registration order;
-one failed source cannot suppress its siblings. All reads are bounded and fail
-closed with stable diagnostics, at most 8 windows, and no credentials, raw
-bodies, stdout, or PII in output. Cursor and Muse have no subscription-usage
-card. No OMP binary, package, credential store, or mount is used.
-The node process runs as uid 1000, but the container receives the full capability
-bounding set and an unconfined seccomp profile so its setuid `bwrap` can create the
-nested namespaces required by verification and read-only agent sandboxes.
+Linger if the stack must run without a graphical login: `loginctl enable-linger "$USER"`.
+
+Open `http://127.0.0.1:5057` (or `http://<DEVFLEET_BIND_ADDRESS>:5057` when bound to a LAN address).
 
 ### Change the administrator password
 
-Passwords supplied on stdin must contain at least 12 characters. This avoids exposing
-the password in shell history or the process list:
+Passwords on stdin must contain at least 12 characters. Rotate through the **installed** control-plane DLL so the live hash file is updated in place:
 
 ```bash
+set -a
+source "$HOME/.local/share/devfleet/pi-command-center.env"
+set +a
 read -rsp "New DevFleet password: " password; echo
 printf '%s\n' "$password" |
-  docker compose run --rm -T control-plane --setup --force --password-stdin
+  dotnet "$HOME/.local/lib/devfleet/control-plane/PiCommandCenter.ControlPlane.dll" --setup --force --password-stdin
 printf '%s' "$password" > "$HOME/.local/share/devfleet/admin.password"
 chmod 0600 "$HOME/.local/share/devfleet/admin.password"
 unset password
-docker compose restart control-plane node
+systemctl --user restart pi-command-center-control-plane.service pi-command-center-node.service
 ```
 
 Forced setup also rotates the node credential, so both services must restart.
-
-## systemd user install
-
-Units launch **published** binaries under the protected install root `~/.local/lib/pi-command-center` (not the source tree, so approved `~/Developer` repos cannot overwrite the runtime).
-
-```bash
-./scripts/install-systemd.sh
-systemctl --user enable --now pi-command-center-control-plane.service pi-command-center-node.service
-systemctl --user status pi-command-center-control-plane.service pi-command-center-node.service
-journalctl --user -u pi-command-center-control-plane.service -u pi-command-center-node.service -f
-```
-
-`install-systemd.sh` runs `setup-local.sh`, publishes Control Plane and Node, copies `runtime/` with `npm ci --omit=dev`, and installs the user units. Override the install prefix only under `~/.local/lib/pi-command-center` via `PI_CC_INSTALL_ROOT`.
-
-Linger if you need the stack without a graphical login: `loginctl enable-linger "$USER"`.
 
 ## Demo
 
@@ -229,23 +193,37 @@ RUN_REAL_PI_TESTS=1 RUN_REAL_CLAUDE_TESTS=1 RUN_REAL_ANTIGRAVITY_TESTS=1 dotnet 
 | `Antigravity:*` | `Executable` (`agy`), timeouts, line caps |
 | `Muse:*` | `Executable` (`muse`), timeouts, line caps; read-only `muse serve` (MSP) with write and shell tools disabled |
 | `Verification:Profiles` | Trusted command lists (agents cannot supply executables) |
-| `SubscriptionUsage:*` | `NodeExecutable` + `ScriptPath` (Compose: `node`, `/app/runtime/pi-worker/src/usage.ts`) |
+| `SubscriptionUsage:*` | `NodeExecutable` + `ScriptPath` (installed worker usage sidecar under `~/.local/lib/devfleet`) |
 
 `Pi:Model` is the canonical root selector (`codex/default`). `Pi:RoleRoutes:<role>` is an
-ordered list of `{ Model }` candidates with canonical `<runtime>/<model>` values (trusted
-prefixes `codex`, `claude-code`, `antigravity`, `muse`; `default` asks the provider for its default).
-The selector chooses a trusted runtime+model; the node—not the root agent—tries candidates
+ordered list of `{ Model }` candidates with canonical `<provider>/<model>` values (for example
+`codex/gpt-5.6-sol` or `zai/glm-4.7`; `default` asks the provider for its default). The reserved
+prefixes `claude-code`, `antigravity`, and `muse` select their official-harness adapters; every
+other provider prefix runs through Pi (`codex` aliases Pi's `openai-codex`; the rest pass
+through identically) and fails closed unless authenticated. The selector chooses the provider
+and model; the node—not the root agent—tries candidates
 in order until a runtime starts. `muse/*` runs the official Muse Code CLI over its
 stable JSON-RPC MSP schema with `--disable-write --disable-shell`, so it belongs only
 in read-oriented routes (architect, reviewer), never in implementer or verifier
 routes. Auth failures surface as blocked + `muse login`; DevFleet never collects Muse
 credentials or reads its auth file. See `deploy/appsettings.Node.example.json`.
 
+Every provider prefix outside the reserved official harnesses (`claude-code`,
+`antigravity`, `muse`) runs on Pi as the runtime adapter, which covers every
+authenticated Pi provider, not only OpenAI. `codex` aliases Pi's `openai-codex`
+provider (`codex/default`, `codex/gpt-5.6-sol`); every other Pi provider prefix
+passes through identically (e.g. `zai/glm-4.7`), and an unauthenticated or
+unavailable provider fails closed. Model discovery returns one catalog per
+authenticated Pi provider, so every reported selector is runnable.
+
 Authenticated operators can edit these routes at `/routing`. The page talks to the
 selected online node over the existing SignalR connection; updates take effect for the
 next child spawn and are persisted as `role-routes.json` under `Pi:AgentDataDirectory`.
-**Refresh models** queries the node's authenticated Pi catalog, `agy models`, and Muse's
-`model/list`. Claude Code cannot export its authenticated model picker, so DevFleet
+**Refresh models** queries the node's authenticated Pi providers, `agy models`, and Muse's
+`model/list`. Those three discovery snapshots are cached in memory on the node for five
+minutes, so repeated refreshes reuse the last completed snapshot instead of relaunching
+every discovery process. Claude aliases and configured route selectors are recomputed from
+live routing on every request. Claude Code cannot export its authenticated model picker, so DevFleet
 offers a maintained list of stable aliases (`default`, `fable`, `sonnet`, `opus`, and
 `haiku`) plus any full Claude selectors already used in a route. Muse 1.0.3's bundled
 MSP catalog can omit supported models, so DevFleet augments the live `model/list`

@@ -72,7 +72,16 @@ public sealed class PiRuntimeAdapterStartFlowTests
     }
 
     [Fact]
-    public async Task Non_codex_selector_is_rejected_before_the_worker_starts()
+    public async Task Pi_backed_provider_selector_is_sent_as_the_exact_sdk_provider_model()
+    {
+        var result = await StartRootAsync(
+            MakeRequest(AgentRuntimeMode.Child, "review", "pi-root-1", "zai/glm-4.7"));
+
+        Assert.Equal("zai/glm-4.7", result.StartPayload?.GetProperty("model").GetString());
+    }
+
+    [Fact]
+    public async Task Non_pi_selector_is_rejected_before_the_worker_starts()
     {
         var harness = new Harness(DefaultOptions());
         await Assert.ThrowsAsync<NotSupportedException>(

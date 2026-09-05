@@ -180,10 +180,12 @@ The operator accepted the Claude Code private first-party OAuth endpoint and
 the official agy headless report to restore real Anthropic and Google
 Antigravity cards while keeping Pi as the orchestrator. Consequences:
 
-1. Manual refresh only; no background quota polling.
+1. The node collects immediately at startup, then refreshes a non-persistent
+   in-memory cache every five minutes. Browser reads never poll providers.
 2. Exact HTTPS origins, no redirects, bounded files/bodies/processes.
-3. Private or pinned schema drift produces a closed card, never stale or guessed
-   numbers.
+3. A failed refresh retains the timestamped last successful snapshot. Private
+   or pinned schema drift produces a closed card on the next completed collection;
+   numbers are never guessed.
 4. Provider-native credentials stay node-local and are never exposed through
    diagnostics or DTOs.
 5. Cursor and Muse remain outside the subscription-usage contract.

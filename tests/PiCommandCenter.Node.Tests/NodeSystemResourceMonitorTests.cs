@@ -109,7 +109,7 @@ public sealed class NodeSystemResourceMonitorTests : IDisposable
     }
 
     [Fact]
-    public void First_cpu_sample_is_null_then_host_delta_when_cgroup_cpu_is_unlimited()
+    public void Unlimited_cgroup_memory_falls_back_to_host_procfs_totals()
     {
         WriteCgroupMembership("/docker/open");
         var cgroup = Path.Combine(_root, "sys", "fs", "cgroup", "docker", "open");
@@ -126,8 +126,8 @@ public sealed class NodeSystemResourceMonitorTests : IDisposable
         var monitor = CreateMonitor(disk: (Ready: false, Total: 0L, Available: 0L));
         var first = monitor.Capture();
         Assert.Null(first.CpuUsagePercent);
-        Assert.Equal(50L, first.MemoryUsedBytes);
         Assert.Equal(4096L * 1024, first.MemoryTotalBytes);
+        Assert.Equal(3072L * 1024, first.MemoryUsedBytes);
         Assert.Null(first.DiskUsedBytes);
         Assert.Null(first.DiskTotalBytes);
 

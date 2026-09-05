@@ -3,12 +3,9 @@ using System.Diagnostics;
 namespace PiCommandCenter.Node.Runtime.Antigravity;
 
 /// <summary>
-/// Trusted OS boundary that makes the complete host filesystem read-only for Antigravity.
-/// The repository overlay is explicit for auditability; escaping workspace symlinks still land
-/// on the read-only root mount. Cross-provider credential stores (the current and legacy Pi
-/// OAuth mounts, the Claude home, and the Muse config directory) are masked with private empty
-/// tmpfs mounts so a model-driven process can neither read nor exfiltrate them. Antigravity's
-/// own <c>~/.gemini</c> file store stays readable.
+/// Trusted OS boundary that makes the host filesystem and repository read-only while keeping
+/// Antigravity's own state directory writable. Cross-provider credential stores are masked with
+/// private empty tmpfs mounts so a model-driven process can neither read nor exfiltrate them.
 /// </summary>
 public static class AntigravityReadOnlySandbox
 {
@@ -17,13 +14,23 @@ public static class AntigravityReadOnlySandbox
         + "Install bubblewrap (`bwrap`) so the repository can be bind-mounted read-only. "
         + "agy defaults to auto-allowing workspace writes.";
 
+    /// <summary>Antigravity's host-native credential, cache, and log directory.</summary>
+    public static readonly string StateLocation = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".gemini");
+
     /// <summary>
     /// Host locations that hold other providers' OAuth stores. Each existing directory is
     /// replaced by an empty private tmpfs inside every Antigravity process. Order-sensitive:
     /// the masks are the last mounts in the bwrap argv so no earlier bind is re-exposed.
     /// </summary>
     public static readonly IReadOnlyList<string> MaskedSecretLocations =
-        ["/provider-auth", "/home/node/.pi/agent", "/home/node/.claude", "/home/node/.config/muse"];
+    [
+        "/provider-auth",
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".pi", "agent"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude"),
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "muse"),
+    ];
 
     public static string? FindBwrap()
     {
@@ -47,19 +54,17 @@ public static class AntigravityReadOnlySandbox
     }
 
     /// <summary>
-    /// Rewrites <paramref name="psi"/> to execute through <c>bwrap</c> with the read-only
-    /// host-root and repository mounts followed by the credential masks. Throws an actionable
-    /// <see cref="InvalidOperationException"/> when the boundary or a mask cannot be established.
+    /// Rewrites <paramref name="psi"/> to execute through <c>bwrap</c> with the read-only host
+    /// root and repository, writable Antigravity state, and masked sibling credentials.
     /// </summary>
-    /// <param name="maskedLocations">
-    /// Overrides <see cref="MaskedSecretLocations"/>; intended for tests that cannot create the
-    /// production paths on the host.
-    /// </param>
+    /// <param name="maskedLocations">Overrides sibling credential masks for tests.</param>
+    /// <param name="writableStateLocation">Overrides Antigravity's writable state path for tests.</param>
     public static void Apply(
         ProcessStartInfo psi,
         string workingDirectory,
         string? bwrapPath = null,
-        IReadOnlyList<string>? maskedLocations = null)
+        IReadOnlyList<string>? maskedLocations = null,
+        string? writableStateLocation = null)
     {
         ArgumentNullException.ThrowIfNull(psi);
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
@@ -85,12 +90,13 @@ public static class AntigravityReadOnlySandbox
             throw new InvalidOperationException(UnavailableMessage);
         }
 
+        var state = ResolveWritableState(repo, writableStateLocation ?? StateLocation);
         var masks = ResolveMasks(repo, maskedLocations ?? MaskedSecretLocations);
 
         var originalArgs = psi.ArgumentList.ToArray();
         psi.FileName = bwrap;
         psi.ArgumentList.Clear();
-        foreach (var argument in Prefix(repo, masks, originalFile))
+        foreach (var argument in Prefix(repo, state, masks, originalFile))
         {
             psi.ArgumentList.Add(argument);
         }
@@ -99,6 +105,89 @@ public static class AntigravityReadOnlySandbox
         {
             psi.ArgumentList.Add(argument);
         }
+    }
+
+    private static string? ResolveWritableState(string repo, string location)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(location);
+        var state = Path.GetFullPath(location);
+        if (Directory.Exists(state))
+        {
+            // Bind mounts follow symlinks on the host, so containment must be decided on the
+            // real filesystem targets: a symlinked ancestor in either path could smuggle the
+            // writable bind inside the read-only repository. Unresolvable aliases fail closed.
+            var realRepo = ResolveFilesystemTarget(repo);
+            var realState = ResolveFilesystemTarget(state);
+            if (realRepo is null || realState is null)
+            {
+                throw new InvalidOperationException(
+                    $"BLOCKED — Antigravity cannot resolve the real filesystem targets of '{state}' and '{repo}' (dangling or ambiguous symlinks); refusing the writable bind.");
+            }
+
+            if (IsWithin(realRepo, realState) || IsWithin(realState, realRepo))
+            {
+                throw new InvalidOperationException(
+                    $"BLOCKED — Antigravity state location '{state}' overlaps working directory '{repo}'.");
+            }
+
+            return state;
+        }
+
+        if (Path.Exists(state))
+        {
+            throw new InvalidOperationException(
+                $"BLOCKED — Antigravity state location '{state}' is not a directory.");
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Returns <paramref name="path"/> with every existing component — including symlinked
+    /// ancestors — resolved to its final target, or <c>null</c> when any component is missing
+    /// or a link cannot be fully resolved.
+    /// </summary>
+    private static string? ResolveFilesystemTarget(string path)
+    {
+        var full = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(full);
+        if (string.IsNullOrEmpty(root))
+        {
+            return null;
+        }
+
+        var current = root;
+        foreach (var component in full.Substring(root.Length).Split(
+            Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            var candidate = Path.Combine(current, component);
+            FileSystemInfo? info = Directory.Exists(candidate)
+                ? new DirectoryInfo(candidate)
+                : File.Exists(candidate)
+                    ? new FileInfo(candidate)
+                    : null;
+            if (info is null)
+            {
+                return null;
+            }
+
+            if (info.LinkTarget is not null)
+            {
+                var resolved = info.ResolveLinkTarget(returnFinalTarget: true);
+                if (resolved is null || !resolved.Exists)
+                {
+                    return null;
+                }
+
+                current = resolved.FullName;
+            }
+            else
+            {
+                current = candidate;
+            }
+        }
+
+        return current;
     }
 
     /// <summary>
@@ -140,7 +229,11 @@ public static class AntigravityReadOnlySandbox
 
     // bwrap applies mounts in argv order and later mounts shadow earlier ones on the same path,
     // so the masks follow every bind and precede only --chdir and the command.
-    private static IEnumerable<string> Prefix(string repo, IReadOnlyList<string> masks, string executable)
+    private static IEnumerable<string> Prefix(
+        string repo,
+        string? state,
+        IReadOnlyList<string> masks,
+        string executable)
     {
         yield return "--die-with-parent";
         yield return "--new-session";
@@ -155,6 +248,13 @@ public static class AntigravityReadOnlySandbox
         yield return "--ro-bind";
         yield return repo;
         yield return repo;
+        if (state is not null)
+        {
+            yield return "--bind";
+            yield return state;
+            yield return state;
+        }
+
         foreach (var mask in masks)
         {
             yield return "--tmpfs";

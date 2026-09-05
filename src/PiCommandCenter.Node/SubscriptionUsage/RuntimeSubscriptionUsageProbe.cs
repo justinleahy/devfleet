@@ -353,24 +353,28 @@ public sealed class AntigravitySubscriptionUsageCommandRunner
         Task<SubscriptionUsageCommandResult>> _executeAsync;
     private readonly string? _bwrapPath;
     private readonly IReadOnlyList<string>? _maskedLocations;
+    private readonly string? _writableStateLocation;
 
     public AntigravitySubscriptionUsageCommandRunner()
         : this(
             new RuntimeSubscriptionUsageCommandRunner().ExecutePreparedAsync,
             bwrapPath: null,
-            maskedLocations: null)
+            maskedLocations: null,
+            writableStateLocation: null)
     {
     }
 
     internal AntigravitySubscriptionUsageCommandRunner(
         Func<ProcessStartInfo, CancellationToken, Task<SubscriptionUsageCommandResult>> executeAsync,
         string? bwrapPath,
-        IReadOnlyList<string>? maskedLocations)
+        IReadOnlyList<string>? maskedLocations,
+        string? writableStateLocation = null)
     {
         ArgumentNullException.ThrowIfNull(executeAsync);
         _executeAsync = executeAsync;
         _bwrapPath = bwrapPath;
         _maskedLocations = maskedLocations;
+        _writableStateLocation = writableStateLocation;
     }
 
     public Task<SubscriptionUsageCommandResult> RunAsync(
@@ -396,7 +400,8 @@ public sealed class AntigravitySubscriptionUsageCommandRunner
             startInfo,
             WorkingDirectory,
             _bwrapPath,
-            _maskedLocations);
+            _maskedLocations,
+            _writableStateLocation);
         return _executeAsync(startInfo, cancellationToken);
     }
 

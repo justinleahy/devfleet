@@ -20,9 +20,12 @@
         <p class="page-lead">
             Each role starts on the first model selector in its list that can run; the next
             candidate is tried only when the one before it fails. A selector is
-            <code>&lt;runtime&gt;/&lt;model&gt;</code>, so it names the adapter and the model at
-            once. The models and the commands behind them live on the node, so this page only
-            reorders what the node reports it can do.
+            <code>&lt;provider&gt;/&lt;model&gt;</code> — for example <code>codex/gpt-5.6-sol</code> or
+            <code>zai/glm-4.7</code> — so it names the provider and the model at once. Pi is the
+            runtime adapter behind every provider except the official harnesses
+            <code>claude-code</code>, <code>antigravity</code>, and <code>muse</code>. The models and
+            the commands behind them live on the node, so this page only reorders what the node
+            reports it can do.
         </p>
     </header>
 
@@ -113,9 +116,10 @@
         <section aria-labelledby="models-heading">
             <h2 id="models-heading">Model catalogs</h2>
             <p class="panel-lead">
-                Pi, Antigravity, and Muse model lists are queried from the node. Claude Code uses
-                a curated list of stable aliases maintained by DevFleet. You can still type any
-                canonical selector by hand.
+                The node reports one catalog per provider: Pi contributes one for each of its
+                authenticated providers, while Claude Code, Antigravity, and Muse use their own
+                adapters (Claude Code's list is a curated set of stable aliases maintained by
+                DevFleet). You can still type any canonical selector by hand.
             </p>
 
             @if (_discoveryError is not null)
@@ -131,22 +135,17 @@
             {
                 <p class="panel-empty">
                     No catalog has been fetched yet. Refresh models to ask this node what each
-                    runtime can serve; until then every selector stays free text.
+                    provider can serve; until then every selector stays free text.
                 </p>
             }
             else
             {
                 <ul class="catalog-list">
-                    @foreach (var runtime in AgentModelSelector.Runtimes)
+                    @foreach (var catalog in _catalogs.Values)
                     {
-                        var catalog = Catalog(runtime);
                         <li class="catalog-row">
-                            <span class="node-name">@runtime</span>
-                            @if (catalog is null)
-                            {
-                                <span class="node-missing">Not reported</span>
-                            }
-                            else if (catalog.Error is not null)
+                            <span class="node-name">@catalog.Provider</span>
+                            @if (catalog.Error is not null)
                             {
                                 <FluentBadge Appearance="Appearance.Neutral">Unavailable</FluentBadge>
                                 <span class="catalog-error">@catalog.Error</span>
@@ -320,7 +319,7 @@
     private readonly Dictionary<string, RuntimeModelCatalogMessage> _catalogs =
         new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Canonical selectors offered by the node, grouped in runtime catalog order.</summary>
+    /// <summary>Canonical selectors offered by the node, grouped in provider catalog order.</summary>
     private readonly List<string> _selectors = [];
 
     /// <summary>Discovered model behind each canonical selector, for the echo under a field.</summary>
@@ -439,7 +438,7 @@
             _catalogs.Clear();
             foreach (var catalog in catalogs)
             {
-                _catalogs[catalog.Runtime] = catalog;
+                _catalogs[catalog.Provider] = catalog;
             }
 
             IndexCatalogs();
@@ -535,9 +534,9 @@
     {
         _selectors.Clear();
         _discovered.Clear();
-        foreach (var runtime in AgentModelSelector.Runtimes)
+        foreach (var catalog in _catalogs.Values)
         {
-            if (Catalog(runtime) is not { Error: null } catalog)
+            if (catalog.Error is not null)
             {
                 continue;
             }
@@ -598,8 +597,8 @@
         }
     }
 
-    private RuntimeModelCatalogMessage? Catalog(string runtime) =>
-        _catalogs.TryGetValue(runtime, out var catalog) ? catalog : null;
+    private RuntimeModelCatalogMessage? Catalog(string provider) =>
+        _catalogs.TryGetValue(provider, out var catalog) ? catalog : null;
 
     private static string? SelectorError(CandidateEditor candidate)
     {
@@ -610,9 +609,8 @@
 
         return AgentModelSelector.TryParse(candidate.Selector, out _)
             ? null
-            : "Use '<runtime>/<model>' with one of: "
-                + string.Join(", ", AgentModelSelector.Runtimes)
-                + $". Example: {FallbackSelector}.";
+            : "Use '<provider>/<model>' with a lowercase provider prefix, for example "
+                + "codex/gpt-5.6-sol or zai/glm-4.7.";
     }
 
     /// <summary>
@@ -631,15 +629,15 @@
 
         if (selector.IsProviderDefault)
         {
-            return $"{selector.Runtime} on its own default model.";
+            return $"{selector.Provider} on its own default model.";
         }
 
-        var catalog = Catalog(selector.Runtime);
+        var catalog = Catalog(selector.Provider);
         if (catalog is null)
         {
             return _discoveredAt is null
                 ? "Not checked against a catalog yet; refresh models to confirm it."
-                : "This node reported no catalog for this runtime; sent as typed.";
+                : "This node reported no catalog for this provider; sent as typed.";
         }
 
         return catalog.Error is not null
@@ -706,7 +704,7 @@
     }
 
     /// <summary>
-    /// One route step. The single canonical <c>&lt;runtime&gt;/&lt;model&gt;</c> selector picks both
+    /// One route step. The single canonical <c>&lt;provider&gt;/&lt;model&gt;</c> selector picks both
     /// the adapter and the model, so there is nothing else to edit.
     /// </summary>
     private sealed class CandidateEditor

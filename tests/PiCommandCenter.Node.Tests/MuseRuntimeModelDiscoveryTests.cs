@@ -22,8 +22,8 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
 
         var catalogs = await Discover(reader);
 
-        Assert.Equal(AgentModelSelector.Runtimes, catalogs.Select(catalog => catalog.Runtime));
-        var muse = catalogs.Single(catalog => catalog.Runtime == AgentModelSelector.Muse);
+        Assert.Equal(["claude-code", "antigravity", "muse"], catalogs.Select(catalog => catalog.Provider));
+        var muse = catalogs.Single(catalog => catalog.Provider == AgentModelSelector.Muse);
         Assert.Null(muse.Error);
         Assert.Equal(
             [
@@ -90,19 +90,21 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
     public async Task Cancellation_reaches_the_reader_and_aborts_discovery()
     {
         using var cancellation = new CancellationTokenSource();
+        var reader = new CancellationAwareMuseReader();
+        var discovery = Discover(reader, cancellation.Token);
+        await reader.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
         await cancellation.CancelAsync();
-        var reader = new FakeMuseReader(new MuseModelCatalogResult(["muse/llama-a"], null));
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Discover(reader, cancellation.Token));
-
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => discovery);
         Assert.True(reader.LastToken.IsCancellationRequested);
     }
 
     private async Task<RuntimeModelCatalogMessage> DiscoverMuse(FakeMuseReader reader)
-        => (await Discover(reader)).Single(catalog => catalog.Runtime == AgentModelSelector.Muse);
+        => (await Discover(reader)).Single(catalog => catalog.Provider == AgentModelSelector.Muse);
 
     private async Task<IReadOnlyList<RuntimeModelCatalogMessage>> Discover(
-        FakeMuseReader reader,
+        IMuseModelCatalogReader reader,
         CancellationToken cancellationToken = default)
     {
         var worker = new PiWorkerOptions
@@ -118,7 +120,8 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
             Options.Create(new AntigravityOptions { Executable = "agy-test" }),
             store,
             new EmptyModelRunner(),
-            reader);
+            reader,
+            TimeProvider.System);
         return await discovery.DiscoverAsync(cancellationToken);
     }
 
@@ -136,6 +139,22 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
             LastToken = cancellationToken;
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(result);
+        }
+    }
+
+    private sealed class CancellationAwareMuseReader : IMuseModelCatalogReader
+    {
+        public TaskCompletionSource Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public CancellationToken LastToken { get; private set; }
+
+        public async Task<MuseModelCatalogResult> ReadAsync(CancellationToken cancellationToken)
+        {
+            LastToken = cancellationToken;
+            Started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("Infinite delay completed unexpectedly.");
         }
     }
 

@@ -40,7 +40,7 @@ public sealed class PiWorkerOptionsValidatorTests
             [
                 new() { Model = "claude-code/default" },
                 new() { Model = " claude-code/default " },
-                new() { Model = "arbitrary-executable/model" },
+                new() { Model = "pi/model" },
                 new() { Model = "opus" },
                 new() { Model = " " },
             ],
@@ -51,14 +51,14 @@ public sealed class PiWorkerOptionsValidatorTests
         Assert.False(result.Succeeded);
         var failures = result.Failures ?? [];
         Assert.Contains(failures, failure => failure.Contains("duplicate model candidate 'claude-code/default'", StringComparison.Ordinal));
-        Assert.Contains(failures, failure => failure.Contains("got 'arbitrary-executable/model'", StringComparison.Ordinal));
+        Assert.Contains(failures, failure => failure.Contains("got 'pi/model'", StringComparison.Ordinal));
         Assert.Contains(failures, failure => failure.Contains("got 'opus'", StringComparison.Ordinal));
         Assert.Contains(failures, failure => failure.Contains("got ' '", StringComparison.Ordinal));
         Assert.Equal(4, failures.Count());
     }
 
     [Fact]
-    public void Root_model_must_be_a_canonical_codex_selector()
+    public void Root_model_must_be_a_canonical_selector()
     {
         var options = ValidOptions();
         options.Model = "gpt-6";
@@ -70,7 +70,7 @@ public sealed class PiWorkerOptionsValidatorTests
     }
 
     [Fact]
-    public void Root_model_rejects_non_codex_runtimes()
+    public void Root_model_rejects_official_harness_providers()
     {
         var options = ValidOptions();
         options.Model = "claude-code/default";
@@ -79,11 +79,11 @@ public sealed class PiWorkerOptionsValidatorTests
 
         Assert.False(result.Succeeded);
         Assert.Contains(result.Failures ?? [], failure => failure.Contains("'Pi:Model'", StringComparison.Ordinal));
-        Assert.Contains(result.Failures ?? [], failure => failure.Contains("codex", StringComparison.Ordinal));
+        Assert.Contains(result.Failures ?? [], failure => failure.Contains("Pi-backed provider", StringComparison.Ordinal));
     }
 
     [Fact]
-    public void Root_model_accepts_codex_default()
+    public void Root_model_accepts_any_pi_backed_provider()
     {
         var options = ValidOptions();
         options.Model = "codex/default";
@@ -91,10 +91,16 @@ public sealed class PiWorkerOptionsValidatorTests
         var result = new PiWorkerOptionsValidator().Validate(PiWorkerOptions.SectionName, options);
 
         Assert.True(result.Succeeded, string.Join(Environment.NewLine, result.Failures ?? []));
+
+        options.Model = "zai/glm-4.7";
+
+        result = new PiWorkerOptionsValidator().Validate(PiWorkerOptions.SectionName, options);
+
+        Assert.True(result.Succeeded, string.Join(Environment.NewLine, result.Failures ?? []));
     }
 
     [Fact]
-    public void Same_runtime_can_appear_multiple_times_with_ordered_model_fallbacks()
+    public void Same_provider_can_appear_multiple_times_with_ordered_model_fallbacks()
     {
         var options = ValidOptions();
         options.AllowedChildRoles = ["reviewer"];

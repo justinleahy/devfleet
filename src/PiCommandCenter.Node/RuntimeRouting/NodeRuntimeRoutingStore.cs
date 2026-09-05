@@ -141,8 +141,7 @@ public sealed class NodeRuntimeRoutingStore : INodeRuntimeRoutingStore, IDisposa
                 if (!AgentModelSelector.TryParse(candidate?.Model, out var selector))
                 {
                     throw new ArgumentException(
-                        $"Candidate '{candidate?.Model}' for '{role}' is not a canonical '<runtime>/<model>' selector "
-                        + $"(runtimes: {string.Join(", ", AgentModelSelector.Runtimes)}).",
+                        $"Candidate '{candidate?.Model}' for '{role}' is not a canonical '<provider>/<model>' selector.",
                         nameof(routes));
                 }
                 if (!seen.Add(selector.Value))

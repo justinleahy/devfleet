@@ -67,6 +67,10 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<ISupplementalSubscriptionUsageSource, ClaudeSubscriptionUsageSource>()
             .AddSingleton<ISupplementalSubscriptionUsageSource, AntigravitySubscriptionUsageSource>()
             .AddSingleton<IRuntimeSubscriptionUsageProbe, RuntimeSubscriptionUsageProbe>()
+            .AddSingleton<SubscriptionUsageCache>()
+            .AddSingleton<ISubscriptionUsageCache>(
+                static sp => sp.GetRequiredService<SubscriptionUsageCache>())
+            .AddHostedService(static sp => sp.GetRequiredService<SubscriptionUsageCache>())
             .AddSingleton<NodeSystemResourceMonitor>()
             .AddSingleton<INodeSystemResourceMonitor>(
                 static sp => sp.GetRequiredService<NodeSystemResourceMonitor>())
