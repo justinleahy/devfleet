@@ -115,12 +115,13 @@ persists state under `~/.local/share/devfleet`, and binds the UI to loopback onl
 
 ```bash
 PI_CC_DATA="$HOME/.local/share/devfleet" ./scripts/setup-local.sh
-docker compose up --build --detach
+DEVFLEET_BIND_ADDRESS=10.0.0.20 docker compose up --build --detach
 docker compose ps
 docker compose logs --follow
 ```
 
-Open `http://127.0.0.1:5057`. The node mounts `~/Developer` at the same absolute
+Open `http://<DEVFLEET_BIND_ADDRESS>:5057`. Omit `DEVFLEET_BIND_ADDRESS` to keep
+the deployment loopback-only. The node mounts `~/Developer` at the same absolute
 path and mounts the host's Claude and Antigravity executables plus Claude credentials.
 The node process runs as uid 1000, but the container receives the full capability
 bounding set and an unconfined seccomp profile so its setuid `bwrap` can create the

@@ -17,7 +17,7 @@ services:
       ControlPlane__BaseUrl: http://control-plane:5057
       ConnectionStrings__ControlPlane: Data Source=/data/controlplane.db;Cache=Shared
     ports:
-      - 127.0.0.1:5057:5057
+      - ${DEVFLEET_BIND_ADDRESS:-127.0.0.1}:5057:5057
     volumes:
       - ${HOME}/.local/share/devfleet:/data:rw,z
       - ${HOME}/Developer:${HOME}/Developer:rw,z
