@@ -1,4 +1,4 @@
-# Pi Command Center
+# DevFleet
 
 Project-centric command center for orchestrated local development on a Fedora workstation: Blazor UI, ASP.NET Core control plane, .NET node worker, and a TypeScript Pi worker. Official `claude` and `agy` binaries stay unmodified; their credentials stay in those products.
 
@@ -107,6 +107,24 @@ export ASPNETCORE_Kestrel__Certificates__Default__PasswordFile="$PI_CC_DATA/http
 ```
 
 Point `ControlPlane:BaseUrl` and `Node:ControlPlaneUrl` at `https://<workstation-lan-ip>:7443`. Keep `NodeAuthentication` and cookie auth enabled. Firewall: allow 7443 only on the intended interface.
+
+## Docker Compose
+
+The Compose stack publishes both .NET services, installs the Pi worker on Node.js 26,
+persists state under `~/.local/share/devfleet`, and binds the UI to loopback only.
+
+```bash
+PI_CC_DATA="$HOME/.local/share/devfleet" ./scripts/setup-local.sh
+docker compose up --build --detach
+docker compose ps
+docker compose logs --follow
+```
+
+Open `http://127.0.0.1:5057`. The node mounts `~/Developer` at the same absolute
+path and mounts the host's Claude and Antigravity executables plus Claude credentials.
+The node process runs as uid 1000, but the container receives the full capability
+bounding set and an unconfined seccomp profile so its setuid `bwrap` can create the
+nested namespaces required by verification and read-only agent sandboxes.
 
 ## systemd user install
 

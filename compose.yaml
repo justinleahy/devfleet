@@ -1,0 +1,63 @@
+name: devfleet
+
+services:
+  control-plane:
+    build:
+      context: .
+      target: control-plane
+    image: devfleet-control-plane:local
+    restart: unless-stopped
+    env_file:
+      - ${HOME}/.local/share/devfleet/pi-command-center.env
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://0.0.0.0:5057
+      Admin__PasswordFile: /data/admin.password.hash
+      NodeAuthentication__CredentialFile: /data/node.token
+      ControlPlane__BaseUrl: http://control-plane:5057
+      ConnectionStrings__ControlPlane: Data Source=/data/controlplane.db;Cache=Shared
+    ports:
+      - 127.0.0.1:5057:5057
+    volumes:
+      - ${HOME}/.local/share/devfleet:/data:rw,z
+      - ${HOME}/Developer:${HOME}/Developer:rw,z
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:5057/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  node:
+    build:
+      context: .
+      target: worker-node
+    image: devfleet-node:local
+    restart: unless-stopped
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    env_file:
+      - ${HOME}/.local/share/devfleet/pi-command-center.env
+    environment:
+      HOME: /home/node
+      NodeAuthentication__CredentialFile: /data/node.token
+      Node__ControlPlaneUrl: http://control-plane:5057
+      Node__DisplayName: fedora-docker
+      Node__EventSpoolPath: /data/node-spool.db
+      Projects__ApprovedRoots__0: ${HOME}/Developer
+      Pi__AgentDataDirectory: /data/pi-agent
+      Pi__WorkerPath: /app/runtime/pi-worker/src/index.ts
+      Claude__Executable: /usr/local/bin/claude
+      Antigravity__Executable: /usr/local/bin/agy
+    cap_add:
+      - ALL
+    security_opt:
+      - seccomp=unconfined
+    volumes:
+      - ${HOME}/.local/share/devfleet:/data:rw,z
+      - ${HOME}/Developer:${HOME}/Developer:rw,z
+      - ${HOME}/.local/bin/claude:/usr/local/bin/claude:ro,z
+      - ${HOME}/.local/bin/agy:/usr/local/bin/agy:ro,z
+      - ${HOME}/.claude:/home/node/.claude:rw,z
+      - ${HOME}/.claude.json:/home/node/.claude.json:rw,z

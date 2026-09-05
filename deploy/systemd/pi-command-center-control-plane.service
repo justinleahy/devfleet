@@ -1,11 +1,11 @@
 [Unit]
-Description=Pi Command Center control plane (loopback)
+Description=DevFleet control plane (loopback)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/.local/share/pi-command-center
+WorkingDirectory=%h/.local/lib/pi-command-center/control-plane
 EnvironmentFile=%h/.local/share/pi-command-center/pi-command-center.env
 Environment=DOTNET_ENVIRONMENT=Production
 Environment=ASPNETCORE_ENVIRONMENT=Production

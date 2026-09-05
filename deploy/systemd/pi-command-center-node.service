@@ -1,5 +1,5 @@
 [Unit]
-Description=Pi Command Center node worker
+Description=DevFleet node worker
 After=network-online.target pi-command-center-control-plane.service
 Wants=network-online.target
 Requires=pi-command-center-control-plane.service
