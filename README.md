@@ -127,6 +127,23 @@ The node process runs as uid 1000, but the container receives the full capabilit
 bounding set and an unconfined seccomp profile so its setuid `bwrap` can create the
 nested namespaces required by verification and read-only agent sandboxes.
 
+### Change the administrator password
+
+Passwords supplied on stdin must contain at least 12 characters. This avoids exposing
+the password in shell history or the process list:
+
+```bash
+read -rsp "New DevFleet password: " password; echo
+printf '%s\n' "$password" |
+  docker compose run --rm -T control-plane --setup --force --password-stdin
+printf '%s' "$password" > "$HOME/.local/share/devfleet/admin.password"
+chmod 0600 "$HOME/.local/share/devfleet/admin.password"
+unset password
+docker compose restart control-plane node
+```
+
+Forced setup also rotates the node credential, so both services must restart.
+
 ## systemd user install
 
 Units launch **published** binaries under the protected install root `~/.local/lib/pi-command-center` (not the source tree, so approved `~/Developer` repos cannot overwrite the runtime).

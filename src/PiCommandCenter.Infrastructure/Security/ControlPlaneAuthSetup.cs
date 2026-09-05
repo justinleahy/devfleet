@@ -12,7 +12,10 @@ public static class ControlPlaneAuthSetup
     public static bool IsSetupRequested(IEnumerable<string> args) =>
         args.Any(argument => string.Equals(argument, "--setup", StringComparison.OrdinalIgnoreCase));
 
-    public static SetupResult Run(IConfiguration configuration, bool force = false)
+    public static SetupResult Run(
+        IConfiguration configuration,
+        bool force = false,
+        string? adminPassword = null)
     {
         ArgumentNullException.ThrowIfNull(configuration);
 
@@ -35,7 +38,12 @@ public static class ControlPlaneAuthSetup
                 $"Auth material already exists at '{passwordPath}' or '{tokenPath}'. Re-run with --force to overwrite.");
         }
 
-        var password = AuthMaterialLoader.GeneratePassword();
+        var password = adminPassword ?? AuthMaterialLoader.GeneratePassword();
+        if (password.Length < 12)
+        {
+            throw new InvalidOperationException("Administrator password must be at least 12 characters.");
+        }
+
         var hash = AuthMaterialLoader.HashPassword(password);
         var tokenHex = AuthMaterialLoader.GenerateNodeTokenHex();
 

@@ -17,14 +17,28 @@ builder.WebHost.UseStaticWebAssets();
 if (ControlPlaneAuthSetup.IsSetupRequested(args))
 {
     var force = args.Any(argument => string.Equals(argument, "--force", StringComparison.OrdinalIgnoreCase));
+    var readPassword = args.Any(argument =>
+        string.Equals(argument, "--password-stdin", StringComparison.OrdinalIgnoreCase));
     try
     {
-        var result = ControlPlaneAuthSetup.Run(builder.Configuration, force);
+        var suppliedPassword = readPassword
+            ? Console.In.ReadLine()
+                ?? throw new InvalidOperationException("No administrator password was received on stdin.")
+            : null;
+        var result = ControlPlaneAuthSetup.Run(builder.Configuration, force, suppliedPassword);
         Console.WriteLine($"Username: {result.Username}");
-        Console.WriteLine($"Password: {result.OneTimePassword}");
+        if (!readPassword)
+        {
+            Console.WriteLine($"Password: {result.OneTimePassword}");
+            Console.WriteLine("Store the administrator password now; it is not kept in plaintext.");
+        }
+        else
+        {
+            Console.WriteLine("Administrator password read from stdin.");
+        }
+
         Console.WriteLine($"Password file: {result.PasswordFile}");
         Console.WriteLine($"Node credential file: {result.CredentialFile}");
-        Console.WriteLine("Store the administrator password now; it is not kept in plaintext.");
     }
     catch (Exception ex)
     {
