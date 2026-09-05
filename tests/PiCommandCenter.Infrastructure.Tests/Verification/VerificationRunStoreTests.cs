@@ -2,6 +2,7 @@ using PiCommandCenter.Application.Verification;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Verification;
 using PiCommandCenter.Infrastructure.Verification;
+using PiCommandCenter.Application.Live;
 
 namespace PiCommandCenter.Infrastructure.Tests.Verification;
 
@@ -11,7 +12,7 @@ public class VerificationRunStoreTests
     public async Task Record_assigns_id_and_list_returns_oldest_first()
     {
         var db = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
-        var store = new VerificationRunStore(db);
+        var store = new VerificationRunStore(db, new ProjectionNotifier());
         var requestId = WorkRequestId.New();
         var start = new DateTimeOffset(2026, 9, 4, 12, 0, 0, TimeSpan.Zero);
 

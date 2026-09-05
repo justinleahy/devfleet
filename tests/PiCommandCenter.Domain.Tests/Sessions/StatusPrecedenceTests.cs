@@ -137,4 +137,158 @@ public class StatusPrecedenceTests
         session.Apply(Event("session.disconnected", 2));
         Assert.False(string.IsNullOrWhiteSpace(session.StatusReason));
     }
+
+    [Fact]
+    public void Provider_auth_snapshot_sets_InputRequired_and_Blocked_not_Failed()
+    {
+        var session = Registered();
+        session.Apply(Event("turn.started", 2));
+
+        session.Apply(Event("session.snapshot", 3, payload: new Dictionary<string, object?>
+        {
+            ["liveness"] = "Online",
+            ["activity"] = "Idle",
+            ["attention"] = "InputRequired",
+            ["workState"] = "Blocked",
+            ["statusReason"] =
+                "Claude Code is not logged in. Complete the provider-native local login on this node.",
+        }));
+
+        Assert.Equal(AgentAttention.InputRequired, session.Attention);
+        Assert.Equal(AgentWorkState.Blocked, session.WorkState);
+        Assert.NotEqual(AgentWorkState.Failed, session.WorkState);
+        Assert.NotEqual(AgentAttention.Error, session.Attention);
+        Assert.False(session.IsTerminal);
+        Assert.Contains("provider-native local login", session.StatusReason, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("crash", session.StatusReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Provider_auth_failed_equivalent_snapshot_outranks_executing_work()
+    {
+        var session = Registered();
+        session.Apply(Event("turn.started", 2));
+        session.Apply(Event("tool.started", 3, payload: new Dictionary<string, object?> { ["tool"] = "bash" }));
+
+        session.Apply(Event("session.snapshot", 4, payload: new Dictionary<string, object?>
+        {
+            ["attention"] = "InputRequired",
+            ["workState"] = "Blocked",
+            ["reason"] = "agy requires provider-native local login before the session can continue.",
+        }));
+
+        Assert.Equal(AgentWorkState.Blocked, session.WorkState);
+        Assert.Equal(AgentAttention.InputRequired, session.Attention);
+        Assert.Equal(AgentActivity.RunningTool, session.Activity);
+        Assert.Contains("provider-native local login", session.StatusReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Generic_session_failed_is_not_provider_auth_blocked()
+    {
+        var session = Registered();
+        session.Apply(Event("session.failed", 2, payload: new Dictionary<string, object?>
+        {
+            ["error"] = "worker crashed",
+            ["reason"] = "Runtime process crashed",
+        }));
+
+        Assert.Equal(AgentWorkState.Failed, session.WorkState);
+        Assert.Equal(AgentAttention.Error, session.Attention);
+        Assert.DoesNotContain("login", session.StatusReason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Session_completed_projects_Completed_and_is_terminal()
+    {
+        var session = Registered();
+        session.Apply(Event("turn.started", 2));
+
+        session.Apply(Event("session.completed", 3));
+
+        Assert.Equal(AgentWorkState.Completed, session.WorkState);
+        Assert.Equal(AgentLiveness.Exited, session.Liveness);
+        Assert.Equal(AgentAttention.None, session.Attention);
+        Assert.True(session.IsTerminal);
+        Assert.Equal("Session completed", session.StatusReason);
+    }
+
+    [Fact]
+    public void Child_completed_projects_Completed_for_the_child_session()
+    {
+        var session = Registered();
+
+        session.Apply(Event("child.completed", 2));
+
+        Assert.Equal(AgentWorkState.Completed, session.WorkState);
+        Assert.Equal(AgentLiveness.Exited, session.Liveness);
+        Assert.True(session.IsTerminal);
+    }
+
+    [Fact]
+    public void Clean_close_projects_Completed()
+    {
+        var session = Registered();
+
+        session.Apply(Event("session.closed", 2));
+
+        Assert.Equal(AgentWorkState.Completed, session.WorkState);
+        Assert.Equal(AgentLiveness.Exited, session.Liveness);
+    }
+
+    [Fact]
+    public void Authentication_blocked_close_stays_blocked()
+    {
+        var session = Registered();
+        session.Apply(Event("session.snapshot", 2, payload: new Dictionary<string, object?>
+        {
+            ["workState"] = "Blocked",
+            ["attention"] = "InputRequired",
+            ["reason"] = "Provider login required",
+        }));
+
+        session.Apply(Event("session.closed", 3));
+
+        Assert.Equal(AgentWorkState.Blocked, session.WorkState);
+        Assert.Equal(AgentLiveness.Exited, session.Liveness);
+        Assert.NotEqual(AgentWorkState.Completed, session.WorkState);
+    }
+
+    [Fact]
+    public void Failure_outranks_a_late_close_and_completion()
+    {
+        var session = Registered();
+        session.Apply(Event("session.failed", 2));
+
+        session.Apply(Event("session.closed", 3));
+        session.Apply(Event("session.completed", 4));
+
+        Assert.Equal(AgentWorkState.Failed, session.WorkState);
+        Assert.Equal(AgentAttention.Error, session.Attention);
+    }
+
+    [Fact]
+    public void Cancellation_outranks_a_late_close_and_completion()
+    {
+        var session = Registered();
+        session.Apply(Event("session.cancelled", 2));
+
+        session.Apply(Event("session.closed", 3));
+        session.Apply(Event("session.completed", 4));
+
+        Assert.Equal(AgentWorkState.Cancelled, session.WorkState);
+    }
+
+    [Fact]
+    public void Completion_outranks_disconnected_at_the_end()
+    {
+        var session = Registered();
+        session.Apply(Event("session.disconnected", 2));
+
+        session.Apply(Event("session.completed", 3));
+
+        Assert.Equal(AgentWorkState.Completed, session.WorkState);
+        Assert.Equal(AgentAttention.None, session.Attention);
+        Assert.Equal(AgentLiveness.Exited, session.Liveness);
+    }
 }

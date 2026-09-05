@@ -109,6 +109,24 @@ public class WorkRequestTests
     }
 
     [Fact]
+    public void TryCatchUpTo_is_idempotent_and_walks_missing_phases()
+    {
+        var request = Enqueue();
+        request.Start(Now);
+
+        Assert.True(request.TryCatchUpTo(WorkRequestStatus.Verifying, Now));
+        Assert.Equal(WorkRequestStatus.Verifying, request.Status);
+        Assert.True(request.TryCatchUpTo(WorkRequestStatus.Verifying, Now));
+        Assert.False(request.TryCatchUpTo(WorkRequestStatus.Planning, Now));
+        Assert.Equal(WorkRequestStatus.Verifying, request.Status);
+
+        Assert.True(request.TryCatchUpTo(WorkRequestStatus.Completed, Now));
+        Assert.Equal(WorkRequestStatus.Completed, request.Status);
+        Assert.True(request.TryCatchUpTo(WorkRequestStatus.Completed, Now));
+        Assert.False(request.TryCatchUpTo(WorkRequestStatus.Planning, Now));
+        Assert.Equal(WorkRequestStatus.Completed, request.Status);
+    }
+    [Fact]
     public void Block_preserves_the_current_phase_and_unblock_resumes_it()
     {
         var request = Enqueue();

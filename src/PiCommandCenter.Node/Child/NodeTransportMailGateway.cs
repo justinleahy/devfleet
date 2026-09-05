@@ -1,3 +1,5 @@
+using PiCommandCenter.Application.Mail;
+using PiCommandCenter.Domain;
 using PiCommandCenter.Contracts.NodeTransport;
 
 namespace PiCommandCenter.Node.Child;
@@ -7,13 +9,58 @@ namespace PiCommandCenter.Node.Child;
 /// <see cref="NodeTransportClient"/> mail wrappers (SendMail, FetchInbox, FetchThread,
 /// MarkMailRead, AcknowledgeMail).
 /// </summary>
-public sealed class NodeTransportMailGateway : INodeMailGateway
+public sealed class NodeTransportMailGateway : INodeMailGateway, IAgentIdentityRegistry
 {
     private readonly NodeTransportClient _transport;
 
     public NodeTransportMailGateway(NodeTransportClient transport)
     {
         _transport = transport ?? throw new ArgumentNullException(nameof(transport));
+    }
+
+    public async Task<AgentIdentityDto> AllocateAsync(
+        AllocateAgentIdentityCommand command,
+        CancellationToken cancellationToken = default)
+    {
+        var identity = await _transport.AllocateAgentIdentityAsync(
+            new AllocateAgentIdentityMessage(
+                command.ProjectId.Value,
+                command.SessionId,
+                command.RequestedName,
+                command.Role,
+                command.Runtime),
+            cancellationToken).ConfigureAwait(false);
+        return new AgentIdentityDto(
+            new ProjectId(identity.ProjectId),
+            identity.SessionId,
+            identity.AgentName,
+            identity.Role,
+            identity.Runtime,
+            identity.AllocatedAtUtc);
+    }
+
+    public Task ReleaseAsync(string sessionId, CancellationToken cancellationToken = default)
+        => _transport.ReleaseAgentIdentityAsync(
+            new ReleaseAgentIdentityMessage(sessionId),
+            cancellationToken);
+
+    public async Task<AgentIdentityDto?> FindByNameAsync(
+        ProjectId projectId,
+        string agentName,
+        CancellationToken cancellationToken = default)
+    {
+        var identity = await _transport.FindAgentIdentityAsync(
+            new FindAgentIdentityMessage(projectId.Value, agentName),
+            cancellationToken).ConfigureAwait(false);
+        return identity is null
+            ? null
+            : new AgentIdentityDto(
+                new ProjectId(identity.ProjectId),
+                identity.SessionId,
+                identity.AgentName,
+                identity.Role,
+                identity.Runtime,
+                identity.AllocatedAtUtc);
     }
 
     public async Task<MailDeliveryResult> SendAsync(

@@ -7,6 +7,8 @@ using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain.Sessions;
 using PiCommandCenter.Node.Child;
+using PiCommandCenter.Node.Security;
+
 using PiCommandCenter.Node.Repository;
 
 namespace PiCommandCenter.Node;
@@ -18,7 +20,7 @@ namespace PiCommandCenter.Node;
 /// marks a request complete and has no direct workspace mutation path; completions come only
 /// from real runtime activity through the Control Plane reducer.
 /// </summary>
-public sealed class PiRootSessionSupervisor : IAsyncDisposable
+public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisposable
 {
     private readonly PiWorkerOptions _options;
     private readonly Runtime.PiRuntimeAdapter _adapter;
@@ -29,8 +31,10 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
     private readonly IRuntimeCrashRecovery _crashRecovery;
     private readonly NodeOptions _nodeOptions;
     private readonly ILogger<PiRootSessionSupervisor> _logger;
+    private readonly Application.Git.ITrustedGitService? _gitService;
     private readonly CancellationTokenSource _disposeCts = new();
     private readonly ConcurrentDictionary<Guid, ActiveRootSession> _sessions = new();
+    private int _disposed;
 
     public PiRootSessionSupervisor(
         IOptions<PiWorkerOptions> options,
@@ -41,7 +45,8 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
         RequestWorkspaceTracker workspace,
         IRuntimeCrashRecovery crashRecovery,
         TimeProvider timeProvider,
-        ILogger<PiRootSessionSupervisor> logger)
+        ILogger<PiRootSessionSupervisor> logger,
+        Application.Git.ITrustedGitService? gitService = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(nodeOptions);
@@ -53,12 +58,17 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _options = options.Value;
+        _gitService = gitService;
         _nodeOptions = nodeOptions.Value;
     }
 
     /// <summary>Session ids of all currently running root sessions, for node heartbeats.</summary>
     public IReadOnlyList<string> ActiveSessionIds
         => [.. _sessions.Values.Select(s => s.SessionId)];
+    public Guid? FindRequestId(string sessionId)
+        => _sessions.Values.FirstOrDefault(
+            candidate => string.Equals(candidate.SessionId, sessionId, StringComparison.Ordinal))
+            ?.Claim.RequestId;
 
     /// <summary>Starts one restricted root session for the claimed assignment and persists its lifecycle.</summary>
     public async Task<string> StartForClaimAsync(
@@ -100,7 +110,27 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
             workingDirectory: claim.RepositoryPath,
             prompt: BuildPrompt(claim),
             AgentRuntimeMode.Root,
-            runtimeProfile: "local-pi");
+            runtimeProfile: "local-pi",
+            createRequestCommit: claim.CreateRequestCommit);
+
+        // Supervisor-owned request branch, created exactly once before the worker starts so the
+        // agent works on the request branch. No branch, no checkpoint policy: without the flag
+        // the request stays on its configured branch and checkpoint tools refuse.
+        string? requestBranch = null;
+        string? baseCommitId = null;
+        if (claim.CreateRequestBranch && _gitService is not null)
+        {
+            var branchName = Git.PiRequestGit.RequestBranchName(claim.RequestId);
+            var created = await _gitService.CreateRequestBranchAsync(
+                new Application.Git.RequestBranchRequest(
+                    claim.RequestId,
+                    claim.RepositoryPath,
+                    claim.DefaultBranch,
+                    branchName),
+                cancellationToken).ConfigureAwait(false);
+            requestBranch = created.BranchName;
+            baseCommitId = created.BaseCommitId;
+        }
 
         var handle = await _adapter.StartAsync(startRequest, cancellationToken).ConfigureAwait(false);
         var active = new ActiveRootSession(sessionId, claim);
@@ -131,6 +161,9 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
                 ["requestTitle"] = claim.Title,
                 ["requestKind"] = claim.Kind,
                 ["riskLevel"] = claim.RiskLevel,
+                ["requestBranch"] = requestBranch,
+                ["baseCommitId"] = baseCommitId,
+                ["createRequestCommit"] = claim.CreateRequestCommit,
             },
             cancellationToken).ConfigureAwait(false);
         await AppendAsync(
@@ -172,12 +205,58 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
             return false;
         }
 
-        await _adapter.CancelAsync(active.SessionId, cancellationToken).ConfigureAwait(false);
+        SecurityAuditLog.Cancellation(_logger, active.SessionId, "operator", "root_cancel");
+        try
+        {
+            await _adapter.CancelAsync(active.SessionId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Graceful cancellation failed for root {SessionId}; forcing session close.",
+                active.SessionId);
+        }
+
+        await TerminateForRequestAsync(requestId, "root_cancel", "session.cancelled")
+            .ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>Cancels an active root by its public session id.</summary>
+    public async Task<bool> CancelSessionAsync(string sessionId, string reason)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        var active = _sessions.Values.FirstOrDefault(
+            candidate => string.Equals(candidate.SessionId, sessionId, StringComparison.Ordinal));
+        if (active is null)
+        {
+            return false;
+        }
+
+        SecurityAuditLog.Cancellation(_logger, sessionId, "operator", reason);
+        try
+        {
+            await _adapter.CancelAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Graceful cancellation failed for root {SessionId}; forcing session close.",
+                sessionId);
+        }
+
+        await TerminateForRequestAsync(active.Claim.RequestId, reason, "session.cancelled")
+            .ConfigureAwait(false);
         return true;
     }
 
     /// <summary>Stops the root session for a request (claim lost, node shutdown) and closes its stream.</summary>
-    public async Task StopForRequestAsync(Guid requestId, string reason)
+    public Task StopForRequestAsync(Guid requestId, string reason)
+        => TerminateForRequestAsync(requestId, reason, "session.closed");
+
+    private async Task TerminateForRequestAsync(Guid requestId, string reason, string eventType)
     {
         if (!_sessions.TryRemove(requestId, out var active))
         {
@@ -190,17 +269,25 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
                 active,
                 active.SessionId,
                 active.NextSequence(),
-                "session.closed",
+                eventType,
                 new Dictionary<string, object?> { ["reason"] = reason },
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(
-                ex, "Failed to append session.closed for request {RequestId}.", requestId);
+                ex, "Failed to append {EventType} for request {RequestId}.", eventType, requestId);
         }
 
-        await _adapter.CloseSessionAsync(active.SessionId, CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            await _adapter.CloseSessionAsync(active.SessionId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex, "Forced close failed for root {SessionId}; adapter ownership was still removed.", active.SessionId);
+        }
     }
 
     /// <summary>Stops every running root session; used at node shutdown.</summary>
@@ -304,6 +391,11 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         await StopAllAsync().ConfigureAwait(false);
         _disposeCts.Cancel();
         _disposeCts.Dispose();

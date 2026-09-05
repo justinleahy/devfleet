@@ -1,0 +1,36 @@
+[Unit]
+Description=Pi Command Center node worker
+After=network-online.target pi-command-center-control-plane.service
+Wants=network-online.target
+Requires=pi-command-center-control-plane.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/pi-command-center
+EnvironmentFile=%h/.local/share/pi-command-center/pi-command-center.env
+Environment=DOTNET_ENVIRONMENT=Production
+ExecStart=/usr/bin/dotnet %h/.local/lib/pi-command-center/node/PiCommandCenter.Node.dll
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/pi-command-center %h/Developer
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=default.target

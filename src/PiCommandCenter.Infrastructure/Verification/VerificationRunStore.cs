@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Verification;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Verification;
@@ -6,7 +7,8 @@ using PiCommandCenter.Infrastructure.Persistence;
 
 namespace PiCommandCenter.Infrastructure.Verification;
 
-public sealed class VerificationRunStore(ControlPlaneDbContext db) : IVerificationRunStore
+public sealed class VerificationRunStore(ControlPlaneDbContext db, IProjectionNotifier notifier)
+    : IVerificationRunStore
 {
     public async Task<VerificationRunDto> RecordAsync(
         VerificationRunDto run,
@@ -44,6 +46,7 @@ public sealed class VerificationRunStore(ControlPlaneDbContext db) : IVerificati
 
         db.VerificationRuns.Add(row);
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        notifier.Publish(ProjectionChange.Request(Guid.Empty, row.RequestId));
         return ToDto(row);
     }
 

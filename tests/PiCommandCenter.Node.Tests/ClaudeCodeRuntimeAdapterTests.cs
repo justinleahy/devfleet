@@ -126,7 +126,8 @@ public class ClaudeCodeRuntimeAdapterTests : IDisposable
             new[]
             {
                 "-p", "Review the change", "--output-format", "stream-json", "--verbose", "--settings",
-                Path.Combine(_root, "settings.json"), "--permission-mode", "dontAsk",
+                Path.Combine(_root, "settings.json"), "--setting-sources", string.Empty,
+                "--permission-mode", "dontAsk",
             },
             argv.Skip(1).ToArray());
         Assert.Equal(_root, doc.RootElement.GetProperty("cwd").GetString());
@@ -185,6 +186,26 @@ public class ClaudeCodeRuntimeAdapterTests : IDisposable
         Assert.Contains(events, e => e.Type == "session.failed");
         Assert.Contains(events, e => e.Type == "session.closed");
     }
+
+    [Fact]
+    public async Task Auth_missing_emits_blocked_input_required_not_generic_failure()
+    {
+        File.WriteAllText(Path.Combine(_root, "fake-scenario"), "auth");
+        var adapter = CreateAdapter();
+        var handle = await adapter.StartAsync(Request(), CancellationToken.None);
+        var events = await CollectAsync(adapter.WatchAsync(handle.SessionId, CancellationToken.None), TimeSpan.FromSeconds(8));
+        var snapshot = events.First(e => e.Type == "session.snapshot");
+        Assert.Equal("InputRequired", snapshot.Payload["attention"]?.ToString());
+        Assert.Equal("Blocked", snapshot.Payload["workState"]?.ToString());
+        Assert.Contains("claude login", snapshot.Payload["reason"]?.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(events, e => e.Type == "session.failed");
+        var snap = await adapter.GetSnapshotAsync(handle.SessionId, CancellationToken.None);
+        Assert.Equal(PiCommandCenter.Domain.Sessions.AgentAttention.InputRequired, snap.Attention);
+        Assert.Equal(PiCommandCenter.Domain.Sessions.AgentWorkState.Blocked, snap.WorkState);
+        var tail = string.Join('\n', adapter.GetStderrTail(handle.SessionId));
+        Assert.DoesNotContain("sk-ant-secret", tail, StringComparison.Ordinal);
+    }
+
 
     [Fact]
     public async Task Cancel_sends_sigint_then_process_exits()

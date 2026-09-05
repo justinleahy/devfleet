@@ -1,0 +1,4 @@
+@* Fleet pages are administrator-only by default. Authorization is declared here
+   rather than page by page so a new page cannot be added without it; anonymous
+   surfaces live in Components/Account and opt out with [AllowAnonymous]. *@
+@attribute [Authorize]

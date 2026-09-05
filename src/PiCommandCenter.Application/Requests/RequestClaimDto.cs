@@ -17,4 +17,6 @@ public sealed record RequestClaimDto(
     string Title,
     string Prompt,
     string Kind,
-    string RiskLevel);
+    string RiskLevel,
+    bool CreateRequestBranch,
+    bool CreateRequestCommit);

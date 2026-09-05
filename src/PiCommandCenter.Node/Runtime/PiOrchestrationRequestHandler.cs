@@ -31,7 +31,6 @@ public sealed class PiOrchestrationRequestHandler : IPiOrchestrationRequestHandl
             "reservation.handoff.request",
             "project.diff.inspect",
             "verification.request",
-            "request.complete",
         };
 
     public async Task<PiToolResponse> HandleAsync(
@@ -60,6 +59,9 @@ public sealed class PiOrchestrationRequestHandler : IPiOrchestrationRequestHandl
                 return await PersistRequestEventAsync(
                     context, "request.blocked", "blocked", payloadData, cancellationToken)
                     .ConfigureAwait(false);
+            case "request.complete":
+                return await HandleRequestCompleteAsync(
+                    context, payloadData, cancellationToken).ConfigureAwait(false);
             case var gated when ChildSupervisorGatedTypes.Contains(gated):
                 return PiToolResponse.Failure(
                     NotAvailableUntilChildSupervisor,
@@ -69,6 +71,67 @@ public sealed class PiOrchestrationRequestHandler : IPiOrchestrationRequestHandl
                     "unknown_request_type",
                     $"Unknown root tool request type '{requestType}'.");
         }
+    }
+
+    private async Task<PiToolResponse> HandleRequestCompleteAsync(
+        PiOrchestrationContext context,
+        IReadOnlyDictionary<string, object?> payloadData,
+        CancellationToken cancellationToken)
+    {
+        if (context.CreateCheckpointAsync is null)
+        {
+            return PiToolResponse.Failure(
+                NotAvailableUntilChildSupervisor,
+                "Tool request 'request.complete' is not available until the child supervisor is implemented.");
+        }
+
+        var paths = payloadData.TryGetValue("paths", out var rawPaths)
+            && rawPaths is JsonElement { ValueKind: JsonValueKind.Array } pathArray
+            ? pathArray.EnumerateArray()
+                .Where(e => e.ValueKind == JsonValueKind.String)
+                .Select(e => e.GetString()!)
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .ToList()
+            : [];
+        if (paths.Count == 0)
+        {
+            return PiToolResponse.Failure(
+                "checkpoint_requires_paths",
+                "request.complete requires an explicit, non-empty 'paths' list of changed files.");
+        }
+
+        var message = payloadData.TryGetValue("message", out var rawMessage)
+            && rawMessage is JsonElement { ValueKind: JsonValueKind.String } messageElement
+            ? messageElement.GetString()
+            : null;
+        var branchName = payloadData.TryGetValue("branchName", out var rawBranch)
+            && rawBranch is JsonElement { ValueKind: JsonValueKind.String } branchElement
+            ? branchElement.GetString()
+            : null;
+
+        var checkpoint = await context.CreateCheckpointAsync(
+            new PiCheckpointRequest(
+                branchName ?? string.Empty,
+                message ?? "Checkpoint commit for completed work request",
+                paths),
+            cancellationToken).ConfigureAwait(false);
+        if (!checkpoint.Ok)
+        {
+            return PiToolResponse.Failure(
+                checkpoint.ErrorCode ?? "checkpoint_failed",
+                checkpoint.ErrorMessage ?? "Checkpoint commit failed.");
+        }
+
+        await context.EmitAsync(
+            "repository.checkpoint_created",
+            new Dictionary<string, object?>
+            {
+                ["branchName"] = checkpoint.BranchName,
+                ["commitId"] = checkpoint.CommitId,
+                ["paths"] = paths,
+            },
+            cancellationToken).ConfigureAwait(false);
+        return PiToolResponse.Success(new { commitId = checkpoint.CommitId, branchName = checkpoint.BranchName });
     }
 
     private async Task<PiToolResponse> PersistRequestEventAsync(

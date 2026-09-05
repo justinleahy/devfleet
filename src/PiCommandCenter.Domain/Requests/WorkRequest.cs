@@ -228,6 +228,91 @@ public sealed class WorkRequest
         BlockedPhase = null;
     }
 
+    /// <summary>
+    /// Idempotent catch-up toward <paramref name="target"/> along the linear pipeline.
+    /// Already-at-or-past statuses are no-ops. Terminal states never regress.
+    /// Blocked requests stay blocked unless the target is a terminal outcome.
+    /// </summary>
+    public bool TryCatchUpTo(WorkRequestStatus target, DateTimeOffset at)
+    {
+        if (Status is WorkRequestStatus.Completed or WorkRequestStatus.Failed or WorkRequestStatus.Cancelled)
+        {
+            return Status == target;
+        }
+
+        if (target is WorkRequestStatus.Failed)
+        {
+            Fail(at);
+            return true;
+        }
+
+        if (target is WorkRequestStatus.Cancelled)
+        {
+            Cancel(at);
+            return true;
+        }
+
+        if (target is WorkRequestStatus.Blocked)
+        {
+            if (Status == WorkRequestStatus.Blocked)
+            {
+                return true;
+            }
+
+            Block(at);
+            return true;
+        }
+
+        if (Status == WorkRequestStatus.Blocked)
+        {
+            return false;
+        }
+
+        var changed = false;
+        while (PipelineRank(Status) < PipelineRank(target))
+        {
+            switch (Status)
+            {
+                case WorkRequestStatus.Queued:
+                    Start(at);
+                    break;
+                case WorkRequestStatus.Starting:
+                    BeginPlanning(at);
+                    break;
+                case WorkRequestStatus.Planning:
+                    BeginExecuting(at);
+                    break;
+                case WorkRequestStatus.Executing:
+                    BeginReviewing(at);
+                    break;
+                case WorkRequestStatus.Reviewing:
+                    BeginVerifying(at);
+                    break;
+                case WorkRequestStatus.Verifying when target == WorkRequestStatus.Completed:
+                    Complete(at);
+                    break;
+                default:
+                    return changed;
+            }
+
+            changed = true;
+        }
+
+        return changed || Status == target;
+    }
+
+    private static int PipelineRank(WorkRequestStatus status) => status switch
+    {
+        WorkRequestStatus.Queued => 0,
+        WorkRequestStatus.Starting => 1,
+        WorkRequestStatus.Planning => 2,
+        WorkRequestStatus.Executing => 3,
+        WorkRequestStatus.Reviewing => 4,
+        WorkRequestStatus.Verifying => 5,
+        WorkRequestStatus.Completed => 6,
+        _ => -1,
+    };
+
     private void Transition(WorkRequestStatus next, DateTimeOffset at)
     {
         Status = next;

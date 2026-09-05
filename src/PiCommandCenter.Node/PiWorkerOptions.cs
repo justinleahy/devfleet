@@ -24,6 +24,17 @@ public sealed class PiWorkerOptions
     /// </summary>
     public string AgentDataDirectory { get; set; } = "~/.local/share/pi-command-center/pi-agent";
 
+    /// <summary>
+    /// Optional default model identifier sent to the worker in <c>session.start</c>; empty
+    /// lets the Pi SDK choose its default.
+    /// </summary>
+    public string Model { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Optional system prompt sent to the worker in <c>session.start</c>; empty sends none.
+    /// </summary>
+    public string SystemPrompt { get; set; } = string.Empty;
+
     /// <summary>Timeout for the initial <c>session.start</c> handshake, in seconds.</summary>
     public int StartTimeoutSeconds { get; set; } = 30;
 
@@ -36,6 +47,11 @@ public sealed class PiWorkerOptions
     /// <summary>Roles a child agent may take (SPEC §13.3 pipeline roles).</summary>
     public string[] AllowedChildRoles { get; set; } =
         ["root", "architect", "implementer", "reviewer", "verifier"];
+
+    /// <summary>
+    /// How often an active child lease is renewed while its owner adapter is alive, in seconds.
+    /// </summary>
+    public int LeaseRenewalSeconds { get; set; } = 30;
 
     /// <summary>Runtime profiles a child agent may run under (SPEC §15).</summary>
     public string[] AllowedRuntimeProfiles { get; set; } =

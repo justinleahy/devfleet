@@ -135,4 +135,37 @@ public class ProjectCatalogTests
         Assert.Equal(2, projects.Count);
         Assert.Contains(projects, p => p.DisplayName == "Second");
     }
+
+    [Fact]
+    public async Task Register_accepts_a_trailing_separator_and_rejects_a_symlink_alias()
+    {
+        var approvedRoot = TestRepositories.CreateTempDirectory();
+        var repositoryPath = TestRepositories.InitGitRepository(approvedRoot);
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context, approvedRoot);
+
+        var dto = await catalog.RegisterAsync(Command(repositoryPath: repositoryPath + Path.DirectorySeparatorChar));
+
+        Assert.Equal(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(repositoryPath)),
+            dto.RepositoryPath);
+    }
+
+    [Fact]
+    public async Task Register_rejects_a_symlinked_repository_directory_as_an_alias()
+    {
+        var approvedRoot = TestRepositories.CreateTempDirectory();
+        var realPath = TestRepositories.InitGitRepository(approvedRoot);
+        var aliasPath = Path.Combine(approvedRoot, "alias-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateSymbolicLink(aliasPath, realPath);
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context, approvedRoot);
+
+        var exception = await Assert.ThrowsAsync<ProjectValidationException>(
+            () => catalog.RegisterAsync(Command(repositoryPath: aliasPath)));
+
+        Assert.Contains(
+            exception.Errors,
+            error => error.Contains("symlink alias", StringComparison.Ordinal));
+    }
 }

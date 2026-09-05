@@ -62,7 +62,7 @@ public class AgentSessionStoreTests : IDisposable
         var request = TestNodes.SeedRequest(db, project, clock);
         _requestId = request.Id.Value;
         await TestNodes.SaveAsync(db);
-        return new AgentSessionStore(TimeProvider.System, db);
+        return new AgentSessionStore(TimeProvider.System, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
     }
 
     [Fact]

@@ -1,9 +1,14 @@
 using System.Diagnostics;
+using System.Net;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using PiCommandCenter.ControlPlane.Security;
 using PiCommandCenter.Infrastructure.Persistence;
+using PiCommandCenter.Infrastructure.Security;
 
 namespace PiCommandCenter.EndToEndTests;
 
@@ -26,10 +31,13 @@ public sealed class EndToEndFixture : IDisposable
         {
         }
 
+        (PasswordFile, CredentialFile) = AuthTestMaterial.WriteTo(Path.Combine(_tempRoot, "auth"));
+
         Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={SqlitePath}");
             builder.UseSetting("Projects:ApprovedRoots:0", ApprovedRoot);
+            builder.UseTestAuthFiles(PasswordFile, CredentialFile);
         });
 
         using var scope = Factory.Services.CreateScope();
@@ -43,7 +51,57 @@ public sealed class EndToEndFixture : IDisposable
 
     public string SqlitePath { get; }
 
-    public HttpClient CreateClient() => Factory.CreateClient();
+    public string PasswordFile { get; }
+
+    public string CredentialFile { get; }
+
+    public string NodeTokenHex => AuthTestMaterial.NodeTokenHex;
+
+    public HttpClient CreateClient() => CreateAuthenticatedClient(Factory);
+
+    public HttpClient CreateAuthenticatedClient(WebApplicationFactory<Program> factory)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = true,
+            HandleCookies = true,
+        });
+        var (cookie, token) = IssueAntiforgery(factory);
+        if (!string.IsNullOrEmpty(cookie))
+        {
+            client.DefaultRequestHeaders.Add("Cookie", cookie);
+        }
+
+        client.DefaultRequestHeaders.Add("RequestVerificationToken", token);
+        using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["username"] = AuthTestMaterial.Username,
+            ["password"] = AuthTestMaterial.Password,
+            ["returnUrl"] = "/",
+            ["__RequestVerificationToken"] = token,
+        });
+        using var response = client.PostAsync("/account/login", content).GetAwaiter().GetResult();
+        if (response.StatusCode is not HttpStatusCode.Redirect and not HttpStatusCode.OK && !response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"Test login failed with {(int)response.StatusCode}");
+        }
+
+        return client;
+    }
+
+    public (string CookieHeader, string RequestToken) IssueAntiforgery() => IssueAntiforgery(Factory);
+
+    public (string CookieHeader, string RequestToken) IssueAntiforgery(WebApplicationFactory<Program> factory)
+    {
+        using var scope = factory.Services.CreateScope();
+        var antiforgery = scope.ServiceProvider.GetRequiredService<IAntiforgery>();
+        var httpContext = new DefaultHttpContext { RequestServices = scope.ServiceProvider };
+        httpContext.Request.Scheme = "http";
+        httpContext.Request.Host = new HostString("localhost");
+        var tokens = antiforgery.GetAndStoreTokens(httpContext);
+        return (httpContext.Response.Headers.SetCookie.ToString(), tokens.RequestToken ?? string.Empty);
+    }
 
     public string CreateGitRepository()
     {

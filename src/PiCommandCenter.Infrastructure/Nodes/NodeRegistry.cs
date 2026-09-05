@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
@@ -10,7 +11,10 @@ namespace PiCommandCenter.Infrastructure.Nodes;
 /// EF Core backed node registry. Registration is an upsert keyed by the node's stable id, so a
 /// node reconnecting after a restart refreshes its identity instead of forking a new row.
 /// </summary>
-public sealed class NodeRegistry(TimeProvider clock, ControlPlaneDbContext db) : INodeRegistry
+public sealed class NodeRegistry(
+    TimeProvider clock,
+    ControlPlaneDbContext db,
+    IProjectionNotifier notifier) : INodeRegistry
 {
     public async Task<IReadOnlyList<NodeDto>> ListAsync(CancellationToken cancellationToken = default)
     {
@@ -50,6 +54,7 @@ public sealed class NodeRegistry(TimeProvider clock, ControlPlaneDbContext db) :
 
             db.FleetNodes.Add(node);
             await db.SaveChangesAsync(cancellationToken);
+            notifier.Publish(ProjectionChange.Fleet());
             return ToDto(node);
         }
 
@@ -59,6 +64,7 @@ public sealed class NodeRegistry(TimeProvider clock, ControlPlaneDbContext db) :
             existing,
             now => existing.RefreshRegistration(command.DisplayName, command.AgentVersion, command.CapabilitiesJson, now),
             cancellationToken);
+        notifier.Publish(ProjectionChange.Fleet());
         return ToDto(existing);
     }
 
@@ -76,6 +82,7 @@ public sealed class NodeRegistry(TimeProvider clock, ControlPlaneDbContext db) :
             node,
             now => node.Heartbeat(node.AgentVersion, node.CapabilitiesJson, now),
             cancellationToken);
+        notifier.Publish(ProjectionChange.Fleet());
         return ToDto(node);
     }
 
@@ -96,6 +103,7 @@ public sealed class NodeRegistry(TimeProvider clock, ControlPlaneDbContext db) :
         if (db.Entry(node).State == EntityState.Modified)
         {
             await db.SaveChangesAsync(cancellationToken);
+            notifier.Publish(ProjectionChange.Fleet());
         }
     }
 

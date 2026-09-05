@@ -4,6 +4,9 @@
     <RootNamespace>PiCommandCenter.Infrastructure</RootNamespace>
     <Description>Implements Application interfaces: EF Core persistence, identity, and external providers.</Description>
   </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />

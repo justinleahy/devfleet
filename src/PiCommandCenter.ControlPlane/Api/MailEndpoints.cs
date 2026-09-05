@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.SignalR;
 using PiCommandCenter.Application.Mail;
 using PiCommandCenter.Application.Sessions;
 using PiCommandCenter.ControlPlane.Hubs;
+using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Mail;
 using PiCommandCenter.Domain.Requests;
@@ -248,11 +249,16 @@ internal static class MailEndpoints
         }
     }
 
-    /// <summary>POST /api/sessions/{sessionId}/cancel — records a session.cancelled event.</summary>
-    private static async Task<Results<Ok<AgentSessionDto>, NotFound<ProblemDetails>, BadRequest<ProblemDetails>>> CancelSessionAsync(
+    /// <summary>
+    /// POST /api/sessions/{sessionId}/cancel — dispatches a real cancellation command to the
+    /// node currently running the session (SPEC §23.2). The session's projection is updated
+    /// only by the node's actual <c>session.cancelled</c> event, never synthesized here.
+    /// </summary>
+    private static async Task<Results<Accepted<SessionCancellationResponse>, NotFound<ProblemDetails>>> CancelSessionAsync(
         string sessionId,
+        [FromBody] CancelSessionRequest? body,
         IAgentSessionStore sessions,
-        TimeProvider timeProvider,
+        IHubContext<NodeHub> hub,
         CancellationToken cancellationToken)
     {
         var existing = await sessions.GetAsync(sessionId, cancellationToken);
@@ -261,29 +267,10 @@ internal static class MailEndpoints
             return TypedResults.NotFound(Problem("Session not found", $"No session '{sessionId}' exists."));
         }
 
-        var requestEvents = await sessions.ListEventsAsync(new WorkRequestId(existing.RequestId), cancellationToken);
-        var nextSequence = requestEvents
-            .Where(e => string.Equals(e.SessionId, sessionId, StringComparison.Ordinal))
-            .Select(e => e.Sequence)
-            .DefaultIfEmpty(-1)
-            .Max() + 1;
-
-        var now = timeProvider.GetUtcNow();
-        await sessions.ApplyAsync(new NormalizedAgentEvent(
-            ProtocolVersion: 1,
-            EventId: $"cancel-{Guid.NewGuid()}",
-            NodeId: "control-plane",
-            ProjectId: existing.ProjectId.ToString(),
-            RequestId: existing.RequestId.ToString(),
-            SessionId: sessionId,
-            ParentSessionId: existing.ParentSessionId,
-            Sequence: nextSequence,
-            Runtime: existing.Runtime,
-            Type: "session.cancelled",
-            OccurredAt: now,
-            Payload: new Dictionary<string, object?> { ["reason"] = "cancelled-by-user" }), cancellationToken);
-        var updated = await sessions.GetAsync(sessionId, cancellationToken);
-        return TypedResults.Ok(updated!);
+        var reason = string.IsNullOrWhiteSpace(body?.Reason) ? "cancelled-by-user" : body!.Reason!;
+        await hub.Clients.Group(NodeHub.SessionGroup(sessionId))
+            .SendAsync("CancelSession", new CancelSessionCommand(sessionId, reason), cancellationToken);
+        return TypedResults.Accepted($"/api/sessions/{sessionId}", new SessionCancellationResponse(sessionId, reason));
     }
 
     /// <summary>POST /api/messages/{messageId}/acknowledge</summary>
@@ -403,6 +390,12 @@ internal sealed record SendSessionMessageRequest(
     string? Importance,
     bool AckRequired,
     string? ThreadId);
+
+/// <summary>Request body for <c>POST /api/sessions/{sessionId}/cancel</c>.</summary>
+public sealed record CancelSessionRequest(string? Reason);
+
+/// <summary>Response for <c>POST /api/sessions/{sessionId}/cancel</c>: the command was dispatched.</summary>
+public sealed record SessionCancellationResponse(string SessionId, string Reason);
 
 /// <summary>Request body for <c>POST /api/messages/{messageId}/acknowledge</c>.</summary>
 internal sealed record AcknowledgeMessageRequest(string SessionId);

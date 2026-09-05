@@ -36,7 +36,8 @@ public class MailServiceTests : IDisposable
 
     private ControlPlaneDbContext CreateContext() => TestRepositories.CreateContext(_sqlitePath);
 
-    private MailService CreateService(ControlPlaneDbContext db) => new(_clock, db);
+    private MailService CreateService(ControlPlaneDbContext db) =>
+        new(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
 
     private AgentIdentityRegistry CreateRegistry(ControlPlaneDbContext db) => new(_clock, db);
 

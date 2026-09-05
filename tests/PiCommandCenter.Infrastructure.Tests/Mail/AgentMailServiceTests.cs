@@ -52,7 +52,7 @@ public class AgentMailServiceTests : IDisposable
         }
 
         await TestNodes.SaveAsync(db);
-        return new MailWorld(db, new MailService(_clock, db), new AgentIdentityRegistry(_clock, db), project.Id, request.Id);
+        return new MailWorld(db, new MailService(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier()), new AgentIdentityRegistry(_clock, db), project.Id, request.Id);
     }
     private static void SeedSessionRow(
         ControlPlaneDbContext db,
@@ -114,7 +114,7 @@ public class AgentMailServiceTests : IDisposable
 
         // Durable: a fresh context sees the identical stored row.
         await using var fresh = CreateContext();
-        var stored = await new MailService(_clock, fresh).GetThreadAsync(new ProjectId(_projectId), "thread-1");
+        var stored = await new MailService(_clock, fresh, new PiCommandCenter.Application.Live.ProjectionNotifier()).GetThreadAsync(new ProjectId(_projectId), "thread-1");
         var persisted = Assert.Single(stored);
         Assert.Equal(message.Id, persisted.Id);
         Assert.Equal(2, persisted.Recipients.Count);

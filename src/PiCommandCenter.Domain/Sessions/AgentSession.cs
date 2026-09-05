@@ -322,12 +322,38 @@ public sealed class AgentSession
                 CurrentOperation = null;
                 StatusReason = Reason(@event, $"Tool failed: {OptionalText(@event, "error") ?? "unspecified error"}");
                 break;
-            case "session.disconnected":
-                Liveness = AgentLiveness.Disconnected;
-                StatusReason = Reason(@event, "Runtime reported the session disconnected");
+            case "session.completed":
+            case "child.completed":
+                Liveness = AgentLiveness.Exited;
+                // Failure and cancellation outrank a late completion signal.
+                if (WorkState is not (AgentWorkState.Failed or AgentWorkState.Cancelled))
+                {
+                    Attention = AgentAttention.None;
+                }
+
+                // Failure and cancellation outrank a late completion signal.
+                if (WorkState is not (AgentWorkState.Failed or AgentWorkState.Cancelled))
+                {
+                    WorkState = AgentWorkState.Completed;
+                }
+
+                EndedAt = @event.OccurredAt;
+                CurrentOperation = null;
+                StatusReason = Reason(@event, "Session completed");
                 break;
             case "session.closed":
                 Liveness = AgentLiveness.Exited;
+
+                // A transport/process close is not proof of successful work. Preserve every
+                // stronger non-success state; only an otherwise active session closes cleanly.
+                if (WorkState is not (
+                    AgentWorkState.Failed
+                    or AgentWorkState.Cancelled
+                    or AgentWorkState.Blocked))
+                {
+                    WorkState = AgentWorkState.Completed;
+                }
+
                 EndedAt = @event.OccurredAt;
                 CurrentOperation = null;
                 StatusReason = Reason(@event, "Session closed");
@@ -339,6 +365,10 @@ public sealed class AgentSession
                 EndedAt = @event.OccurredAt;
                 CurrentOperation = null;
                 StatusReason = Reason(@event, $"Session failed: {OptionalText(@event, "error") ?? "unspecified error"}");
+                break;
+            case "session.disconnected":
+                Liveness = AgentLiveness.Disconnected;
+                StatusReason = Reason(@event, "Runtime reported the session disconnected");
                 break;
             case "session.cancelled":
                 Liveness = AgentLiveness.Exited;
@@ -441,7 +471,9 @@ public sealed class AgentSession
         }
     }
 
-    private static bool IsMutatingType(string type) => !string.Equals(type, "session.closed", StringComparison.Ordinal)
+    private static bool IsMutatingType(string type) => !string.Equals(type, "session.completed", StringComparison.Ordinal)
+        && !string.Equals(type, "child.completed", StringComparison.Ordinal)
+        && !string.Equals(type, "session.closed", StringComparison.Ordinal)
         && !string.Equals(type, "session.failed", StringComparison.Ordinal)
         && !string.Equals(type, "session.cancelled", StringComparison.Ordinal)
         && !type.StartsWith("request.", StringComparison.Ordinal);

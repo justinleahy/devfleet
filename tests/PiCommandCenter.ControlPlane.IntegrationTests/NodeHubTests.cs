@@ -28,15 +28,7 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
     public NodeHubTests(ControlPlaneFixture fixture)
     {
         _fixture = fixture;
-        var factory = fixture.Factory;
-        _ = factory.CreateClient(); // force server initialization before opening the connection
-        _connection = new HubConnectionBuilder()
-            .WithUrl(new Uri(factory.Server.BaseAddress, "nodeHub"), options =>
-            {
-                options.HttpMessageHandlerFactory = _ => factory.Server.CreateHandler();
-                options.Transports = HttpTransportType.LongPolling;
-            })
-            .Build();
+        _connection = fixture.CreateNodeHubConnection();
         _connection.StartAsync().GetAwaiter().GetResult();
     }
 
@@ -46,11 +38,11 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
     [Fact]
     public async Task NodeHub_is_not_a_browser_navigable_page()
     {
-        var response = await _fixture.CreateClient().GetAsync("/nodeHub");
+        var response = await _fixture.CreateAnonymousClient().GetAsync("/nodeHub");
         var body = await response.Content.ReadAsStringAsync();
 
         Assert.False(response.IsSuccessStatusCode);
-        Assert.Equal(400, (int)response.StatusCode);
+        Assert.Equal(401, (int)response.StatusCode);
         Assert.DoesNotContain("<html", body, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -105,6 +97,8 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
         Assert.Equal("Do hub work", claim.Prompt);
         Assert.Equal(WorkRequestKind.Development.ToString(), claim.Kind);
         Assert.Equal(RiskLevel.Standard.ToString(), claim.RiskLevel);
+        Assert.True(claim.CreateRequestBranch);
+        Assert.True(claim.CreateRequestCommit);
 
         var second = await _connection.InvokeAsync<RequestClaimMessage?>(
             "ClaimNext", new ClaimRequestMessage(_nodeId, LeaseSeconds: 60));
@@ -113,7 +107,7 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
     }
 
     [Fact]
-    public async Task RenewClaim_extends_the_lease_and_rejects_a_wrong_token()
+    public async Task RenewClaim_extends_the_lease_and_returns_null_for_a_wrong_token()
     {
         await RegisterNodeAsync();
         _ = await SeedRequestAsync(kind: WorkRequestKind.Analysis);
@@ -121,13 +115,14 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
             "ClaimNext", new ClaimRequestMessage(_nodeId, LeaseSeconds: 60));
 
         Assert.NotNull(claim);
-        var renewedExpiry = await _connection.InvokeAsync<DateTimeOffset>(
+        var renewedExpiry = await _connection.InvokeAsync<DateTimeOffset?>(
             "RenewClaim", new ClaimRenewalMessage(claim.RequestId, _nodeId, claim.ClaimToken, LeaseSeconds: 60));
 
         Assert.True(renewedExpiry >= claim.LeaseExpiresAt);
 
-        await Assert.ThrowsAnyAsync<HubException>(() => _connection.InvokeAsync<DateTimeOffset>(
-            "RenewClaim", new ClaimRenewalMessage(claim.RequestId, _nodeId, "wrong-token", LeaseSeconds: 60)));
+        var rejected = await _connection.InvokeAsync<DateTimeOffset?>(
+            "RenewClaim", new ClaimRenewalMessage(claim.RequestId, _nodeId, "wrong-token", LeaseSeconds: 60));
+        Assert.Null(rejected);
     }
 
     [Fact]
@@ -189,8 +184,8 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
                 nodeId, "Hub project " + Guid.NewGuid().ToString("N")[..6],
                 Path.Combine(Path.GetTempPath(), "pi-cc-integration", Guid.NewGuid().ToString("N")),
                 "main", enabled: true, maxActiveWriteRequests: 2, maxReadOnlyRequests: 4,
-                maxChildAgentsPerRequest: 1, requireCleanStart: false, createRequestBranch: false,
-                createRequestCommit: false, autoMerge: false, now);
+                maxChildAgentsPerRequest: 1, requireCleanStart: false, createRequestBranch: true,
+                createRequestCommit: true, autoMerge: false, now);
             db.Projects.Add(project);
         }
         var request = WorkRequest.Enqueue(project.Id, kind, priority, RiskLevel.Standard,

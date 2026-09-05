@@ -52,6 +52,10 @@ public class ReservedFileOperationsTests : IDisposable
             Guid leaseId, string fromSessionId, string toSessionId, CancellationToken _) =>
             throw new NotSupportedException();
 
+        public Task<ReservationOperationResult> RenewAsync(
+            Guid leaseId, long fencingToken, string sessionId, CancellationToken _) =>
+            throw new NotSupportedException();
+
         public Task<MutationAuthorizationResult> AuthorizeAsync(
             Guid leaseId, long fencingToken, string sessionId, string targetPath,
             string operation, CancellationToken _)
@@ -224,5 +228,58 @@ public class ReservedFileOperationsTests : IDisposable
         {
             Directory.Delete(outside.FullName, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task A_symlink_alias_inside_the_repository_is_rejected_before_io()
+    {
+        var (ops, gateway) = CreateOps();
+        WriteRepoFile("src/real.cs", "canonical");
+        var linkPath = Path.Combine(_repoRoot, "alias.cs");
+        File.CreateSymbolicLink(linkPath, Path.Combine(_repoRoot, "src", "real.cs"));
+
+        var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", "alias.cs", "boom");
+
+        Assert.Equal("path_symlink_alias", result.ErrorCode);
+        Assert.Empty(gateway.Authorizations);
+        Assert.Equal("canonical", File.ReadAllText(Path.Combine(_repoRoot, "src", "real.cs")));
+    }
+
+    [Fact]
+    public async Task A_dangling_symlink_leaf_is_rejected_before_io()
+    {
+        var (ops, gateway) = CreateOps();
+        var outside = Directory.CreateDirectory(Path.Combine(
+            Path.GetTempPath(), "pi-cc-reserved-ops-out", Guid.NewGuid().ToString("N")));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(_repoRoot, "src"));
+            File.CreateSymbolicLink(
+                Path.Combine(_repoRoot, "src", "dangling.cs"),
+                Path.Combine(outside.FullName, "not-there.txt"));
+
+            var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", "src/dangling.cs", "boom");
+
+            Assert.False(result.Ok);
+            Assert.Empty(gateway.Authorizations);
+            Assert.Empty(Directory.GetFiles(outside.FullName));
+        }
+        finally
+        {
+            Directory.Delete(outside.FullName, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_non_existing_leaf_is_written_through_canonical_existing_ancestors()
+    {
+        var (ops, gateway) = CreateOps();
+        Directory.CreateDirectory(Path.Combine(_repoRoot, "src", "deep"));
+
+        var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", "src/deep/new.cs", "created");
+
+        Assert.True(result.Ok, result.ErrorMessage);
+        Assert.Equal([("src/deep/new.cs", "write")], gateway.Authorizations);
+        Assert.Equal("created", File.ReadAllText(Path.Combine(_repoRoot, "src", "deep", "new.cs")));
     }
 }

@@ -42,6 +42,11 @@ if (scenario === "hang") {
     process.stderr.write("boom\n");
     process.exit(3);
   }, 40);
+} else if (scenario === "auth") {
+  init();
+  process.stderr.write("Error: not logged in. Run `claude login`\n");
+  process.stderr.write('{"api_key":"sk-ant-secretvalue1234567890abcdef"}\n');
+  process.exit(1);
 } else if (scenario === "malformed") {
   init();
   process.stdout.write("not-json\n");

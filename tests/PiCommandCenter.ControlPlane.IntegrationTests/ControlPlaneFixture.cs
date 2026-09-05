@@ -1,10 +1,18 @@
 using System.Diagnostics;
+using System.Net;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Connections;
+using Microsoft.AspNetCore.Http.Connections.Client;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Data.Sqlite;
+using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using PiCommandCenter.ControlPlane.Security;
 using PiCommandCenter.Infrastructure.Persistence;
+using PiCommandCenter.Infrastructure.Security;
 
 namespace PiCommandCenter.ControlPlane.IntegrationTests;
 
@@ -27,10 +35,13 @@ public sealed class ControlPlaneFixture : IDisposable
         {
         }
 
+        (PasswordFile, CredentialFile) = AuthTestMaterial.WriteTo(Path.Combine(_tempRoot, "auth"));
+
         Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={SqlitePath}");
             builder.UseSetting("Projects:ApprovedRoots:0", ApprovedRoot);
+            builder.UseTestAuthFiles(PasswordFile, CredentialFile);
         });
 
         using var scope = Factory.Services.CreateScope();
@@ -44,7 +55,64 @@ public sealed class ControlPlaneFixture : IDisposable
 
     public string SqlitePath { get; }
 
-    public HttpClient CreateClient() => Factory.CreateClient();
+    public string PasswordFile { get; }
+
+    public string CredentialFile { get; }
+
+    public string NodeTokenHex => AuthTestMaterial.NodeTokenHex;
+
+    public HttpClient CreateClient() => CreateAuthenticatedClient();
+
+    public HttpClient CreateAnonymousClient() => Factory.CreateClient(new WebApplicationFactoryClientOptions
+    {
+        AllowAutoRedirect = false,
+        HandleCookies = true,
+    });
+
+    public HttpClient CreateAuthenticatedClient() => CreateAuthenticatedClient(Factory);
+
+    public HttpClient CreateAuthenticatedClient(WebApplicationFactory<Program> factory)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        var client = factory.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = true,
+        });
+        AttachAntiforgery(client, factory);
+        Login(client);
+        return client;
+    }
+
+    public void AttachAntiforgery(HttpClient client) => AttachAntiforgery(client, Factory);
+
+    public void AttachAntiforgery(HttpClient client, WebApplicationFactory<Program> factory)
+    {
+        var (cookie, token) = IssueAntiforgery(factory);
+        if (!string.IsNullOrEmpty(cookie))
+        {
+            client.DefaultRequestHeaders.Remove("Cookie");
+            client.DefaultRequestHeaders.Add("Cookie", cookie);
+        }
+
+        client.DefaultRequestHeaders.Remove("RequestVerificationToken");
+        client.DefaultRequestHeaders.Add("RequestVerificationToken", token);
+    }
+
+    public void ConfigureNodeHub(HttpConnectionOptions options)
+    {
+        options.HttpMessageHandlerFactory = _ => Factory.Server.CreateHandler();
+        options.Transports = HttpTransportType.LongPolling;
+        options.AccessTokenProvider = () => Task.FromResult<string?>(NodeTokenHex);
+    }
+
+    public HubConnection CreateNodeHubConnection()
+    {
+        _ = Factory.CreateClient();
+        return new HubConnectionBuilder()
+            .WithUrl(new Uri(Factory.Server.BaseAddress, "nodeHub"), ConfigureNodeHub)
+            .Build();
+    }
 
     /// <summary>Initializes a fresh real Git repository inside the fixture's approved root.</summary>
     public string CreateGitRepository()
@@ -54,6 +122,36 @@ public sealed class ControlPlaneFixture : IDisposable
         RunGit(["-C", path, "config", "user.email", "tests@example.invalid"]);
         RunGit(["-C", path, "config", "user.name", "Command Center Tests"]);
         return path;
+    }
+
+    public (string CookieHeader, string RequestToken) IssueAntiforgery() => IssueAntiforgery(Factory);
+
+    public (string CookieHeader, string RequestToken) IssueAntiforgery(WebApplicationFactory<Program> factory)
+    {
+        using var scope = factory.Services.CreateScope();
+        var antiforgery = scope.ServiceProvider.GetRequiredService<IAntiforgery>();
+        var httpContext = new DefaultHttpContext { RequestServices = scope.ServiceProvider };
+        httpContext.Request.Scheme = "http";
+        httpContext.Request.Host = new HostString("localhost");
+        var tokens = antiforgery.GetAndStoreTokens(httpContext);
+        var setCookie = httpContext.Response.Headers.SetCookie.ToString();
+        return (setCookie, tokens.RequestToken ?? string.Empty);
+    }
+
+    private void Login(HttpClient client)
+    {
+        using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["username"] = AuthTestMaterial.Username,
+            ["password"] = AuthTestMaterial.Password,
+            ["returnUrl"] = "/",
+        });
+        using var response = client.PostAsync("/account/login", content).GetAwaiter().GetResult();
+        if (response.StatusCode is not HttpStatusCode.Redirect and not HttpStatusCode.OK)
+        {
+            throw new InvalidOperationException(
+                $"Test login failed with {(int)response.StatusCode} {response.Headers.Location}");
+        }
     }
 
     private static void RunGit(IReadOnlyList<string> argumentList)

@@ -9,8 +9,8 @@
  */
 import { boundedError } from "./broker.ts";
 
-/** Built-in Pi tools the root may use — read-only, no shell, no mutation. */
-export const ROOT_BUILTIN_TOOLS = ["read", "grep", "find", "ls"] as const;
+/** Built-in Pi tools the root may use — none; reads round-trip through the node. */
+export const ROOT_BUILTIN_TOOLS = [] as const;
 
 /** Built-in Pi tools that are technically excluded from the root session. */
 export const ROOT_EXCLUDED_TOOLS = [
@@ -38,6 +38,10 @@ export interface RootTool {
 
 /** Tool name → node request type (SPEC.md section 24.2). */
 export const TOOL_REQUEST_TYPES: Record<string, string> = {
+  read: "workspace.read",
+  grep: "workspace.grep",
+  find: "workspace.find",
+  ls: "workspace.ls",
   create_plan: "plan.submit",
   revise_plan: "plan.revise",
   spawn_agent: "agent.spawn",
@@ -79,6 +83,8 @@ export function roundTripTool(
   description: string,
   properties: Record<string, ToolPropertySpec>,
   request: ToolRequest,
+  requestType = TOOL_REQUEST_TYPES[name]!,
+  mapPayload: (params: Record<string, unknown>) => Record<string, unknown> = (params) => params,
 ): RootTool {
   return {
     name,
@@ -86,7 +92,7 @@ export function roundTripTool(
     description,
     properties,
     async execute(params) {
-      const result = await request(TOOL_REQUEST_TYPES[name]!, params);
+      const result = await request(requestType, mapPayload(params));
       // Tool results flow back through the SDK as text content; keep them
       // bounded so a huge node payload cannot blow up the model context.
       return boundedError(JSON.stringify(result ?? { ok: true }));
@@ -114,6 +120,34 @@ export function buildRootTools(request: ToolRequest): RootTool[] {
   });
 
   return [
+    roundTripTool(
+      "read",
+      "Read",
+      "Read a repository-relative file through the node. Paths cannot leave the registered repository or follow a symlink out.",
+      { path: s("Repository-relative POSIX path") },
+      request,
+    ),
+    roundTripTool(
+      "grep",
+      "Grep",
+      "Search file contents inside the registered repository through the node.",
+      { pattern: s("Regular expression"), path: optional("Repository-relative start path") },
+      request,
+    ),
+    roundTripTool(
+      "find",
+      "Find",
+      "Find files inside the registered repository through the node.",
+      { pattern: optional("Glob against file name or relative path"), path: optional("Repository-relative start path") },
+      request,
+    ),
+    roundTripTool(
+      "ls",
+      "List",
+      "List a directory inside the registered repository through the node.",
+      { path: optional("Repository-relative directory") },
+      request,
+    ),
     roundTripTool(
       "create_plan",
       "Create Plan",
@@ -208,8 +242,8 @@ export function buildRootTools(request: ToolRequest): RootTool[] {
     roundTripTool(
       "request_verification",
       "Request Verification",
-      "Ask the node to run the configured verification stage.",
-      { requestId: s("Request id"), scope: optional("Verification scope"), instructions: optional("Extra instructions") },
+      "Run a configured verification profile for the bound request; optional commandId targets one command.",
+      { profileId: s("Configured verification profile id (required)"), commandId: optional("Specific verification command id") },
       request,
     ),
     roundTripTool(

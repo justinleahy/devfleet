@@ -1,0 +1,44 @@
+@namespace PiCommandCenter.Web.Components.Account
+@inject NavigationManager Navigation
+
+@* Router-level fallback for an unauthorized route match. During static rendering
+   the navigation becomes a redirect response, so an unauthenticated request never
+   reaches page content. The visible copy only matters if a client somehow renders
+   this component without following the navigation. *@
+
+<div class="redirect" role="status">
+    <p>Taking you to sign-in&hellip;</p>
+    <a class="redirect-link" href="@Target">Continue</a>
+</div>
+
+@code {
+    /// <summary>Anonymous account page to send the caller to.</summary>
+    [Parameter]
+    [EditorRequired]
+    public string Path { get; set; } = "/login";
+
+    /// <summary>Carry the blocked address so sign-in can return the caller to it.</summary>
+    [Parameter]
+    public bool WithReturnUrl { get; set; }
+
+    private string Target { get; set; } = "/login";
+
+    protected override void OnInitialized()
+    {
+        Target = BuildTarget();
+        Navigation.NavigateTo(Target, forceLoad: false, replace: true);
+    }
+
+    private string BuildTarget()
+    {
+        if (!WithReturnUrl)
+        {
+            return Path;
+        }
+
+        var blocked = "/" + Navigation.ToBaseRelativePath(Navigation.Uri);
+        return blocked is "/"
+            ? Path
+            : $"{Path}?returnUrl={Uri.EscapeDataString(blocked)}";
+    }
+}

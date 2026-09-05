@@ -50,10 +50,12 @@ public class PiRootSessionSupervisorTests : IDisposable
         Title: "Ship the feature",
         Prompt: "Implement and review the feature",
         Kind: "Development",
-        RiskLevel: "Standard");
+        RiskLevel: "Standard",
+        CreateRequestBranch: false,
+        CreateRequestCommit: false);
 
     private (PiRootSessionSupervisor Supervisor, SqliteNodeEventSpool Spool, RecordingRequestHandler Handler)
-        CreateWorld(string workerScriptName)
+        CreateWorld(string workerScriptName, int requestTimeoutSeconds = 30)
     {
         var spoolPath = Path.Combine(_root, "spool.db");
         var agentData = Path.Combine(_root, "agent-data");
@@ -72,7 +74,7 @@ public class PiRootSessionSupervisorTests : IDisposable
                 NodeExecutable = "node",
                 WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", workerScriptName),
                 AgentDataDirectory = agentData,
-                RequestTimeoutSeconds = 30,
+                RequestTimeoutSeconds = requestTimeoutSeconds,
             }),
             new NodeWorkerProcessFactory(),
             handler,
@@ -138,6 +140,41 @@ public class PiRootSessionSupervisorTests : IDisposable
 
         // The supervisor never answers custom-tool requests itself; the fake worker sent none.
         Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Cancelling_a_root_session_is_terminal_and_idempotent()
+    {
+        var (supervisor, spool, _) = CreateWorld("fake-pi-worker.mjs");
+        await using var _ = supervisor;
+        var claim = MakeClaim(Directory.CreateDirectory(Path.Combine(_root, "cancel-repo")).FullName);
+        var sessionId = await supervisor.StartForClaimAsync(claim, CancellationToken.None);
+
+        Assert.True(await supervisor.CancelSessionAsync(sessionId, "operator_cancel"));
+        Assert.DoesNotContain(sessionId, supervisor.ActiveSessionIds);
+        Assert.False(await supervisor.CancelSessionAsync(sessionId, "duplicate_cancel"));
+
+        var pending = await SpoolAwaitingAsync(
+            spool,
+            events => events.Any(e => e.Type == "session.cancelled"));
+        var cancelled = Assert.Single(pending, e => e.Type == "session.cancelled");
+        Assert.Contains("operator_cancel", cancelled.PayloadJson);
+    }
+
+    [Fact]
+    public async Task Hung_graceful_cancel_still_forces_terminal_close()
+    {
+        var (supervisor, spool, _) = CreateWorld("fake-pi-worker-hung-cancel.mjs", requestTimeoutSeconds: 1);
+        await using var _ = supervisor;
+        var claim = MakeClaim(Directory.CreateDirectory(Path.Combine(_root, "hung-cancel-repo")).FullName);
+        var sessionId = await supervisor.StartForClaimAsync(claim, CancellationToken.None);
+
+        Assert.True(await supervisor.CancelSessionAsync(sessionId, "operator_cancel"));
+        Assert.DoesNotContain(sessionId, supervisor.ActiveSessionIds);
+        var pending = await SpoolAwaitingAsync(
+            spool,
+            events => events.Any(e => e.Type == "session.cancelled"));
+        Assert.Single(pending, e => e.Type == "session.cancelled");
     }
 
     [Fact]

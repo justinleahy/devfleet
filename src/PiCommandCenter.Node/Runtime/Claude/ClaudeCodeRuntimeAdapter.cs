@@ -9,6 +9,8 @@ using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts;
 using PiCommandCenter.Domain.Sessions;
 using PiCommandCenter.Node.Runtime.Claude.Hooks;
+using PiCommandCenter.Node.Security;
+
 
 namespace PiCommandCenter.Node.Runtime.Claude;
 
@@ -122,6 +124,8 @@ public sealed class ClaudeCodeRuntimeAdapter : IAgentRuntimeAdapter
             "--verbose",
             "--settings",
             settingsPath,
+            "--setting-sources",
+            string.Empty,
             "--permission-mode",
             "dontAsk",
         };
@@ -249,7 +253,11 @@ internal sealed class ClaudeCodeSession : IAsyncDisposable
     private bool _failed;
     private bool _cancelled;
     private bool _closed;
+    private bool _authBlocked;
+
     private readonly Task _stdoutPump;
+    private readonly Task _stderrPump;
+
 
     public ClaudeCodeSession(
         AgentStartRequest request,
@@ -269,7 +277,7 @@ internal sealed class ClaudeCodeSession : IAsyncDisposable
         _hookInstaller = hookInstaller;
         ProcessId = process.Id;
         _stdoutPump = PumpStdoutAsync(_disposeCts.Token);
-        _ = PumpStderrAsync(_disposeCts.Token);
+        _stderrPump = PumpStderrAsync(_disposeCts.Token);
         _ = PumpExitAsync();
     }
 
@@ -332,19 +340,27 @@ internal sealed class ClaudeCodeSession : IAsyncDisposable
         };
         var workState = _cancelled
             ? AgentWorkState.Cancelled
+            : _authBlocked
+                ? AgentWorkState.Blocked
+                : _failed
+                    ? AgentWorkState.Failed
+                    : exited
+                        ? AgentWorkState.Completed
+                        : AgentWorkState.Executing;
+        var attention = _authBlocked
+            ? AgentAttention.InputRequired
             : _failed
-                ? AgentWorkState.Failed
-                : exited
-                    ? AgentWorkState.Completed
-                    : AgentWorkState.Executing;
-        var attention = _failed ? AgentAttention.Error : AgentAttention.None;
+                ? AgentAttention.Error
+                : AgentAttention.None;
         var reason = _cancelled
             ? "cancelled"
-            : _failed
-                ? "process failed"
-                : exited
-                    ? "exited"
-                    : $"process {ProcessId} online";
+            : _authBlocked
+                ? ProviderAuthClassifier.NativeLoginReason(AgentRuntimeKinds.ClaudeCode)
+                : _failed
+                    ? "process failed"
+                    : exited
+                        ? "exited"
+                        : $"process {ProcessId} online";
 
         return new AgentRuntimeSnapshot(
             _request.SessionId,
@@ -430,7 +446,8 @@ internal sealed class ClaudeCodeSession : IAsyncDisposable
                         continue;
                     }
 
-                    _stderrTail.Enqueue(piece);
+                    var sanitized = DiagnosticSanitizer.SanitizeLine(piece);
+                    _stderrTail.Enqueue(sanitized);
                     while (_stderrTail.Count > _options.MaxStderrLines)
                     {
                         _stderrTail.TryDequeue(out _);
@@ -467,6 +484,14 @@ internal sealed class ClaudeCodeSession : IAsyncDisposable
         {
         }
 
+        try
+        {
+            await _stderrPump.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+        }
+
         if (!_init.Task.IsCompleted)
         {
             _init.TrySetException(new InvalidOperationException(
@@ -488,20 +513,33 @@ internal sealed class ClaudeCodeSession : IAsyncDisposable
         }
         else if (exitCode != 0)
         {
-            _failed = true;
-            var tail = string.Join(" | ", _stderrTail.TakeLast(5));
-            Emit("session.failed", new Dictionary<string, object?>
+            var tail = string.Join(" | ", _stderrTail.TakeLast(8));
+            if (ProviderAuthClassifier.IsMissing(tail))
             {
-                ["reason"] = $"Claude Code exited with code {exitCode}.",
-                ["exitCode"] = exitCode,
-                ["stderrTail"] = tail,
-                ["processId"] = ProcessId,
-            });
-            Emit("session.closed", new Dictionary<string, object?>
+                _authBlocked = true;
+                Emit("session.snapshot", ProviderAuthClassifier.SnapshotPayload(AgentRuntimeKinds.ClaudeCode, tail));
+                Emit("session.closed", new Dictionary<string, object?>
+                {
+                    ["reason"] = "provider_auth_required",
+                    ["exitCode"] = exitCode,
+                });
+            }
+            else
             {
-                ["reason"] = "worker_crashed",
-                ["exitCode"] = exitCode,
-            });
+                _failed = true;
+                Emit("session.failed", new Dictionary<string, object?>
+                {
+                    ["reason"] = $"Claude Code exited with code {exitCode}.",
+                    ["exitCode"] = exitCode,
+                    ["stderrTail"] = tail,
+                    ["processId"] = ProcessId,
+                });
+                Emit("session.closed", new Dictionary<string, object?>
+                {
+                    ["reason"] = "worker_crashed",
+                    ["exitCode"] = exitCode,
+                });
+            }
         }
         else if (!_closed)
         {
@@ -581,7 +619,9 @@ internal sealed class ClaudeCodeSession : IAsyncDisposable
 
         Emit("runtime.malformed_line", new Dictionary<string, object?>
         {
-            ["preview"] = line.Length > 256 ? line[..256] : line,
+            ["preview"] = DiagnosticSanitizer.SanitizeLine(
+                line.Length > 256 ? line[..256] : line,
+                256),
             ["length"] = line.Length,
         });
     }

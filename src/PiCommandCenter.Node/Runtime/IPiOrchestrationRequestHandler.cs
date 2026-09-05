@@ -14,7 +14,29 @@ public sealed record PiOrchestrationContext(
     string RequestId,
     string? ParentSessionId,
     Func<string, IReadOnlyDictionary<string, object?>, CancellationToken, Task> EmitAsync,
-    string? RepositoryRoot = null);
+    string? RepositoryRoot = null,
+    Func<PiCheckpointRequest, CancellationToken, Task<PiCheckpointResult>>? CreateCheckpointAsync = null);
+
+/// <summary>Supervisor-issued checkpoint commit request (trusted git seam only).</summary>
+public sealed record PiCheckpointRequest(
+    string BranchName,
+    string Message,
+    IReadOnlyList<string> Paths);
+
+/// <summary>Outcome of a checkpoint commit round trip. Never faked: failures are structured.</summary>
+public sealed record PiCheckpointResult(
+    bool Ok,
+    string? CommitId = null,
+    string? BranchName = null,
+    string? ErrorCode = null,
+    string? ErrorMessage = null)
+{
+    public static PiCheckpointResult Committed(string commitId, string branchName) =>
+        new(true, CommitId: commitId, BranchName: branchName);
+
+    public static PiCheckpointResult Failure(string errorCode, string errorMessage) =>
+        new(false, ErrorCode: errorCode, ErrorMessage: errorMessage);
+}
 
 /// <summary>Structured answer returned to the worker for one custom-tool request.</summary>
 public sealed record PiToolResponse

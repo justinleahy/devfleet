@@ -13,7 +13,9 @@ public sealed record CompletionEvidenceMessage(
     string SummaryMarkdown,
     IReadOnlyList<string>? ChangedFiles,
     IReadOnlyList<ReviewFindingMessage> ReviewFindings,
-    string VerificationSummary);
+    string VerificationSummary,
+    string? RequestBranch = null,
+    string? CheckpointCommitId = null);
 
 /// <summary>Persisted request result returned after an accepted completion gate.</summary>
 public sealed record RequestResultMessage(
@@ -22,7 +24,9 @@ public sealed record RequestResultMessage(
     IReadOnlyList<string> ChangedFiles,
     IReadOnlyList<ReviewFindingMessage> ReviewFindings,
     string VerificationSummary,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    string? RequestBranch = null,
+    string? CheckpointCommitId = null);
 
 /// <summary>
 /// One-argument hub payload for evaluating the objective completion gate.

@@ -1,3 +1,4 @@
+using PiCommandCenter.ControlPlane.Security;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -136,6 +137,7 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={_fixture.SqlitePath}");
             builder.UseSetting("Projects:ApprovedRoots:0", _fixture.ApprovedRoot);
+            builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialFile);
         });
         using var restartScope = restarted.Services.CreateScope();
         var restored = restartScope.ServiceProvider.GetRequiredService<ICompletionGateService>();

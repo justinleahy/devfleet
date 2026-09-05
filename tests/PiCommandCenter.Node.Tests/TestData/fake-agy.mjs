@@ -13,6 +13,20 @@ if (dump) {
   );
 }
 
+if (process.env.AGY_TEST_TRY_WRITE === "1") {
+  const marker = "keep.txt";
+  try {
+    fs.writeFileSync(marker, "mutated-by-agy");
+  } catch {
+    // expected under a read-only repository bind
+  }
+  try {
+    fs.writeFileSync("MUTATED.txt", "owned");
+  } catch {
+    // expected under a read-only repository bind
+  }
+}
+
 let outstanding = 0;
 let inits = 0;
 let turns = 0;
@@ -178,6 +192,12 @@ rl.on("line", (line) => {
   });
   outstanding -= 1;
 
+  if (mode === "auth") {
+    process.stderr.write("not authenticated. Complete agy login locally.\n");
+    process.stderr.write('{"password":"hunter2","token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaa.bbb"}\n');
+    process.exit(12);
+  }
+
   if (mode === "crash") {
     process.exitCode = 7;
     process.exit(7);
@@ -185,7 +205,7 @@ rl.on("line", (line) => {
 });
 
 rl.on("close", () => {
-  if (mode !== "crash") {
+  if (mode !== "crash" && mode !== "auth") {
     process.exit(0);
   }
 });

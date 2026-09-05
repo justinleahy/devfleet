@@ -8,6 +8,7 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Domain.Sessions;
+using PiCommandCenter.Node.Security;
 
 namespace PiCommandCenter.Node.Runtime;
 
@@ -38,6 +39,7 @@ public sealed class PiWorkerSession : IAsyncDisposable
 
     private readonly ConcurrentDictionary<string, TaskCompletionSource<PiEnvelope>> _pending = new();
     private readonly ConcurrentQueue<string> _stderrTail = new();
+    internal const int MaxStderrLines = 200;
     private readonly CancellationTokenSource _disposeCts = new();
 
     private long _lastSequenceSeen;
@@ -97,18 +99,38 @@ public sealed class PiWorkerSession : IAsyncDisposable
         string workingDirectory,
         string agentDataDirectory,
         string? model,
+        string? systemPrompt,
+        AgentRuntimeMode mode,
+        string? parentSessionId,
         CancellationToken cancellationToken)
     {
+        if (mode == AgentRuntimeMode.Child && string.IsNullOrWhiteSpace(parentSessionId))
+        {
+            throw new ArgumentException(
+                "A child session start requires a parent session id.", nameof(parentSessionId));
+        }
+
         _ = StartPumps();
 
         var payload = new Dictionary<string, object?>
         {
             ["cwd"] = workingDirectory,
             ["agentDir"] = agentDataDirectory,
+            ["mode"] = mode is AgentRuntimeMode.Child ? "child" : "root",
         };
         if (!string.IsNullOrWhiteSpace(model))
         {
             payload["model"] = model;
+        }
+
+        if (!string.IsNullOrWhiteSpace(systemPrompt))
+        {
+            payload["systemPrompt"] = systemPrompt;
+        }
+
+        if (mode is AgentRuntimeMode.Child)
+        {
+            payload["parentSessionId"] = parentSessionId;
         }
 
         var response = await RequestAsync("session.start", payload, cancellationToken)
@@ -377,14 +399,15 @@ public sealed class PiWorkerSession : IAsyncDisposable
                         continue;
                     }
 
-                    _stderrTail.Enqueue(piece);
-                    while (_stderrTail.Count > 200)
+                    var sanitized = DiagnosticSanitizer.SanitizeLine(piece);
+                    _stderrTail.Enqueue(sanitized);
+                    while (_stderrTail.Count > MaxStderrLines)
                     {
                         _stderrTail.TryDequeue(out _);
                     }
 
                     _logger.LogInformation(
-                        "Pi worker {SessionId} stderr: {Line}", SessionId, piece);
+                        "Pi worker {SessionId} stderr: {Line}", SessionId, sanitized);
                 }
 
                 if (result.IsCompleted)
@@ -416,8 +439,23 @@ public sealed class PiWorkerSession : IAsyncDisposable
             return;
         }
 
+        var tail = DiagnosticSanitizer.Sanitize(
+            string.Join(" | ", _stderrTail.TakeLast(8)),
+            2048);
+        if (ProviderAuthClassifier.IsMissing(tail))
+        {
+            await EmitSyntheticAsync(
+                "session.snapshot",
+                ProviderAuthClassifier.SnapshotPayload(AgentRuntimeKinds.Pi, tail)).ConfigureAwait(false);
+            await EmitSyntheticAsync("session.closed", new Dictionary<string, object?>
+            {
+                ["reason"] = "provider_auth_required",
+            }).ConfigureAwait(false);
+            FailEvents(null);
+            return;
+        }
+
         _failed = true;
-        var tail = string.Join(" | ", _stderrTail.TakeLast(5));
         await EmitSyntheticAsync(
             "session.failed",
             new Dictionary<string, object?>

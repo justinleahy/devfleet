@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Projects;
 using PiCommandCenter.Application.Requests;
@@ -29,6 +30,7 @@ public static class DependencyInjection
         ArgumentNullException.ThrowIfNull(configuration);
 
         services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<IProjectionNotifier, ProjectionNotifier>();
 
         services.AddDbContext<ControlPlaneDbContext>((_, optionsBuilder) =>
         {

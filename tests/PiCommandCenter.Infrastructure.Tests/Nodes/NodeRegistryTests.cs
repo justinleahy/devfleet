@@ -29,7 +29,7 @@ public class NodeRegistryTests : IDisposable
     public async Task Register_persists_a_new_offline_node()
     {
         await using var db = CreateContext();
-        var registry = new NodeRegistry(_clock, db);
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var nodeId = TestNodes.NewNodeId();
 
         var dto = await registry.RegisterAsync(
@@ -46,7 +46,7 @@ public class NodeRegistryTests : IDisposable
     public async Task Re_registering_an_existing_node_refreshes_it_instead_of_forking_a_row()
     {
         await using var db = CreateContext();
-        var registry = new NodeRegistry(_clock, db);
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var nodeId = TestNodes.NewNodeId();
         await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), _clock.GetUtcNow());
         _clock.Advance(TimeSpan.FromMinutes(1));
@@ -70,7 +70,7 @@ public class NodeRegistryTests : IDisposable
         await using var db = CreateContext();
         var nodeId = TestNodes.NewNodeId();
         await SeedRegistered(db, nodeId);
-        var registry = new NodeRegistry(_clock, db);
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var conflicted = false;
         db.SavingChanges += (_, _) =>
         {
@@ -98,7 +98,7 @@ public class NodeRegistryTests : IDisposable
     public async Task Heartbeat_of_an_unregistered_node_throws()
     {
         await using var db = CreateContext();
-        var registry = new NodeRegistry(_clock, db);
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
 
         await Assert.ThrowsAsync<NodeNotFoundException>(() => registry.HeartbeatAsync(
             new NodeHeartbeatCommand(TestNodes.NewNodeId(), ActiveSessionIds: []), _clock.GetUtcNow()));
@@ -108,7 +108,7 @@ public class NodeRegistryTests : IDisposable
     public async Task Heartbeat_takes_the_node_online_and_advances_the_last_seen_time()
     {
         await using var db = CreateContext();
-        var registry = new NodeRegistry(_clock, db);
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var nodeId = TestNodes.NewNodeId();
         await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), _clock.GetUtcNow());
         var seenAt = _clock.GetUtcNow().AddMinutes(1);
@@ -124,7 +124,7 @@ public class NodeRegistryTests : IDisposable
     public async Task MarkStaleOffline_takes_an_online_node_offline()
     {
         await using var db = CreateContext();
-        var registry = new NodeRegistry(_clock, db);
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var nodeId = TestNodes.NewNodeId();
         await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), _clock.GetUtcNow());
         await registry.HeartbeatAsync(new NodeHeartbeatCommand(nodeId, []), _clock.GetUtcNow());
@@ -140,7 +140,7 @@ public class NodeRegistryTests : IDisposable
     public async Task MarkStaleOffline_is_a_no_op_for_unknown_and_already_offline_nodes()
     {
         await using var db = CreateContext();
-        var registry = new NodeRegistry(_clock, db);
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var nodeId = TestNodes.NewNodeId();
 
         await registry.MarkStaleOfflineAsync(nodeId, _clock.GetUtcNow());
@@ -157,7 +157,7 @@ public class NodeRegistryTests : IDisposable
     public async Task Get_returns_null_for_an_unknown_node_and_List_orders_by_display_name()
     {
         await using var db = CreateContext();
-        var registry = new NodeRegistry(_clock, db);
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
 
         Assert.Null(await registry.GetAsync(TestNodes.NewNodeId()));
 

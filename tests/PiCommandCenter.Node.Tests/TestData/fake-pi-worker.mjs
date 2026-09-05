@@ -20,6 +20,14 @@ rl.on('line', (line) => {
   if (message.kind !== 'request') {
     return;
   }
+  if (message.type === 'session.input') {
+    send({ protocolVersion: 1, messageId: message.messageId, kind: 'response', sessionId: message.sessionId, type: 'session.input', payload: { queued: true } });
+    return;
+  }
+  if (message.type === 'session.cancel') {
+    send({ protocolVersion: 1, messageId: message.messageId, kind: 'response', sessionId: message.sessionId, type: 'session.cancel', payload: { cancelled: true } });
+    return;
+  }
   if (message.type === 'goodbye') {
     send({ protocolVersion: 1, messageId: message.messageId, kind: 'response', sessionId: message.sessionId, type: 'goodbye' });
     setTimeout(() => process.exit(0), 10);

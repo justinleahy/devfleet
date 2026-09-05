@@ -1,6 +1,9 @@
 using System.IO.Pipelines;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using PiCommandCenter.ControlPlane.Security;
+using PiCommandCenter.Infrastructure.Security;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -175,9 +178,11 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
 
         var sqlitePath = Path.Combine(_root, runtime + "-cp.db");
         File.Create(sqlitePath).Dispose();
+        var (passwordFile, credentialFile) = AuthTestMaterial.WriteTo(Path.Combine(_root, "auth"));
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={sqlitePath}");
+            builder.UseTestAuthFiles(passwordFile, credentialFile);
         });
         using (var migrate = factory.Services.CreateScope())
         {
@@ -188,7 +193,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
         var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
 
 
-        var sink = new NodeEventSink(TimeProvider.System, db);
+        var sink = new NodeEventSink(TimeProvider.System, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var dtos = pending.Select(ToDto).ToList();
         var ack = await sink.AppendAsync(new EventBatch(dtos));
         Assert.Equal(dtos.Select(d => d.EventId), ack.EventIds);

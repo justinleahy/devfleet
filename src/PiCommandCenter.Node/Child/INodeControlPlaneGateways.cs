@@ -86,6 +86,12 @@ public interface INodeReservationGateway
         string toSessionId,
         CancellationToken cancellationToken);
 
+    Task<ReservationOperationResult> RenewAsync(
+        Guid leaseId,
+        long fencingToken,
+        string sessionId,
+        CancellationToken cancellationToken);
+
     Task<MutationAuthorizationResult> AuthorizeAsync(
         Guid leaseId,
         long fencingToken,

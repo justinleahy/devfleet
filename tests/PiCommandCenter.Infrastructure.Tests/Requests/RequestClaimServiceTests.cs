@@ -36,7 +36,7 @@ public class RequestClaimServiceTests : IDisposable
         TestNodes.SeedNode(db, nodeId, _clock);
         TestNodes.SeedProject(db, nodeId, _clock, enabled: enabled, maxReadOnlyRequests: maxReadOnlyRequests);
         await TestNodes.SaveAsync(db);
-        return (new RequestClaimService(_clock, db), nodeId);
+        return (new RequestClaimService(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier()), nodeId);
     }
 
     [Fact]
@@ -52,7 +52,7 @@ public class RequestClaimServiceTests : IDisposable
         _clock.Advance(TimeSpan.FromSeconds(1));
         var urgent = TestNodes.SeedRequest(db, project, _clock, WorkRequestKind.Analysis, RequestPriority.Urgent, "urgent");
         await TestNodes.SaveAsync(db);
-        var service = new RequestClaimService(_clock, db);
+        var service = new RequestClaimService(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
 
         var first = await service.ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
         var second = await service.ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
@@ -90,7 +90,7 @@ public class RequestClaimServiceTests : IDisposable
         TestNodes.SeedRequest(db, theirs, _clock, WorkRequestKind.Analysis);
         TestNodes.SeedRequest(db, disabled, _clock, WorkRequestKind.Analysis);
         await TestNodes.SaveAsync(db);
-        var service = new RequestClaimService(_clock, db);
+        var service = new RequestClaimService(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
 
         Assert.Null(await service.ClaimNextAsync(mine, TimeSpan.FromMinutes(5)));
     }
@@ -99,7 +99,7 @@ public class RequestClaimServiceTests : IDisposable
     public async Task Claim_of_an_unregistered_node_throws()
     {
         var db = CreateContext();
-        var service = new RequestClaimService(_clock, db);
+        var service = new RequestClaimService(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
 
         await Assert.ThrowsAsync<NodeNotFoundException>(
             () => service.ClaimNextAsync(TestNodes.NewNodeId(), TimeSpan.FromMinutes(5)));
@@ -115,7 +115,7 @@ public class RequestClaimServiceTests : IDisposable
         TestNodes.SeedRequest(db, project, _clock, WorkRequestKind.Development, title: "dev-1");
         TestNodes.SeedRequest(db, project, _clock, WorkRequestKind.Development, title: "dev-2");
         await TestNodes.SaveAsync(db);
-        var service = new RequestClaimService(_clock, db);
+        var service = new RequestClaimService(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
 
         var first = await service.ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
         var second = await service.ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
@@ -135,7 +135,7 @@ public class RequestClaimServiceTests : IDisposable
         TestNodes.SeedRequest(db, project, _clock, WorkRequestKind.Analysis, title: "read-1");
         TestNodes.SeedRequest(db, project, _clock, WorkRequestKind.Review, title: "read-2");
         await TestNodes.SaveAsync(db);
-        var service = new RequestClaimService(_clock, db);
+        var service = new RequestClaimService(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
 
         var first = await service.ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
         var second = await service.ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
@@ -153,7 +153,7 @@ public class RequestClaimServiceTests : IDisposable
         var project = TestNodes.SeedProject(db, nodeId, _clock, maxReadOnlyRequests: 1);
         TestNodes.SeedRequest(db, project, _clock, WorkRequestKind.Analysis, title: "held");
         await TestNodes.SaveAsync(db);
-        var service = new RequestClaimService(_clock, db);
+        var service = new RequestClaimService(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
         _ = await service.ClaimNextAsync(nodeId, TimeSpan.FromMinutes(1));
 
         _clock.Advance(TimeSpan.FromMinutes(2));
@@ -195,9 +195,9 @@ public class RequestClaimServiceTests : IDisposable
             ?? throw new InvalidOperationException("expected a claim");
         var requestId = new WorkRequestId(claim.RequestId);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<ClaimRenewalRejectedException>(
             () => service.RenewAsync(requestId, nodeId, "wrong-token", TimeSpan.FromMinutes(5)));
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<ClaimRenewalRejectedException>(
             () => service.RenewAsync(requestId, TestNodes.NewNodeId(), claim.ClaimToken, TimeSpan.FromMinutes(5)));
     }
 
@@ -213,7 +213,7 @@ public class RequestClaimServiceTests : IDisposable
             ?? throw new InvalidOperationException("expected a claim");
         _clock.Advance(TimeSpan.FromMinutes(2));
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<ClaimRenewalRejectedException>(
             () => service.RenewAsync(new WorkRequestId(claim.RequestId), nodeId, claim.ClaimToken, TimeSpan.FromMinutes(5)));
     }
 
@@ -238,7 +238,7 @@ public class RequestClaimServiceTests : IDisposable
         var project = TestNodes.SeedProject(db, nodeId, _clock);
         TestNodes.SeedRequest(db, project, _clock, WorkRequestKind.Review, title: "Review the diff");
         await TestNodes.SaveAsync(db);
-        var service = new RequestClaimService(_clock, db);
+        var service = new RequestClaimService(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
 
         var claim = await service.ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
 

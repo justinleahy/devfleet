@@ -39,15 +39,8 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
     public MailCoordinationTests(ControlPlaneFixture fixture)
     {
         _fixture = fixture;
-        var factory = fixture.Factory;
-        _client = factory.CreateClient();
-        _connection = new HubConnectionBuilder()
-            .WithUrl(new Uri(factory.Server.BaseAddress, "nodeHub"), options =>
-            {
-                options.HttpMessageHandlerFactory = _ => factory.Server.CreateHandler();
-                options.Transports = HttpTransportType.LongPolling;
-            })
-            .Build();
+        _client = fixture.CreateClient();
+        _connection = fixture.CreateNodeHubConnection();
         _connection.StartAsync().GetAwaiter().GetResult();
     }
 
@@ -178,11 +171,7 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
     {
         await SeedAsync();
         var recipientConnection = new HubConnectionBuilder()
-            .WithUrl(new Uri(_fixture.Factory.Server.BaseAddress, "nodeHub"), options =>
-            {
-                options.HttpMessageHandlerFactory = _ => _fixture.Factory.Server.CreateHandler();
-                options.Transports = HttpTransportType.LongPolling;
-            })
+            .WithUrl(new Uri(_fixture.Factory.Server.BaseAddress, "nodeHub"), _fixture.ConfigureNodeHub)
             .Build();
         await recipientConnection.StartAsync();
 
@@ -240,14 +229,55 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
     }
 
     [Fact]
-    public async Task Session_cancel_records_a_cancelled_projection()
+    public async Task Session_cancel_dispatches_to_the_owning_node_and_projection_follows_the_node_event()
     {
         await SeedAsync();
-        var cancelled = await PostAsync<AgentSessionDto>($"/api/sessions/{_childSession}/cancel", new { });
-        Assert.Equal(AgentLiveness.Exited, cancelled.Liveness);
+        using var response = await _client.PostAsync("/api/sessions/does-not-exist/cancel", null);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
 
-        var missing = await _client.PostAsync("/api/sessions/does-not-exist/cancel", null);
-        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+        // A node heartbeating the session active joins its live group and receives the
+        // cancellation command; it reports the outcome by publishing the real event.
+        var cancelReceived = new TaskCompletionSource<CancelSessionCommand>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var nodeId = Guid.NewGuid();
+        _connection.On<CancelSessionCommand>("CancelSession", command =>
+        {
+            cancelReceived.TrySetResult(command);
+            return Task.CompletedTask;
+        });
+        await _connection.InvokeAsync<NodeDto>("Register",
+            new NodeRegistrationMessage(nodeId, "mail-cancel-node", "1.0.0", "{}"));
+        await _connection.InvokeAsync<NodeDto>("Heartbeat",
+            new NodeHeartbeatMessage(nodeId, [_childSession]));
+
+        var dispatch = await _client.PostAsJsonAsync($"/api/sessions/{_childSession}/cancel",
+            new { reason = "operator-stop" });
+        Assert.Equal(HttpStatusCode.Accepted, dispatch.StatusCode);
+
+        var command = await cancelReceived.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(_childSession, command.SessionId);
+        Assert.Equal("operator-stop", command.Reason);
+
+        // The node reports the real outcome through the normal event path; the projection
+        // must reflect the node event, not the dispatch.
+        await _connection.InvokeAsync<NodeEventAcknowledgementMessage>("PublishEvents", new NodeEventBatchMessage(
+        [
+            new NodeEventMessage(
+                EventId: $"cancel-{Guid.NewGuid()}",
+                NodeId: nodeId,
+                ProjectId: _projectId,
+                RequestId: _requestId,
+                SessionId: _childSession,
+                Sequence: 1,
+                Type: "session.cancelled",
+                OccurredAt: DateTimeOffset.UtcNow,
+                PayloadJson: "{}"),
+        ]));
+
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var sessions = scope.ServiceProvider.GetRequiredService<IAgentSessionStore>();
+        var projection = await sessions.GetAsync(_childSession);
+        Assert.NotNull(projection);
+        Assert.Equal(AgentLiveness.Exited, projection!.Liveness);
     }
 
     private async Task SeedAsync()

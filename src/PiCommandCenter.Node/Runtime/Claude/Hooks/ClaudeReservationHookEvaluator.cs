@@ -26,9 +26,10 @@ public sealed record ClaudeHookDecision(
 }
 
 /// <summary>
-/// Fail-closed PreToolUse gate for Claude Edit/Write and a hard deny for Bash/PowerShell.
+/// Fail-closed PreToolUse gate: Bash/PowerShell denied; Read/Glob/Grep must stay inside
+/// the repository (symlink-escape safe); Edit/Write additionally require a live reservation.
 /// Lease id, fencing token, and session id come from <see cref="ClaudeHookSessionContext"/>,
-/// never from tool_input. <c>file_path</c> must be an absolute path inside the repository.
+/// never from tool_input.
 /// </summary>
 public sealed class ClaudeReservationHookEvaluator
 {
@@ -58,7 +59,6 @@ public sealed class ClaudeReservationHookEvaluator
     {
         if (context is null
             || string.IsNullOrWhiteSpace(context.SessionId)
-            || context.LeaseId == Guid.Empty
             || string.IsNullOrWhiteSpace(context.RepositoryRoot))
         {
             return ClaudeHookDecision.Deny("missing trusted session context");
@@ -87,9 +87,19 @@ public sealed class ClaudeReservationHookEvaluator
                 return ClaudeHookDecision.Deny("Bash and PowerShell are denied", exitCode: 2);
             }
 
+            if (IsInspectTool(toolName))
+            {
+                return EvaluateInspect(document.RootElement, context);
+            }
+
             if (!IsMutationTool(toolName, out var operation))
             {
                 return ClaudeHookDecision.Deny($"tool '{toolName}' is not permitted");
+            }
+
+            if (context.LeaseId == Guid.Empty)
+            {
+                return ClaudeHookDecision.Deny("missing trusted session context");
             }
 
             if (!TryReadFilePath(document.RootElement, out var filePath))
@@ -173,6 +183,91 @@ public sealed class ClaudeReservationHookEvaluator
         => toolName.Equals("Bash", StringComparison.OrdinalIgnoreCase)
             || toolName.Equals("PowerShell", StringComparison.OrdinalIgnoreCase);
 
+
+    internal static bool IsInspectTool(string toolName)
+        => toolName.Equals("Read", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("Glob", StringComparison.OrdinalIgnoreCase)
+            || toolName.Equals("Grep", StringComparison.OrdinalIgnoreCase);
+
+    private static ClaudeHookDecision EvaluateInspect(JsonElement root, ClaudeHookSessionContext context)
+    {
+        var toolName = ReadToolName(root);
+        var paths = CollectInspectPaths(root);
+        if (toolName.Equals("Read", StringComparison.OrdinalIgnoreCase) && paths.Count == 0)
+        {
+            return ClaudeHookDecision.Deny("missing absolute file_path");
+        }
+
+        foreach (var candidate in paths)
+        {
+            if (!TryBoundInspectPath(context.RepositoryRoot, candidate, out var error))
+            {
+                return ClaudeHookDecision.Deny(error);
+            }
+        }
+
+        return ClaudeHookDecision.Permit();
+    }
+
+    internal static bool TryBoundInspectPath(string repositoryRoot, string candidate, out string error)
+    {
+        error = "";
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            error = "outside: empty path";
+            return false;
+        }
+
+        if (Path.IsPathRooted(candidate) || candidate.StartsWith('~'))
+        {
+            return TryRepositoryRelative(repositoryRoot, candidate, out _, out error);
+        }
+
+        try
+        {
+            RepositoryPathPolicy.Resolve(repositoryRoot, candidate.Replace('\\', '/'));
+            return true;
+        }
+        catch (RepositoryPathPolicyException ex)
+        {
+            error = $"outside: {ex.Message}";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            error = $"outside: {ex.Message}";
+            return false;
+        }
+    }
+
+    private static List<string> CollectInspectPaths(JsonElement root)
+    {
+        var paths = new List<string>();
+        if (!root.TryGetProperty("tool_input", out var input) || input.ValueKind != JsonValueKind.Object)
+        {
+            return paths;
+        }
+
+        foreach (var name in new[] { "file_path", "path", "target_directory" })
+        {
+            if (input.TryGetProperty(name, out var value)
+                && value.ValueKind == JsonValueKind.String
+                && value.GetString() is { Length: > 0 } text)
+            {
+                paths.Add(text);
+            }
+        }
+
+        if (input.TryGetProperty("pattern", out var pattern)
+            && pattern.ValueKind == JsonValueKind.String
+            && pattern.GetString() is { Length: > 0 } glob
+            && (Path.IsPathRooted(glob) || glob.StartsWith('~') || glob.Contains("..", StringComparison.Ordinal)))
+        {
+            paths.Add(glob);
+        }
+
+        return paths;
+    }
     internal static bool IsMutationTool(string toolName, out string operation)
     {
         if (toolName.Equals("Write", StringComparison.OrdinalIgnoreCase))

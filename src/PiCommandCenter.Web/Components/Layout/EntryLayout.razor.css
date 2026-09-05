@@ -1,0 +1,61 @@
+.entry-shell {
+    min-height: 100dvh;
+    background-color: var(--neutral-layer-2);
+}
+
+.entry-main {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 4px);
+    max-width: 460px;
+    margin: 0 auto;
+    padding: calc(var(--design-unit) * 20px) calc(var(--design-unit) * 5px) calc(var(--design-unit) * 10px);
+}
+
+.entry-card {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 6px);
+    padding: calc(var(--design-unit) * 8px);
+    background-color: var(--neutral-layer-1);
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-rest);
+    border-radius: calc(var(--control-corner-radius) * 2px);
+}
+
+.entry-brand {
+    display: flex;
+    flex-direction: column;
+}
+
+.brand {
+    font-size: var(--type-ramp-base-font-size);
+    line-height: var(--type-ramp-base-line-height);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+}
+
+.brand-sub {
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    color: var(--neutral-foreground-hint);
+}
+
+.entry-foot {
+    padding-inline: calc(var(--design-unit) * 2px);
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+/* Short viewports and phones: stop pushing the card past the fold */
+@media (max-width: 520px), (max-height: 640px) {
+    .entry-main {
+        padding-top: calc(var(--design-unit) * 8px);
+        gap: calc(var(--design-unit) * 3px);
+    }
+
+    .entry-card {
+        padding: calc(var(--design-unit) * 6px);
+        gap: calc(var(--design-unit) * 5px);
+    }
+}

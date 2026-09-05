@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using System.Text.Json;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Sessions;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Sessions;
@@ -13,7 +14,10 @@ namespace PiCommandCenter.Infrastructure.Sessions;
 /// projection update in one <c>SaveChanges</c> transaction; the event id primary key makes
 /// duplicates inert before any projection work happens.
 /// </summary>
-public sealed class AgentSessionStore(TimeProvider clock, ControlPlaneDbContext db) : IAgentSessionStore
+public sealed class AgentSessionStore(
+    TimeProvider clock,
+    ControlPlaneDbContext db,
+    IProjectionNotifier notifier) : IAgentSessionStore
 {
     public async Task<IReadOnlyList<AgentSessionDto>> ListAsync(
         WorkRequestId requestId,
@@ -64,6 +68,13 @@ public sealed class AgentSessionStore(TimeProvider clock, ControlPlaneDbContext 
 
         // One SaveChanges commits the event row and the projection transition atomically.
         await db.SaveChangesAsync(cancellationToken);
+
+        // After the commit, so a view refreshing on this signal reads the applied transition.
+        if (Guid.TryParse(@event.RequestId, out var requestId))
+        {
+            _ = Guid.TryParse(@event.ProjectId, out var projectId);
+            notifier.Publish(ProjectionChange.Request(projectId, requestId));
+        }
     }
 
     public async Task<IReadOnlyList<SessionEventDto>> ListEventsAsync(

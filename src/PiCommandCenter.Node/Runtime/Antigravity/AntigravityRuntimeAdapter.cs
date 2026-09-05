@@ -8,6 +8,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Domain.Sessions;
+using PiCommandCenter.Node.Security;
+
 
 namespace PiCommandCenter.Node.Runtime.Antigravity;
 
@@ -183,6 +185,11 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
         private int _cancelled;
         private bool _turnOpen;
         private bool _failed;
+        private bool _authBlocked;
+        private Task? _stdoutPump;
+        private Task? _stderrPump;
+
+
         private bool _closedStdin;
         private string? _lastEventType;
         private string? _currentOperation;
@@ -213,8 +220,8 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
 
         public async Task StartAsync(CancellationToken cancellationToken)
         {
-            _ = PumpStdoutAsync(_lifetime.Token);
-            _ = PumpStderrAsync(_lifetime.Token);
+            _stdoutPump = PumpStdoutAsync(_lifetime.Token);
+            _stderrPump = PumpStderrAsync(_lifetime.Token);
             _ = PumpExitAsync();
 
             await WritePromptAsync(_request.Prompt, cancellationToken).ConfigureAwait(false);
@@ -227,7 +234,10 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                throw new TimeoutException("Antigravity process did not emit init before the start timeout.");
+                var detail = string.Join(" | ", StderrTail.TakeLast(3));
+                throw new TimeoutException(string.IsNullOrEmpty(detail)
+                    ? "Antigravity process did not emit init before the start timeout."
+                    : $"Antigravity process did not emit init before the start timeout: {detail}");
             }
         }
 
@@ -270,19 +280,27 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
             var cancelled = Volatile.Read(ref _cancelled) == 1;
             AgentLiveness liveness = exited ? AgentLiveness.Exited : AgentLiveness.Online;
             AgentActivity activity = _turnOpen ? AgentActivity.Responding : AgentActivity.Idle;
-            AgentWorkState work = _failed
-                ? AgentWorkState.Failed
-                : cancelled
-                    ? AgentWorkState.Cancelled
+            AgentWorkState work = _authBlocked
+                ? AgentWorkState.Blocked
+                : _failed
+                    ? AgentWorkState.Failed
+                    : cancelled
+                        ? AgentWorkState.Cancelled
+                        : _turnOpen
+                            ? AgentWorkState.Executing
+                            : AgentWorkState.Reviewing;
+            AgentAttention attention = _authBlocked
+                ? AgentAttention.InputRequired
+                : _failed
+                    ? AgentAttention.Error
+                    : AgentAttention.None;
+            var reason = _authBlocked
+                ? ProviderAuthClassifier.NativeLoginReason(AgentRuntimeKinds.Antigravity)
+                : exited
+                    ? "agy process exited"
                     : _turnOpen
-                        ? AgentWorkState.Executing
-                        : AgentWorkState.Reviewing;
-            AgentAttention attention = _failed ? AgentAttention.Error : AgentAttention.None;
-            var reason = exited
-                ? "agy process exited"
-                : _turnOpen
-                    ? "agy turn in flight"
-                    : "agy online";
+                        ? "agy turn in flight"
+                        : "agy online";
 
             return new AgentRuntimeSnapshot(
                 _request.SessionId,
@@ -404,7 +422,8 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
                         continue;
                     }
 
-                    _stderrTail.Enqueue(line.Length > 4096 ? line[..4096] : line);
+                    var sanitized = DiagnosticSanitizer.SanitizeLine(line);
+                    _stderrTail.Enqueue(sanitized.Length > 4096 ? sanitized[..4096] : sanitized);
                     while (_stderrTail.Count > _options.MaxStderrLines)
                     {
                         _stderrTail.TryDequeue(out _);
@@ -423,6 +442,28 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
         private async Task PumpExitAsync()
         {
             var exitCode = await _process.Exited.ConfigureAwait(false);
+            try
+            {
+                if (_stdoutPump is not null)
+                {
+                    await _stdoutPump.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                }
+            }
+            catch (Exception)
+            {
+            }
+
+            try
+            {
+                if (_stderrPump is not null)
+                {
+                    await _stderrPump.WaitAsync(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+                }
+            }
+            catch (Exception)
+            {
+            }
+
             if (Interlocked.Exchange(ref _exitHandled, 1) == 1)
             {
                 return;
@@ -439,12 +480,21 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
             }
             else if (exitCode != 0)
             {
-                _failed = true;
-                Emit("session.failed", new Dictionary<string, object?>
+                var tail = string.Join(" | ", _stderrTail.TakeLast(8));
+                if (ProviderAuthClassifier.IsMissing(tail))
                 {
-                    ["exitCode"] = exitCode,
-                    ["stderrTail"] = string.Join(" | ", _stderrTail.TakeLast(5)),
-                });
+                    _authBlocked = true;
+                    Emit("session.snapshot", ProviderAuthClassifier.SnapshotPayload(AgentRuntimeKinds.Antigravity, tail));
+                }
+                else
+                {
+                    _failed = true;
+                    Emit("session.failed", new Dictionary<string, object?>
+                    {
+                        ["exitCode"] = exitCode,
+                        ["stderrTail"] = tail,
+                    });
+                }
             }
 
             Emit("session.closed", new Dictionary<string, object?>
@@ -466,7 +516,9 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
             {
                 Emit("runtime.malformed", new Dictionary<string, object?>
                 {
-                    ["raw"] = line.Length > 2048 ? line[..2048] : line,
+                    ["raw"] = DiagnosticSanitizer.SanitizeLine(
+                        line.Length > 2048 ? line[..2048] : line,
+                        2048),
                 });
                 return;
             }

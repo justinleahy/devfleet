@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Configuration;
+using PiCommandCenter.Application.Mail;
 using PiCommandCenter.Application.Runtime;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -27,6 +28,10 @@ public static class NodeServiceCollectionExtensions
             .Services
             .AddSingleton<IValidateOptions<NodeOptions>, NodeOptionsValidator>()
             .AddSingleton<IPostConfigureOptions<NodeOptions>, NodeOptionsPostConfigure>()
+            .AddOptions<NodeAuthenticationOptions>()
+            .BindConfiguration(NodeAuthenticationOptions.SectionName)
+            .Services
+            .AddSingleton<NodeCredentialLoader>()
             .AddOptions<Verification.VerificationOptions>()
             .BindConfiguration(Verification.VerificationOptions.SectionName)
             .ValidateOnStart()
@@ -35,6 +40,7 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<Verification.IVerificationCommandRunner, Verification.VerificationCommandRunner>()
             .AddSingleton<Repository.IRepositoryInspector, Repository.RepositoryInspector>()
             .AddSingleton<Repository.RequestWorkspaceTracker>()
+            .AddSingleton<Application.Git.ITrustedGitService, Git.RestrictedGitService>()
             .AddSingleton<Child.INodeCompletionGateway, Child.NodeTransportCompletionGateway>()
             .AddSingleton<Repository.IRuntimeCrashRecovery, Repository.RuntimeCrashRecovery>()
             .AddOptions<PiWorkerOptions>()
@@ -46,10 +52,20 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<SqliteNodeEventSpool>()
             .AddSingleton<INodeEventSpool>(static sp => sp.GetRequiredService<SqliteNodeEventSpool>())
             .AddSingleton<NodeTransportClient>()
+            .AddSingleton<INodeHubOps>(static sp => sp.GetRequiredService<NodeTransportClient>())
+            .AddSingleton<IRootSessionSupervisor>(
+                static sp => sp.GetRequiredService<PiRootSessionSupervisor>())
+            .AddSingleton<ISessionCanceller>(static sp => new ChildSessionCanceller(
+                sp.GetRequiredService<Child.PiChildSessionSupervisor>(),
+                sp.GetRequiredService<IRootSessionSupervisor>()))
             .AddSingleton<Runtime.IPiWorkerProcessFactory, Runtime.NodeWorkerProcessFactory>()
             .AddSingleton<Runtime.PiOrchestrationRequestHandler>()
             .AddSingleton<Child.INodeReservationGateway, Child.NodeTransportReservationGateway>()
-            .AddSingleton<Child.INodeMailGateway, Child.NodeTransportMailGateway>()
+            .AddSingleton<Child.NodeTransportMailGateway>()
+            .AddSingleton<Child.INodeMailGateway>(
+                static sp => sp.GetRequiredService<Child.NodeTransportMailGateway>())
+            .AddSingleton<IAgentIdentityRegistry>(
+                static sp => sp.GetRequiredService<Child.NodeTransportMailGateway>())
             .AddSingleton(static sp => ActivatorUtilities.CreateInstance<Child.PiChildSessionSupervisor>(
                 sp,
                 sp.GetRequiredService<Runtime.PiOrchestrationRequestHandler>(),

@@ -1,3 +1,6 @@
+using Microsoft.AspNetCore.Hosting;
+using PiCommandCenter.ControlPlane.Security;
+using PiCommandCenter.Infrastructure.Security;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.Http.Connections.Client;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -140,10 +143,12 @@ public sealed class NodeReplayEndToEndTests : IDisposable
             File.Create(sqlitePath).Dispose();
         }
 
+        var (passwordFile, credentialFile) = AuthTestMaterial.WriteTo(Path.Combine(_tempRoot, "auth"));
         var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={sqlitePath}");
             builder.UseSetting("Projects:NodeId", nodeId.ToString());
+            builder.UseTestAuthFiles(passwordFile, credentialFile);
         });
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>().Database.Migrate();
@@ -152,12 +157,13 @@ public sealed class NodeReplayEndToEndTests : IDisposable
 
     private static async Task<HubConnection> ConnectAsync(WebApplicationFactory<Program> factory)
     {
-        _ = factory.CreateClient(); // force server initialization
+        _ = factory.CreateClient();
         var connection = new HubConnectionBuilder()
             .WithUrl(new Uri(factory.Server.BaseAddress, "nodeHub"), options =>
             {
                 options.HttpMessageHandlerFactory = _ => factory.Server.CreateHandler();
                 options.Transports = HttpTransportType.LongPolling;
+                options.AccessTokenProvider = () => Task.FromResult<string?>(AuthTestMaterial.NodeTokenHex);
             })
             .Build();
         await connection.StartAsync().WaitAsync(TimeSpan.FromSeconds(15));

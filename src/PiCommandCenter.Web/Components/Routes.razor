@@ -1,8 +1,26 @@
 @namespace PiCommandCenter.Web.Components
+@using PiCommandCenter.Web.Components.Account
 
 <Router AppAssembly="typeof(Routes).Assembly">
     <Found Context="routeData">
-        <RouteView RouteData="routeData" DefaultLayout="typeof(Layout.MainLayout)" />
+        @* Every page under Components/Pages carries [Authorize] from its _Imports,
+           so an unauthenticated match resolves to sign-in and an authenticated but
+           unauthorized one to access-denied. Account pages are AllowAnonymous. *@
+        <AuthorizeRouteView RouteData="routeData" DefaultLayout="typeof(Layout.MainLayout)">
+            <NotAuthorized Context="authenticationState">
+                @if (authenticationState.User.Identity?.IsAuthenticated == true)
+                {
+                    <RedirectToAccount Path="/access-denied" />
+                }
+                else
+                {
+                    <RedirectToAccount Path="/login" WithReturnUrl="true" />
+                }
+            </NotAuthorized>
+            <Authorizing>
+                <p class="authorizing" role="status">Checking your sign-in&hellip;</p>
+            </Authorizing>
+        </AuthorizeRouteView>
         <FocusOnNavigate RouteData="routeData" Selector="h1" />
     </Found>
 </Router>

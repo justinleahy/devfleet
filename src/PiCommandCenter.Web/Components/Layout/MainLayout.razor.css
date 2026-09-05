@@ -19,6 +19,26 @@
     opacity: 0.85;
 }
 
+/* Signed-in administrator, right of the badges in the header */
+.user-block {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.2;
+    text-align: end;
+}
+
+.user-label {
+    font-size: var(--type-ramp-minus-2-font-size);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    opacity: 0.75;
+}
+
+.user-name {
+    font-size: var(--type-ramp-minus-1-font-size);
+    font-weight: 600;
+}
+
 /* Body row: navigation rail beside scrolling content */
 .app-shell ::deep .shell {
     flex: 1 1 auto;
@@ -41,6 +61,16 @@
     display: block;
     max-width: 1180px;
     padding: calc(var(--design-unit) * 8px) calc(var(--design-unit) * 7px) calc(var(--design-unit) * 12px);
+}
+
+/* Every page opens with a vertical FluentStack, and that component hard-codes
+   `align-items: start` inline, so its sections shrink-wrapped to their longest
+   unbreakable word: a 1440px dashboard rendered 180px project cards and broke
+   repository paths one character per line. Page-level sections are full-width
+   blocks, so stretch them here; nested stacks keep their own alignment. */
+.content ::deep > .stack-vertical > * {
+    width: 100%;
+    min-width: 0;
 }
 
 /* Footer */
@@ -66,5 +96,25 @@
 
     .content {
         padding: calc(var(--design-unit) * 5px) calc(var(--design-unit) * 4px) calc(var(--design-unit) * 10px);
+    }
+}
+
+/* Phones: the header keeps its fixed height, so the account block sheds its
+   caption and the brand tagline yields the room instead of overflowing. */
+@media (max-width: 560px) {
+    .brand-sub {
+        display: none;
+    }
+
+    .user-label {
+        display: none;
+    }
+
+    .user-name {
+        display: block;
+        max-width: 14ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 }

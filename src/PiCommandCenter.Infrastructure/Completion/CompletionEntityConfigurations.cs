@@ -15,6 +15,8 @@ public sealed class RequestResultRowConfiguration : IEntityTypeConfiguration<Req
         builder.Property(r => r.ChangedFilesJson).IsRequired();
         builder.Property(r => r.ReviewFindingsJson).IsRequired();
         builder.Property(r => r.VerificationSummaryJson).IsRequired();
+        builder.Property(r => r.RequestBranch).HasMaxLength(256);
+        builder.Property(r => r.CheckpointCommitId).HasMaxLength(64);
         builder.Property(r => r.CreatedAtUtcTicks).HasColumnType("INTEGER");
     }
 }

@@ -25,6 +25,10 @@ import {
 import type { PiSessionFactory, PiSessionLike } from "../src/pisession.ts";
 
 const EXPECTED_CHILD_TOOLS = [
+  "read",
+  "grep",
+  "find",
+  "ls",
   "reserved_read",
   "reserved_write",
   "reserved_edit",
@@ -33,6 +37,8 @@ const EXPECTED_CHILD_TOOLS = [
   "reserve_files",
   "expand_reservation",
   "release_reservation",
+  "request_reservation_handoff",
+  "accept_reservation_handoff",
   "run_verification_command",
   "mail_send",
   "mail_reply",
@@ -42,6 +48,10 @@ const EXPECTED_CHILD_TOOLS = [
 ] as const;
 
 const EXPECTED_ROOT_TOOLS = [
+  "read",
+  "grep",
+  "find",
+  "ls",
   "create_plan",
   "revise_plan",
   "spawn_agent",
@@ -60,17 +70,17 @@ const EXPECTED_ROOT_TOOLS = [
 ] as const;
 
 describe("tool allowlists", () => {
-  it("root surface stays exactly the fifteen orchestration tools", () => {
+  it("root surface is sandbox reads plus the fifteen orchestration tools", () => {
     assert.deepEqual([...ROOT_TOOL_NAMES], [...EXPECTED_ROOT_TOOLS]);
   });
 
-  it("child surface is exactly the fourteen child tools", () => {
+  it("child surface is sandbox reads plus the reservation, mail, and result tools", () => {
     assert.deepEqual([...CHILD_TOOL_NAMES], [...EXPECTED_CHILD_TOOLS]);
   });
 
-  it("built-in allowlists stay read-only and excluded tools never leak in", () => {
-    assert.deepEqual([...ROOT_BUILTIN_TOOLS], ["read", "grep", "find", "ls"]);
-    assert.deepEqual([...CHILD_BUILTIN_TOOLS], ["read", "grep", "find", "ls"]);
+  it("built-in SDK read tools are disabled; names are custom node round-trips", () => {
+    assert.deepEqual([...ROOT_BUILTIN_TOOLS], []);
+    assert.deepEqual([...CHILD_BUILTIN_TOOLS], []);
     for (const surface of [ROOT_EXCLUDED_TOOLS, CHILD_EXCLUDED_TOOLS]) {
       assert.deepEqual([...surface], ["bash", "powershell", "edit", "write"]);
     }
@@ -79,57 +89,127 @@ describe("tool allowlists", () => {
       assert.ok(!ROOT_TOOL_NAMES.includes(banned), `root leaks ${banned}`);
       assert.ok(!CHILD_TOOL_REQUEST_TYPES[banned]);
     }
+    for (const name of ["read", "grep", "find", "ls"]) {
+      assert.equal(CHILD_TOOL_REQUEST_TYPES[name], `workspace.${name}`);
+    }
   });
 
-  it("child custom tools never shell out: request types stay on the typed node surface", () => {
+  it("child custom tools stay on the typed node surface", () => {
     for (const type of Object.values(CHILD_TOOL_REQUEST_TYPES)) {
-      assert.match(type, /^(file|reservation|verification|mail|child)\./);
+      assert.match(type, /^(workspace\.|reserved_|reservation\.|verification\.|agent\.|child\.)/);
     }
   });
 });
 
-describe("mutation fencing", () => {
-  it("every mutation tool sends leaseId, fencingToken, target, and operation", async () => {
+describe("child-node protocol mapping", () => {
+  it("maps reservation-aware mutations to the node contract", async () => {
     const seen: Array<{ type: string; payload: Record<string, unknown> }> = [];
     const tools = buildChildTools(async (type, payload) => {
       seen.push({ type, payload });
       return { ok: true };
     });
-    const byName = new Map(tools.map((tool) => [tool.name, tool]));
-    for (const name of CHILD_MUTATION_TOOLS) {
-      const tool = byName.get(name);
-      assert.ok(tool, `missing mutation tool ${name}`);
-      await tool.execute({
-        leaseId: "lease-1",
-        fencingToken: 7,
-        target: "src/a.ts",
-        operation: name,
-        paths: ["src/a.ts"],
-        content: "x",
-        command: "true",
-        destination: "src/b.ts",
-        searchText: "a",
-        replacementText: "b",
-      });
-    }
-    assert.equal(seen.length, CHILD_MUTATION_TOOLS.length);
-    for (const { type, payload } of seen) {
-      assert.equal(payload["leaseId"], "lease-1", type);
-      assert.equal(payload["fencingToken"], 7, type);
-      assert.equal(payload["target"], "src/a.ts", type);
-      assert.equal(payload["operation"], String(payload["operation"]), type);
-      assert.equal(typeof payload["operation"], "string", type);
-    }
+    const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]));
+
+    await byName["reserved_edit"]!.execute({
+      leaseId: "lease-1",
+      fencingToken: 7,
+      target: "src/a.ts",
+      operation: "edit",
+      searchText: "old",
+      replacementText: "new",
+    });
+    await byName["reserved_move"]!.execute({
+      leaseId: "lease-1",
+      fencingToken: 7,
+      target: "src/a.ts",
+      operation: "move",
+      destination: "src/b.ts",
+    });
+    await byName["reserve_files"]!.execute({
+      paths: ["src/a.ts", "src/b.ts"],
+      reason: "implement feature",
+    });
+    await byName["expand_reservation"]!.execute({
+      leaseId: "lease-1",
+      fencingToken: 7,
+      paths: ["tests/a.test.ts"],
+    });
+    await byName["request_reservation_handoff"]!.execute({
+      paths: ["src/owned.ts"],
+      reason: "continue blocked work",
+    });
+
+    assert.equal(seen[0]!.type, "reserved_edit");
+    assert.equal(seen[0]!.payload["path"], "src/a.ts");
+    assert.equal(seen[0]!.payload["oldText"], "old");
+    assert.equal(seen[0]!.payload["newText"], "new");
+    assert.equal(seen[1]!.type, "reserved_move");
+    assert.equal(seen[1]!.payload["source"], "src/a.ts");
+    assert.equal(seen[1]!.payload["destination"], "src/b.ts");
+    assert.equal(seen[2]!.type, "reservation.acquire");
+    assert.deepEqual(seen[2]!.payload["scopes"], [
+      { kind: "file", path: "src/a.ts" },
+      { kind: "file", path: "src/b.ts" },
+    ]);
+    assert.equal(seen[3]!.type, "reservation.expand");
+    assert.deepEqual(seen[3]!.payload["scopes"], [
+      { kind: "file", path: "tests/a.test.ts" },
+    ]);
+    assert.equal(seen[4]!.type, "reservation.handoff.request");
+    assert.deepEqual(seen[4]!.payload["paths"], ["src/owned.ts"]);
+    assert.equal(seen[4]!.payload["reason"], "continue blocked work");
   });
 
-  it("mutation tool calls map to node request types", () => {
-    const tools = buildChildTools(async () => ({ ok: true }));
-    const byName = new Map(tools.map((tool) => [tool.name, tool]));
-    for (const name of CHILD_MUTATION_TOOLS) {
-      const type = CHILD_TOOL_REQUEST_TYPES[name];
-      assert.equal(typeof type, "string", name);
-      assert.ok(byName.has(name));
-    }
+  it("maps sandbox read tools to workspace.* node requests", async () => {
+    const seen: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const byName = Object.fromEntries(buildChildTools(async (type, payload) => {
+      seen.push({ type, payload });
+      return { ok: true };
+    }).map((tool) => [tool.name, tool]));
+
+    await byName["read"]!.execute({ path: "src/a.ts" });
+    await byName["grep"]!.execute({ pattern: "foo", path: "src" });
+    await byName["find"]!.execute({ pattern: "*.ts" });
+    await byName["ls"]!.execute({ path: "src" });
+
+    assert.equal(seen[0]!.type, "workspace.read");
+    assert.equal(seen[0]!.payload["path"], "src/a.ts");
+    assert.equal(seen[1]!.type, "workspace.grep");
+    assert.equal(seen[2]!.type, "workspace.find");
+    assert.equal(seen[3]!.type, "workspace.ls");
+  });
+
+  it("maps mail, verification, and result tools to canonical request types", async () => {
+    const seen: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const byName = Object.fromEntries(buildChildTools(async (type, payload) => {
+      seen.push({ type, payload });
+      return { ok: true };
+    }).map((tool) => [tool.name, tool]));
+
+    await byName["run_verification_command"]!.execute({ profileId: "required", commandId: "tests" });
+    await byName["mail_reply"]!.execute({
+      requestId: "request-1",
+      threadId: "thread-1",
+      messageId: "message-1",
+      body: "done",
+    });
+    await byName["mail_inbox"]!.execute({});
+    await byName["mail_ack"]!.execute({ messageId: "message-1" });
+    await byName["submit_child_result"]!.execute({
+      requestId: "request-1",
+      status: "completed",
+      summary: "done",
+      evidence: ["tests"],
+    });
+
+    assert.deepEqual(seen.map(({ type }) => type), [
+      "verification.request",
+      "agent.message.send",
+      "agent.inbox.read",
+      "agent.message.acknowledge",
+      "child.result.submit",
+    ]);
+    assert.equal(seen[1]!.payload["inReplyToMessageId"], "message-1");
   });
 });
 
@@ -360,7 +440,7 @@ describe("child result lifecycle", () => {
 });
 
 describe("root tools remain untouched", () => {
-  it("root tool builder still produces the fifteen round-trip tools", () => {
+  it("root tool builder produces sandbox reads plus orchestration tools", () => {
     const tools = buildRootTools(async () => ({ ok: true }));
     assert.deepEqual(
       tools.map((tool) => tool.name),

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using PiCommandCenter.Node.Security;
 
 namespace PiCommandCenter.Node.Verification;
 
@@ -15,7 +16,8 @@ public static class BoundedProcessRunner
         string workingDirectory,
         int maxOutputBytes,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? sandboxRepositoryRoot = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(executable);
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
@@ -35,28 +37,37 @@ public static class BoundedProcessRunner
             startInfo.ArgumentList.Add(argument);
         }
 
-        var started = DateTime.UtcNow;
-        Process process;
-        try
+        var hostSecrets = VerificationProcessEnvironment.CollectHostSecretValues();
+        var sandbox = VerificationProcessEnvironment.CreateSandbox();
+        VerificationProcessEnvironment.ApplyMinimal(startInfo, sandbox);
+        if (!string.IsNullOrWhiteSpace(sandboxRepositoryRoot))
         {
-            process = Process.Start(startInfo)
-                ?? throw new InvalidOperationException($"Failed to start '{executable}'.");
-        }
-        catch (Exception ex) when (ex is not InvalidOperationException)
-        {
-            return new BoundedProcessResult(
-                ExitCode: null,
-                Duration: DateTime.UtcNow - started,
-                StandardOutput: string.Empty,
-                StandardError: ex.Message,
-                TimedOut: false,
-                Cancelled: false,
-                Crashed: true,
-                OutputTruncated: false);
+            VerificationProcessSandbox.Apply(startInfo, sandboxRepositoryRoot, sandbox);
         }
 
-        using (process)
+
+        var started = DateTime.UtcNow;
+        Process? process = null;
+        try
         {
+            try
+            {
+                process = Process.Start(startInfo)
+                    ?? throw new InvalidOperationException($"Failed to start '{executable}'.");
+            }
+            catch (Exception ex) when (ex is not InvalidOperationException)
+            {
+                return new BoundedProcessResult(
+                    ExitCode: null,
+                    Duration: DateTime.UtcNow - started,
+                    StandardOutput: string.Empty,
+                    StandardError: Sanitize(ex.Message, maxOutputBytes, sandbox, hostSecrets),
+                    TimedOut: false,
+                    Cancelled: false,
+                    Crashed: true,
+                    OutputTruncated: false);
+            }
+
             process.StandardInput.Close();
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -113,13 +124,41 @@ public static class BoundedProcessRunner
             return new BoundedProcessResult(
                 exitCode,
                 DateTime.UtcNow - started,
-                stdout.Text,
-                stderr.Text,
+                Sanitize(stdout.Text, maxOutputBytes, sandbox, hostSecrets),
+                Sanitize(stderr.Text, maxOutputBytes, sandbox, hostSecrets),
                 timedOut,
                 cancelled,
                 crashed,
                 stdout.Truncated || stderr.Truncated);
         }
+        finally
+        {
+            process?.Dispose();
+            VerificationProcessEnvironment.TryDeleteSandbox(sandbox);
+        }
+    }
+
+    private static string Sanitize(
+        string text,
+        int maxChars,
+        string sandboxRoot,
+        IReadOnlyList<string> hostSecrets)
+    {
+        var value = text ?? string.Empty;
+        if (!string.IsNullOrEmpty(sandboxRoot))
+        {
+            value = value.Replace(sandboxRoot, "[sandbox]", StringComparison.Ordinal);
+        }
+
+        foreach (var secret in hostSecrets)
+        {
+            if (!string.IsNullOrEmpty(secret) && value.Contains(secret, StringComparison.Ordinal))
+            {
+                value = value.Replace(secret, "[redacted]", StringComparison.Ordinal);
+            }
+        }
+
+        return DiagnosticSanitizer.Sanitize(value, maxChars);
     }
 
     private static void TryKillTree(Process process)

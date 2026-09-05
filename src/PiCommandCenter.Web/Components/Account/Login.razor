@@ -1,0 +1,116 @@
+@page "/login"
+@namespace PiCommandCenter.Web.Components.Account
+@layout PiCommandCenter.Web.Components.Layout.EntryLayout
+@attribute [AllowAnonymous]
+@attribute [ExcludeFromInteractiveRouting]
+
+@* Statically rendered on purpose. The browser performs a real form POST to
+   /account/login, so the authentication cookie is set by the endpoint response
+   before any Blazor circuit is created. Nothing typed here is echoed back: the
+   endpoint redirects to /login?error=... with no username and no password. *@
+
+<PageTitle>Sign in &middot; Pi Command Center</PageTitle>
+
+<div class="login-head">
+    <h1>Sign in</h1>
+    <p class="login-lead">
+        The control plane is administered by a single local account. Credentials are
+        verified on this machine and never leave it.
+    </p>
+</div>
+
+@if (HasError)
+{
+    <div id="login-error" class="login-alert" role="alert">
+        <span class="login-alert-title">Sign-in failed</span>
+        <span>@ErrorMessage</span>
+    </div>
+}
+else if (ShowSignedOut)
+{
+    <div class="login-status" role="status">You are signed out.</div>
+}
+
+<form class="login-form" method="post" action="/account/login">
+    <AntiforgeryToken />
+    <input type="hidden" name="returnUrl" value="@SafeReturnUrl" />
+
+    <div class="field">
+        <label for="username">Username</label>
+        <input id="username"
+               name="username"
+               type="text"
+               required
+               autofocus
+               autocomplete="username"
+               spellcheck="false"
+               autocapitalize="none"
+               aria-describedby="@DescribedBy" />
+    </div>
+
+    <div class="field">
+        <label for="password">Password</label>
+        <input id="password"
+               name="password"
+               type="password"
+               required
+               autocomplete="current-password"
+               aria-describedby="@DescribedBy" />
+    </div>
+
+    <button class="submit" type="submit">Sign in</button>
+</form>
+
+<p class="login-note">
+    Your session lives in an HTTP-only cookie issued by the server. The password is
+    never kept in the browser and never written to the page.
+</p>
+
+@code {
+    /// <summary>Failure code set by the login endpoint's redirect; values are never user text.</summary>
+    [SupplyParameterFromQuery(Name = "error")]
+    public string? Error { get; set; }
+
+    /// <summary>Set by the logout form so the sign-in page can confirm the sign-out.</summary>
+    [SupplyParameterFromQuery(Name = "signedout")]
+    public string? SignedOut { get; set; }
+
+    [SupplyParameterFromQuery(Name = "returnUrl")]
+    public string? ReturnUrl { get; set; }
+
+    private bool HasError => !string.IsNullOrWhiteSpace(Error);
+
+    private bool ShowSignedOut => !HasError && SignedOut is not null;
+
+    private string? DescribedBy => HasError ? "login-error" : null;
+
+    private string ErrorMessage => string.Equals(Error, "invalid", StringComparison.OrdinalIgnoreCase)
+        ? "That username and password combination was not accepted. Check both and try again."
+        : "The sign-in request was rejected. Reload this page and try again; the control-plane log records the reason.";
+
+    /// <summary>
+    /// Only same-site relative paths survive: a redirect target that arrived in the
+    /// query string is attacker-controlled, and echoing it into the form unchecked
+    /// would turn the sign-in page into an open redirect. Sign-in pages are never a
+    /// valid destination either, because returning there would loop.
+    /// </summary>
+    private string SafeReturnUrl
+    {
+        get
+        {
+            var candidate = ReturnUrl;
+            if (string.IsNullOrWhiteSpace(candidate)
+                || candidate[0] != '/'
+                || candidate.StartsWith("//", StringComparison.Ordinal)
+                || candidate.Contains('\\', StringComparison.Ordinal)
+                || candidate.Contains('\r', StringComparison.Ordinal)
+                || candidate.Contains('\n', StringComparison.Ordinal)
+                || candidate.StartsWith("/login", StringComparison.OrdinalIgnoreCase))
+            {
+                return "/";
+            }
+
+            return candidate;
+        }
+    }
+}

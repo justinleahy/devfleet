@@ -36,15 +36,7 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
     public NodeHubMailReservationTests(ControlPlaneFixture fixture)
     {
         _fixture = fixture;
-        var factory = fixture.Factory;
-        _ = factory.CreateClient(); // force server initialization before opening the connection
-        _connection = new HubConnectionBuilder()
-            .WithUrl(new Uri(factory.Server.BaseAddress, "nodeHub"), options =>
-            {
-                options.HttpMessageHandlerFactory = _ => factory.Server.CreateHandler();
-                options.Transports = HttpTransportType.LongPolling;
-            })
-            .Build();
+        _connection = fixture.CreateNodeHubConnection();
         _connection.StartAsync().GetAwaiter().GetResult();
     }
 

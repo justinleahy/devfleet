@@ -48,7 +48,7 @@ public class ReservationServiceTests
         MutableClock clock)
     {
         var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
-        var service = new ReservationService(clock, context);
+        var service = new ReservationService(clock, context, new PiCommandCenter.Application.Live.ProjectionNotifier());
         return (context, service, Guid.NewGuid());
     }
 
@@ -302,8 +302,8 @@ public class ReservationServiceTests
 
         await using var contextA = TestRepositories.CreateContext(sqlitePath);
         await using var contextB = TestRepositories.CreateContext(sqlitePath);
-        var serviceA = new ReservationService(clock, contextA);
-        var serviceB = new ReservationService(clock, contextB);
+        var serviceA = new ReservationService(clock, contextA, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var serviceB = new ReservationService(clock, contextB, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var projectId = Guid.NewGuid();
 
         const int competitors = 6;
@@ -343,7 +343,7 @@ public class ReservationServiceTests
         var sqlitePath = TestRepositories.CreateSqliteFile();
 
         await using var context = TestRepositories.CreateContext(sqlitePath);
-        var service = new ReservationService(clock, context);
+        var service = new ReservationService(clock, context, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var projectId = Guid.NewGuid();
         var lease = await service.AcquireAsync(Acquire(projectId, Resource("project-build")));
 

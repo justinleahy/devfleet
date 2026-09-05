@@ -8,10 +8,14 @@ using PiCommandCenter.Node.Runtime.Antigravity;
 
 namespace PiCommandCenter.Node.Tests;
 
+[CollectionDefinition("Antigravity process tests", DisableParallelization = true)]
+public sealed class AntigravityProcessTestCollection;
+
 /// <summary>
 /// Focused Antigravity adapter tests against a fake official-compatible executable.
 /// No provider network, credentials, or model calls.
 /// </summary>
+[Collection("Antigravity process tests")]
 public sealed class AntigravityRuntimeAdapterTests : IDisposable
 {
     private readonly string _root = Directory.CreateDirectory(Path.Combine(
@@ -55,10 +59,60 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
     }
 
     [Fact]
+    public async Task Read_only_boundary_blocks_workspace_and_symlink_escape_writes()
+    {
+        var cwd = Directory.CreateDirectory(Path.Combine(_root, "repo")).FullName;
+        var sibling = Directory.CreateDirectory(Path.Combine(_root, "sibling")).FullName;
+        Directory.CreateSymbolicLink(Path.Combine(cwd, "escape"), sibling);
+        Directory.CreateSymbolicLink(Path.Combine(cwd, "proc"), "/proc");
+        var escapedTarget = Path.Combine(cwd, "escape", "MUTATED.txt");
+        var directTarget = Path.Combine(cwd, "DIRECT.txt");
+        var procEscapeTarget = Path.Combine(
+            cwd,
+            "proc",
+            Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            "root",
+            sibling.TrimStart(Path.DirectorySeparatorChar),
+            "PROC-MUTATED.txt");
+        var startInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "/usr/bin/touch",
+            WorkingDirectory = cwd,
+            UseShellExecute = false,
+            RedirectStandardError = true,
+        };
+        startInfo.ArgumentList.Add(directTarget);
+        startInfo.ArgumentList.Add(escapedTarget);
+        startInfo.ArgumentList.Add(procEscapeTarget);
+        AntigravityReadOnlySandbox.Apply(startInfo, cwd);
+
+        using var process = System.Diagnostics.Process.Start(startInfo);
+        Assert.NotNull(process);
+        await process.WaitForExitAsync();
+
+        Assert.NotEqual(0, process.ExitCode);
+        Assert.False(File.Exists(directTarget));
+        Assert.False(File.Exists(Path.Combine(sibling, "MUTATED.txt")));
+        Assert.False(File.Exists(Path.Combine(sibling, "PROC-MUTATED.txt")));
+    }
+
+    [Fact]
+    public void Missing_bwrap_fails_actionably()
+    {
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            AntigravityReadOnlySandbox.Apply(
+                new System.Diagnostics.ProcessStartInfo { FileName = "agy" },
+                _root,
+                Path.Combine(_root, "no-such-bwrap")));
+        Assert.Contains("BLOCKED", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("bwrap", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Launch_uses_stream_json_argv_and_working_directory()
     {
-        var dump = Path.Combine(_root, "launch.json");
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "ws")).FullName;
+        var dump = Path.Combine(cwd, "launch.json");
         var adapter = CreateAdapter(cwd, dump);
         var handle = await adapter.StartAsync(MakeRequest(cwd, "google-personal"), CancellationToken.None);
         Assert.Equal("agy-conv-1", handle.ProviderSessionId);
@@ -76,8 +130,8 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
     [Fact]
     public async Task Init_is_exactly_once_and_events_map()
     {
-        var dump = Path.Combine(_root, "init.json");
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "map")).FullName;
+        var dump = Path.Combine(cwd, "init.json");
         var adapter = CreateAdapter(cwd, dump);
         var handle = await adapter.StartAsync(MakeRequest(cwd, "reviewer"), CancellationToken.None);
 
@@ -106,8 +160,8 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
     [Fact]
     public async Task Second_prompt_waits_for_first_result()
     {
-        var dump = Path.Combine(_root, "serial.json");
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "serial")).FullName;
+        var dump = Path.Combine(cwd, "serial.json");
         var adapter = CreateAdapter(cwd, dump);
         var handle = await adapter.StartAsync(MakeRequest(cwd, "researcher"), CancellationToken.None);
 
@@ -143,8 +197,8 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
     [Fact]
     public async Task Unknown_and_malformed_lines_are_tolerated()
     {
-        var dump = Path.Combine(_root, "unknown.json");
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "unk")).FullName;
+        var dump = Path.Combine(cwd, "unknown.json");
         var adapter = CreateAdapter(cwd, dump, mode: "unknown");
         var handle = await adapter.StartAsync(MakeRequest(cwd, "google-personal"), CancellationToken.None);
         var events = await CollectUntilAsync(
@@ -172,8 +226,8 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
     [Fact]
     public async Task Error_result_and_nonzero_exit_are_normalized()
     {
-        var dump = Path.Combine(_root, "err.json");
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "err")).FullName;
+        var dump = Path.Combine(cwd, "err.json");
         var adapter = CreateAdapter(cwd, dump, mode: "error");
         var handle = await adapter.StartAsync(MakeRequest(cwd, "reviewer"), CancellationToken.None);
         var events = await CollectUntilAsync(
@@ -200,10 +254,36 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
     }
 
     [Fact]
+    public async Task Auth_missing_emits_blocked_input_required_not_generic_failure()
+    {
+        var cwd = Directory.CreateDirectory(Path.Combine(_root, "auth")).FullName;
+        var dump = Path.Combine(cwd, "auth.json");
+        var adapter = CreateAdapter(cwd, dump, mode: "auth");
+        var handle = await adapter.StartAsync(MakeRequest(cwd, "reviewer"), CancellationToken.None);
+        var events = await CollectUntilAsync(
+            adapter,
+            handle.SessionId,
+            list => list.Any(e => e.Type is "session.snapshot" or "session.closed"),
+            TimeSpan.FromSeconds(8));
+        var snapshot = events.First(e => e.Type == "session.snapshot");
+        Assert.Equal("InputRequired", snapshot.Payload["attention"]?.ToString());
+        Assert.Equal("Blocked", snapshot.Payload["workState"]?.ToString());
+        Assert.Contains("agy login", snapshot.Payload["reason"]?.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(events, e => e.Type == "session.failed");
+        var snap = await adapter.GetSnapshotAsync(handle.SessionId, CancellationToken.None);
+        Assert.Equal(Domain.Sessions.AgentAttention.InputRequired, snap.Attention);
+        Assert.Equal(Domain.Sessions.AgentWorkState.Blocked, snap.WorkState);
+        var tail = string.Join('\n', adapter.GetStderrTail(handle.SessionId));
+        Assert.DoesNotContain("hunter2", tail, StringComparison.Ordinal);
+        Assert.DoesNotContain("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", tail, StringComparison.Ordinal);
+    }
+
+
+    [Fact]
     public async Task Cancel_interrupts_a_hanging_turn()
     {
-        var dump = Path.Combine(_root, "hang.json");
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "hang")).FullName;
+        var dump = Path.Combine(cwd, "hang.json");
         var adapter = CreateAdapter(cwd, dump, mode: "hang");
         var handle = await adapter.StartAsync(MakeRequest(cwd, "google-personal"), CancellationToken.None);
         await adapter.CancelAsync(handle.SessionId, CancellationToken.None);
@@ -215,19 +295,23 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         Assert.Contains(events, e => e.Type is "session.cancelled" or "session.closed");
     }
 
-    private AntigravityRuntimeAdapter CreateAdapter(string cwd, string dump, string mode = "happy")
+    private AntigravityRuntimeAdapter CreateAdapter(
+        string cwd,
+        string dump,
+        string mode = "happy",
+        bool tryWrite = false)
     {
         var nodeOptions = Options.Create(new NodeOptions { Id = Guid.NewGuid() });
         var options = Options.Create(new AntigravityOptions
         {
             Executable = "node",
-            StartTimeoutSeconds = 8,
+            StartTimeoutSeconds = 20,
             CancelGraceSeconds = 2,
         });
         return new AntigravityRuntimeAdapter(
             nodeOptions,
             options,
-            new ScriptProcessFactory(FakeScript, dump, mode),
+            new ScriptProcessFactory(FakeScript, dump, mode, tryWrite),
             TimeProvider.System,
             NullLogger<AntigravityRuntimeAdapter>.Instance);
     }
@@ -307,25 +391,35 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         private readonly string _script;
         private readonly string _dump;
         private readonly string _mode;
+        private readonly bool _tryWrite;
         private readonly AntigravityProcessFactory _inner = new();
 
-        public ScriptProcessFactory(string script, string dump, string mode)
+        public ScriptProcessFactory(string script, string dump, string mode, bool tryWrite)
         {
             _script = script;
             _dump = dump;
             _mode = mode;
+            _tryWrite = tryWrite;
         }
 
         public IAntigravityProcess Start(AntigravityProcessStartInfo startInfo)
         {
+            File.WriteAllText(
+                _dump,
+                JsonSerializer.Serialize(new
+                {
+                    argv = startInfo.Arguments,
+                    cwd = startInfo.WorkingDirectory,
+                }));
             var psi = new AntigravityProcessStartInfo(
                 "node",
                 new[] { _script }.Concat(startInfo.Arguments).ToArray(),
                 startInfo.WorkingDirectory,
                 new Dictionary<string, string>
                 {
-                    ["AGY_TEST_DUMP"] = _dump,
+                    ["AGY_TEST_DUMP"] = string.Empty,
                     ["AGY_TEST_MODE"] = _mode,
+                    ["AGY_TEST_TRY_WRITE"] = _tryWrite ? "1" : "0",
                 });
             return _inner.Start(psi);
         }

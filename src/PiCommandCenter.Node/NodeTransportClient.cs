@@ -13,20 +13,34 @@ namespace PiCommandCenter.Node;
 /// automatically with bounded exponential backoff and raises <see cref="Connected"/>
 /// after registration succeeds on every (re)connection.
 /// </summary>
-public sealed class NodeTransportClient : IAsyncDisposable
+public sealed class NodeTransportClient : INodeHubOps
 {
     private readonly NodeOptions _options;
+    private readonly NodeCredentialLoader _credentials;
     private readonly ILogger<NodeTransportClient> _logger;
     private HubConnection? _connection;
+    private NodeCredential? _credential;
 
     /// <summary>Raised after the hub is connected and this node is registered.</summary>
     public event Func<Task>? Connected;
 
-    public NodeTransportClient(IOptions<NodeOptions> options, ILogger<NodeTransportClient> logger)
+    /// <summary>
+    /// Raised when the Control Plane commands this node to cancel an agent session (SPEC §23.2).
+    /// The subscriber (session supervisor) stops the runtime and reports the outcome by
+    /// publishing a real <c>session.cancelled</c> event through <see cref="PublishEventsAsync"/>.
+    /// </summary>
+    public event Func<CancelSessionCommand, Task>? CancelSessionReceived;
+
+    public NodeTransportClient(
+        IOptions<NodeOptions> options,
+        NodeCredentialLoader credentials,
+        ILogger<NodeTransportClient> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(credentials);
         ArgumentNullException.ThrowIfNull(logger);
         _options = options.Value;
+        _credentials = credentials;
         _logger = logger;
     }
 
@@ -39,14 +53,20 @@ public sealed class NodeTransportClient : IAsyncDisposable
             return;
         }
 
+        _credential = _credentials.Load();
+
         var hubUrl = new Uri(new Uri(_options.ControlPlaneUrl), "/nodeHub");
         var connection = new HubConnectionBuilder()
-            .WithUrl(hubUrl)
+            .WithUrl(hubUrl, http =>
+            {
+                ApplyCredential(http);
+            })
             .WithAutomaticReconnect(new BoundedExponentialRetryPolicy(_logger))
             .Build();
 
         connection.Reconnected += OnReconnectedAsync;
         connection.Closed += OnClosedAsync;
+        connection.On<CancelSessionCommand>("CancelSession", OnCancelSessionAsync);
 
         await connection.StartAsync(cancellationToken).ConfigureAwait(false);
         _connection = connection;
@@ -94,6 +114,39 @@ public sealed class NodeTransportClient : IAsyncDisposable
         await connection.InvokeAsync(
             "Heartbeat",
             new NodeHeartbeatMessage(_options.Id, activeSessionIds),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AgentIdentityMessage> AllocateAgentIdentityAsync(
+        AllocateAgentIdentityMessage message,
+        CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<AgentIdentityMessage>(
+            "AllocateAgentIdentity",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task ReleaseAgentIdentityAsync(
+        ReleaseAgentIdentityMessage message,
+        CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        await connection.InvokeAsync(
+            "ReleaseAgentIdentity",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<AgentIdentityMessage?> FindAgentIdentityAsync(
+        FindAgentIdentityMessage message,
+        CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<AgentIdentityMessage?>(
+            "FindAgentIdentity",
+            message,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -291,7 +344,9 @@ public sealed class NodeTransportClient : IAsyncDisposable
                     evidence.ChangedFiles,
                     (evidence.ReviewFindings ?? []).Select(f => new ReviewFindingMessage(
                         f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
-                    evidence.VerificationSummary)),
+                    evidence.VerificationSummary,
+                    evidence.RequestBranch,
+                    evidence.CheckpointCommitId)),
             cancellationToken).ConfigureAwait(false);
 
         return new CompletionGateDecision(
@@ -306,7 +361,9 @@ public sealed class NodeTransportClient : IAsyncDisposable
                     decision.Result.ReviewFindings.Select(f => new ReviewFinding(
                         f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
                     decision.Result.VerificationSummary,
-                    decision.Result.CreatedAt));
+                    decision.Result.CreatedAt,
+                    decision.Result.RequestBranch,
+                    decision.Result.CheckpointCommitId));
     }
 
 
@@ -342,7 +399,11 @@ public sealed class NodeTransportClient : IAsyncDisposable
         var connection = RequireConnection();
         return await connection.InvokeAsync<DateTimeOffset?>(
             "RenewClaim",
-            new ClaimRenewalMessage(claim.RequestId, claim.NodeId, claim.ClaimToken, _options.ClaimLeaseSeconds),
+            new ClaimRenewalMessage(
+                claim.RequestId,
+                claim.NodeId,
+                claim.ClaimToken,
+                _options.ClaimLeaseSeconds),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -355,6 +416,26 @@ public sealed class NodeTransportClient : IAsyncDisposable
             "PublishEvents",
             new NodeEventBatchMessage(events),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task OnCancelSessionAsync(CancelSessionCommand command)
+    {
+        if (CancelSessionReceived is not { } handler)
+        {
+            _logger.LogWarning(
+                "CancelSession for {SessionId} received but no supervisor subscribed; session keeps running.",
+                command.SessionId);
+            return;
+        }
+
+        try
+        {
+            await handler(command).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "CancelSession handler failed for {SessionId}.", command.SessionId);
+        }
     }
 
     private Task OnReconnectedAsync(string? connectionId)
@@ -403,6 +484,22 @@ public sealed class NodeTransportClient : IAsyncDisposable
     {
         return _connection ?? throw new InvalidOperationException(
             "The node transport is not connected; call StartAsync first.");
+    }
+    private void ApplyCredential(Microsoft.AspNetCore.Http.Connections.Client.HttpConnectionOptions http)
+    {
+        var credential = _credential ?? throw new InvalidOperationException("Node credential was not loaded.");
+        var token = credential.TokenHex;
+        if (string.Equals(credential.Header, "Authorization", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(credential.Scheme, "Bearer", StringComparison.OrdinalIgnoreCase))
+        {
+            http.AccessTokenProvider = () => Task.FromResult<string?>(token);
+            return;
+        }
+
+        var value = string.IsNullOrEmpty(credential.Scheme)
+            ? token
+            : credential.Scheme + " " + token;
+        http.Headers[credential.Header] = value;
     }
 
     public async ValueTask DisposeAsync() => await StopAsync(CancellationToken.None).ConfigureAwait(false);

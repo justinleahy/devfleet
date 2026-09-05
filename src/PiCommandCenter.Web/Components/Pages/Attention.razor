@@ -12,6 +12,8 @@
 @using PiCommandCenter.Domain.Projects
 @using PiCommandCenter.Domain.Requests
 @using PiCommandCenter.Web.Components.Requests
+@using PiCommandCenter.Application.Live
+@using PiCommandCenter.Web.Components.Live
 @implements IAsyncDisposable
 @inject IProjectCatalog Catalog
 @inject IRequestQueue Queue
@@ -19,6 +21,7 @@
 @inject IReservationService ReservationAuthority
 @inject IVerificationRunStore VerificationRuns
 @inject IClock Clock
+@inject IProjectionNotifier Notifier
 
 <PageTitle>Attention &middot; Pi Command Center</PageTitle>
 
@@ -105,11 +108,11 @@
 </FluentStack>
 
 @code {
-    private const int RefreshSeconds = 5;
+    private const int SafetySeconds = 30;
 
     private readonly List<AttentionSignal> _signals = [];
     private readonly List<string> _partialErrors = [];
-    private CancellationTokenSource? _refreshCts;
+    private LiveView? _live;
     private DateTimeOffset _snapshot;
     private string? _loadError;
     private int _scannedRequests;
@@ -118,44 +121,30 @@
 
     protected override Task OnInitializedAsync() => LoadAsync(showSpinner: true);
 
-    protected override Task OnAfterRenderAsync(bool firstRender)
+    protected override void OnAfterRender(bool firstRender)
     {
-        if (firstRender && _refreshCts is null)
+        if (firstRender && _live is null)
         {
-            _refreshCts = new CancellationTokenSource();
-            _ = RefreshLoopAsync(_refreshCts.Token);
+            // Every committed write can add or clear an attention item, so this view listens
+            // fleet-wide and lets LiveView collapse bursts into one rescan.
+            _live = new LiveView(
+                Notifier,
+                change => change.AffectsFleet,
+                () => InvokeAsync(async () =>
+                {
+                    await LoadAsync(showSpinner: false);
+                    StateHasChanged();
+                }));
         }
-
-        return Task.CompletedTask;
     }
 
     public async ValueTask DisposeAsync()
     {
-        var cts = _refreshCts;
-        _refreshCts = null;
-        if (cts is not null)
+        var live = _live;
+        _live = null;
+        if (live is not null)
         {
-            await cts.CancelAsync();
-            cts.Dispose();
-        }
-    }
-
-    private async Task RefreshLoopAsync(CancellationToken cancellationToken)
-    {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(RefreshSeconds));
-        try
-        {
-            while (await timer.WaitForNextTickAsync(cancellationToken))
-            {
-                await InvokeAsync(async () =>
-                {
-                    await LoadAsync(showSpinner: false);
-                    StateHasChanged();
-                });
-            }
-        }
-        catch (OperationCanceledException)
-        {
+            await live.DisposeAsync();
         }
     }
 
@@ -301,6 +290,7 @@
 
         return $"{_signals.Count} item{(_signals.Count == 1 ? string.Empty : "s")} \u00b7 "
             + $"{errors} blocking \u00b7 {_scannedRequests} open request(s) scanned \u00b7 "
-            + $"refreshed every {RefreshSeconds}s, last {TimeText.Relative(_snapshot, Clock.UtcNow)}";
+            + $"re-read as writes commit and at least every {SafetySeconds}s, "
+            + $"last {TimeText.Relative(_snapshot, Clock.UtcNow)}";
     }
 }

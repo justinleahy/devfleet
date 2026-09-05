@@ -55,6 +55,20 @@ public sealed class NodeTransportReservationGateway : INodeReservationGateway
         => InvokeAsync(_transport.TransferReservationAsync(
             new TransferReservationMessage(leaseId, fromSessionId, toSessionId), cancellationToken));
 
+    public async Task<ReservationOperationResult> RenewAsync(
+        Guid leaseId,
+        long fencingToken,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        var result = await _transport.RenewReservationAsync(
+            new ReservationMutationMessage(leaseId, fencingToken, sessionId), cancellationToken)
+            .ConfigureAwait(false);
+        return new ReservationOperationResult(
+            result.Lease is null ? null : ToLease(result.Lease),
+            result.Error is null ? null : new GatewayError(result.Error.Code, result.Error.Message));
+    }
+
     public async Task<MutationAuthorizationResult> AuthorizeAsync(
         Guid leaseId,
         long fencingToken,

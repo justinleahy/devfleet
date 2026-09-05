@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Projects;
 using PiCommandCenter.Application.Requests;
 using PiCommandCenter.Domain;
@@ -12,7 +13,10 @@ namespace PiCommandCenter.Infrastructure.Requests;
 /// database: priority descending, then creation time ascending, served by the
 /// IX_WorkRequests_Priority_CreatedAt index.
 /// </summary>
-public sealed class RequestQueue(TimeProvider clock, ControlPlaneDbContext db) : IRequestQueue
+public sealed class RequestQueue(
+    TimeProvider clock,
+    ControlPlaneDbContext db,
+    IProjectionNotifier notifier) : IRequestQueue
 {
     public async Task<IReadOnlyList<WorkRequestDto>> ListAsync(
         ProjectId projectId,
@@ -68,6 +72,8 @@ public sealed class RequestQueue(TimeProvider clock, ControlPlaneDbContext db) :
             throw new InvalidOperationException(
                 $"Work request for project '{projectId}' could not be enqueued.", ex);
         }
+
+        notifier.Publish(ProjectionChange.Project(projectId.Value));
 
         return ToDto(request);
     }

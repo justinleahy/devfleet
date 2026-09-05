@@ -44,6 +44,11 @@ public sealed class PiWorkerOptionsValidator : IValidateOptions<PiWorkerOptions>
             failures.Add($"'{nameof(options.MaxChildAgentsPerRequest)}' must be positive.");
         }
 
+        if (options.LeaseRenewalSeconds <= 0)
+        {
+            failures.Add($"'{nameof(options.LeaseRenewalSeconds)}' must be positive.");
+        }
+
         if (options.AllowedChildRoles.Length == 0)
         {
             failures.Add($"'{nameof(options.AllowedChildRoles)}' must contain at least one role.");

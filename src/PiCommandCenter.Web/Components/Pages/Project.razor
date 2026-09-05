@@ -12,6 +12,9 @@
 @using PiCommandCenter.Domain.Sessions
 @using PiCommandCenter.Application.Reservations
 @using PiCommandCenter.Web.Components.Coordination
+@using PiCommandCenter.Application.Live
+@using PiCommandCenter.Web.Components.Live
+@implements IAsyncDisposable
 @inject IProjectCatalog Catalog
 @inject IRequestQueue Queue
 @inject INodeRegistry NodeRegistry
@@ -19,6 +22,7 @@
 @inject IClock Clock
 @inject IReservationService ReservationAuthority
 @inject IToastService ToastService
+@inject IProjectionNotifier Notifier
 
 <PageTitle>@(_project?.DisplayName ?? "Project") &middot; Pi Command Center</PageTitle>
 
@@ -347,7 +351,35 @@ else
     private IReadOnlyList<ReservationLeaseDto> _leases = Array.Empty<ReservationLeaseDto>();
     private string? _reservationError;
 
+    private LiveView? _live;
+    private bool _busy;
+
     protected override Task OnParametersSetAsync() => ReloadAsync();
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender && _live is null)
+        {
+            _live = new LiveView(
+                Notifier,
+                change => change.AffectsProject(ProjectId),
+                () => InvokeAsync(async () =>
+                {
+                    await ReloadAsync(showSpinner: false);
+                    StateHasChanged();
+                }));
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        var live = _live;
+        _live = null;
+        if (live is not null)
+        {
+            await live.DisposeAsync();
+        }
+    }
 
     private readonly record struct RequestGroup(
         string HeadingId,
@@ -362,15 +394,30 @@ else
         new("completed-heading", "Recently completed", "No completed requests yet.", _closed),
     ];
 
-    private async Task ReloadAsync()
+    private Task ReloadAsync() => ReloadAsync(showSpinner: true);
+
+    /// <summary>
+    /// Re-reads the project. A live refresh keeps the rendered data in place while it reads, so a
+    /// committed write never blanks the page; an explicit reload clears first and shows the spinner.
+    /// </summary>
+    private async Task ReloadAsync(bool showSpinner)
     {
-        _loading = true;
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
         _loadError = null;
         _nodeError = null;
-        _node = null;
-        Partition(Array.Empty<WorkRequestDto>());
-        ResetSessions();
-        StateHasChanged();
+        if (showSpinner)
+        {
+            _loading = true;
+            _node = null;
+            Partition(Array.Empty<WorkRequestDto>());
+            ResetSessions();
+            StateHasChanged();
+        }
 
         try
         {
@@ -400,6 +447,7 @@ else
         {
             _snapshot = Clock.UtcNow;
             _loading = false;
+            _busy = false;
         }
     }
 

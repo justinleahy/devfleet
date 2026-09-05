@@ -57,6 +57,9 @@ function typeBoxProperties(properties: RootTool["properties"]): Record<string, T
       default:
         out[name] = Type.String(options);
     }
+    if (spec.optional) {
+      out[name] = Type.Optional(out[name]!);
+    }
   }
   return out;
 }
@@ -80,12 +83,36 @@ function adaptTool(tool: RootTool): ToolDefinition {
 }
 
 /**
+ * Load only application-owned resources. Registered repositories are
+ * untrusted input: their .pi extensions, skills, prompts, and themes must
+ * never execute or enter the model context.
+ */
+export async function createRestrictedResourceLoader(
+  cwd: string,
+  agentDir: string,
+  systemPrompt: string,
+) {
+  const settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
+  const resourceLoader = new DefaultResourceLoader({
+    cwd,
+    agentDir,
+    settingsManager,
+    systemPromptOverride: () => systemPrompt,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+  });
+  await resourceLoader.reload();
+  return { resourceLoader, settingsManager };
+}
+
+/**
  * Production factory. Each call creates one SDK AgentSession: one worker
- * process per session, persisted under `config.agentDir`. Root mode gets the
- * allowlist `read grep find ls` + 15 orchestration round-trips; child mode
- * gets the same read-only built-ins plus the reservation-enforced child
- * tools (SPEC.md sections 18.1, 25.2, 25.3). Neither mode receives the
- * default unrestricted edit/write/shell tools.
+ * process per session, persisted under `config.agentDir`. Root and child
+ * sessions get custom `read`/`grep`/`find`/`ls` tools that round-trip
+ * through the node (no unrestricted SDK builtins) plus orchestration or
+ * reservation-enforced tools (SPEC.md sections 18.1, 25.2, 25.3).
  */
 export function createSdkSessionFactory(nodeRequest: NodeRequest): PiSessionFactory {
   return {
@@ -99,14 +126,11 @@ export function createSdkSessionFactory(nodeRequest: NodeRequest): PiSessionFact
         nodeRequest(config.sessionId, type, payload),
       );
       const modelRuntime = await ModelRuntime.create();
-      const settingsManager = SettingsManager.inMemory();
-      const resourceLoader = new DefaultResourceLoader({
-        cwd: config.cwd,
-        agentDir: config.agentDir,
-        settingsManager,
-        systemPromptOverride: () => config.systemPrompt ?? defaultPrompt,
-      });
-      await resourceLoader.reload();
+      const { resourceLoader, settingsManager } = await createRestrictedResourceLoader(
+        config.cwd,
+        config.agentDir,
+        config.systemPrompt ?? defaultPrompt,
+      );
       const { session } = await createAgentSession({
         cwd: config.cwd,
         agentDir: config.agentDir,

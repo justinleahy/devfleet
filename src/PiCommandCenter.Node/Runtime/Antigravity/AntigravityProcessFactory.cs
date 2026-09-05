@@ -39,6 +39,8 @@ public sealed class AntigravityProcessFactory : IAntigravityProcessFactory
                 psi.Environment[pair.Key] = pair.Value;
             }
         }
+        AntigravityReadOnlySandbox.Apply(psi, startInfo.WorkingDirectory);
+
 
 
         var process = Process.Start(psi)

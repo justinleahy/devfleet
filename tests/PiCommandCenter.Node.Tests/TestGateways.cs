@@ -1,3 +1,5 @@
+using PiCommandCenter.Application.Mail;
+using PiCommandCenter.Domain;
 using PiCommandCenter.Node.Child;
 
 namespace PiCommandCenter.Node.Tests;
@@ -10,18 +12,23 @@ public sealed class FakeReservationGateway : INodeReservationGateway
 {
     public List<(Guid ProjectId, Guid RequestId, string OwnerSessionId, IReadOnlyList<ReservationScopeSpec> Scopes)> Acquires { get; } = [];
     public List<(string Path, string Operation)> Authorizations { get; } = [];
+    public List<(Guid LeaseId, long FencingToken, string SessionId)> Renewals { get; } = [];
+    public List<(Guid LeaseId, string FromSessionId, string ToSessionId)> Transfers { get; } = [];
     public List<Guid> Releases { get; } = [];
     public List<(Guid LeaseId, string Reason)> Recoveries { get; } = [];
     public GatewayError? AcquireError { get; set; }
+    public int RenewFailuresRemaining { get; set; }
     public (Guid ProjectId, Guid RequestId, string OwnerSessionId, IReadOnlyList<ReservationScopeSpec> Scopes)? LastAcquire { get; private set; }
 
     /// <summary>When set, overrides the authorization decision for matching (path, operation).</summary>
     public Func<string, string, MutationAuthorizationResult?>? OnAuthorize { get; set; }
 
-    public ReservationLeaseInfo GrantLease()
+    public ReservationLeaseInfo GrantLease(
+        string ownerSessionId = "root-session-1",
+        params ReservationScopeSpec[] scopes)
     {
         var lease = new ReservationLeaseInfo(
-            Guid.NewGuid(), 42, "Active", DateTimeOffset.UtcNow.AddMinutes(2), []);
+            Guid.NewGuid(), 42, "Active", DateTimeOffset.UtcNow.AddMinutes(2), scopes, ownerSessionId);
         _granted[lease.LeaseId] = lease;
         return lease;
     }
@@ -91,10 +98,37 @@ public sealed class FakeReservationGateway : INodeReservationGateway
         string fromSessionId,
         string toSessionId,
         CancellationToken cancellationToken)
-        => Task.FromResult(_granted.TryGetValue(leaseId, out var lease)
+    {
+        Transfers.Add((leaseId, fromSessionId, toSessionId));
+        return Task.FromResult(_granted.TryGetValue(leaseId, out var lease)
             ? new ReservationOperationResult(lease, null)
             : new ReservationOperationResult(
                 null, new GatewayError("not_found", "No such lease.")));
+    }
+
+    public Task<ReservationOperationResult> RenewAsync(
+        Guid leaseId,
+        long fencingToken,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        Renewals.Add((leaseId, fencingToken, sessionId));
+        if (RenewFailuresRemaining > 0)
+        {
+            RenewFailuresRemaining--;
+            throw new IOException("simulated transport disconnect");
+        }
+
+        if (!_granted.TryGetValue(leaseId, out var lease))
+        {
+            return Task.FromResult(new ReservationOperationResult(
+                null, new GatewayError("not_found", "No such lease.")));
+        }
+
+        var renewed = lease with { FencingToken = lease.FencingToken + 1 };
+        _granted[leaseId] = renewed;
+        return Task.FromResult(new ReservationOperationResult(renewed, null));
+    }
 
     public Task<MutationAuthorizationResult> AuthorizeAsync(
         Guid leaseId,
@@ -198,4 +232,95 @@ public sealed class FakeMailGateway : INodeMailGateway
         string messageId,
         CancellationToken cancellationToken)
         => Task.FromResult(new MailReceiptResult(messageId, recipientSessionId));
+}
+
+/// <summary>In-memory agent identity registry fake recording allocations and releases.</summary>
+public sealed class FakeIdentityRegistry : IAgentIdentityRegistry
+{
+    public List<(string SessionId, string AgentName, string Role, string Runtime)> Allocated { get; } = [];
+    public List<string> Released { get; } = [];
+    public string? AllocatedNameOverride { get; set; }
+
+
+    public Task<AgentIdentityDto> AllocateAsync(
+        AllocateAgentIdentityCommand command, CancellationToken cancellationToken = default)
+    {
+        Allocated.Add((command.SessionId, command.RequestedName, command.Role, command.Runtime));
+        return Task.FromResult(new AgentIdentityDto(
+            command.ProjectId,
+            command.SessionId,
+            AllocatedNameOverride ?? command.RequestedName,
+            command.Role,
+            command.Runtime,
+            DateTimeOffset.UtcNow));
+    }
+
+    public Task ReleaseAsync(string sessionId, CancellationToken cancellationToken = default)
+    {
+        Released.Add(sessionId);
+        return Task.CompletedTask;
+    }
+
+    public Task<AgentIdentityDto?> FindByNameAsync(
+        ProjectId projectId, string agentName, CancellationToken cancellationToken = default)
+        => Task.FromResult<AgentIdentityDto?>(null);
+}
+
+/// <summary>
+/// No-op stubs for the supervisor's extended dependencies (verification, repository
+/// inspection, crash recovery, completion gate, runtime registry); the child supervisor tests
+/// never exercise those tool paths.
+/// </summary>
+public sealed class NoopVerificationRunner : PiCommandCenter.Node.Verification.IVerificationCommandRunner
+{
+    public Task<PiCommandCenter.Node.Verification.VerificationProfileRunResult> RunAsync(
+        PiCommandCenter.Node.Verification.VerificationRunContext context,
+        string profileId,
+        string? commandId,
+        CancellationToken cancellationToken)
+        => throw new NotSupportedException("Not exercised by these tests.");
+}
+
+public sealed class NoopRepositoryInspector : PiCommandCenter.Node.Repository.IRepositoryInspector
+{
+    public Task<PiCommandCenter.Node.Repository.RepositoryBaseline> CaptureBaselineAsync(
+        string repositoryRoot, bool requireCleanStart, bool allowUntrackedFiles,
+        CancellationToken cancellationToken)
+        => throw new NotSupportedException("Not exercised by these tests.");
+
+    public Task<PiCommandCenter.Node.Repository.RepositoryDiffInspection> InspectDiffAsync(
+        string repositoryRoot, string baseCommit,
+        IReadOnlyList<PiCommandCenter.Node.Child.ReservationLeaseInfo> leases,
+        CancellationToken cancellationToken)
+        => throw new NotSupportedException("Not exercised by these tests.");
+
+    public Task DetectExternalChangesAsync(
+        string repositoryRoot, string baseCommit,
+        IReadOnlyList<PiCommandCenter.Node.Child.ReservationLeaseInfo> leases,
+        CancellationToken cancellationToken)
+        => Task.CompletedTask;
+}
+
+public sealed class NoopCrashRecovery : PiCommandCenter.Node.Repository.IRuntimeCrashRecovery
+{
+    public Task MarkOwnedLeasesRecoveryRequiredAsync(
+        Guid nodeId, Guid projectId, Guid? requestId, string ownerSessionId, string reason,
+        CancellationToken cancellationToken)
+        => Task.CompletedTask;
+}
+
+public sealed class NoopCompletionGateway : PiCommandCenter.Node.Child.INodeCompletionGateway
+{
+    public Task RecordVerificationRunAsync(
+        PiCommandCenter.Application.Verification.VerificationRunDto run,
+        CancellationToken cancellationToken)
+        => Task.CompletedTask;
+
+    public Task<PiCommandCenter.Application.Completion.CompletionGateDecision> EvaluateCompletionAsync(
+        Guid projectId,
+        Guid requestId,
+        string rootSessionId,
+        PiCommandCenter.Application.Completion.CompletionEvidence evidence,
+        CancellationToken cancellationToken)
+        => throw new NotSupportedException("Not exercised by these tests.");
 }

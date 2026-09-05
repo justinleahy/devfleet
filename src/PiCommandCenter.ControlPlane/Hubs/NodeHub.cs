@@ -49,6 +49,7 @@ public sealed class NodeHub(
     INodeEventSink eventSink,
     IReservationService reservationService,
     IMessageService messageService,
+    IAgentIdentityRegistry identityRegistry,
     IRequestClaimService claimService,
     IVerificationRunStore verificationRuns,
     ICompletionGateService completionGate,
@@ -80,6 +81,50 @@ public sealed class NodeHub(
             new NodeHeartbeatCommand(new NodeId(message.NodeId), sessionIds),
             timeProvider.GetUtcNow(),
             Context.ConnectionAborted).ConfigureAwait(false);
+    }
+
+    public async Task<AgentIdentityMessage> AllocateAgentIdentity(AllocateAgentIdentityMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var identity = await identityRegistry.AllocateAsync(
+            new AllocateAgentIdentityCommand(
+                new ProjectId(message.ProjectId),
+                message.SessionId,
+                message.RequestedName,
+                message.Role,
+                message.Runtime),
+            Context.ConnectionAborted).ConfigureAwait(false);
+        return new AgentIdentityMessage(
+            identity.ProjectId.Value,
+            identity.SessionId,
+            identity.AgentName,
+            identity.Role,
+            identity.Runtime,
+            identity.AllocatedAtUtc);
+    }
+
+    public Task ReleaseAgentIdentity(ReleaseAgentIdentityMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        return identityRegistry.ReleaseAsync(message.SessionId, Context.ConnectionAborted);
+    }
+
+    public async Task<AgentIdentityMessage?> FindAgentIdentity(FindAgentIdentityMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var identity = await identityRegistry.FindByNameAsync(
+            new ProjectId(message.ProjectId),
+            message.AgentName,
+            Context.ConnectionAborted).ConfigureAwait(false);
+        return identity is null
+            ? null
+            : new AgentIdentityMessage(
+                identity.ProjectId.Value,
+                identity.SessionId,
+                identity.AgentName,
+                identity.Role,
+                identity.Runtime,
+                identity.AllocatedAtUtc);
     }
 
     /// <summary>
@@ -181,15 +226,22 @@ public sealed class NodeHub(
     /// no project id, so no full claim is reconstructed here.
     /// </summary>
 
-    public async Task<DateTimeOffset> RenewClaim(ClaimRenewalMessage message)
+    public async Task<DateTimeOffset?> RenewClaim(ClaimRenewalMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        return await claimService.RenewAsync(
-            new WorkRequestId(message.RequestId),
-            new NodeId(message.NodeId),
-            message.ClaimToken,
-            ClampLease(message.LeaseSeconds),
-            Context.ConnectionAborted).ConfigureAwait(false);
+        try
+        {
+            return await claimService.RenewAsync(
+                new WorkRequestId(message.RequestId),
+                new NodeId(message.NodeId),
+                message.ClaimToken,
+                ClampLease(message.LeaseSeconds),
+                Context.ConnectionAborted).ConfigureAwait(false);
+        }
+        catch (ClaimRenewalRejectedException)
+        {
+            return null;
+        }
     }
 
     public async Task<NodeEventAcknowledgementMessage> PublishEvents(NodeEventBatchMessage message)
@@ -402,7 +454,9 @@ public sealed class NodeHub(
                     message.Evidence.SummaryMarkdown,
                     message.Evidence.ChangedFiles,
                     findings.Select(f => new ReviewFinding(f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
-                    message.Evidence.VerificationSummary),
+                    message.Evidence.VerificationSummary,
+                    message.Evidence.RequestBranch,
+                    message.Evidence.CheckpointCommitId),
                 Context.ConnectionAborted).ConfigureAwait(false);
 
             return new CompletionGateDecisionMessage(
@@ -515,7 +569,9 @@ public sealed class NodeHub(
         claim.Title,
         claim.Prompt,
         claim.Kind,
-        claim.RiskLevel);
+        claim.RiskLevel,
+        claim.CreateRequestBranch,
+        claim.CreateRequestCommit);
 
     private static NodeEventDto ToDto(NodeEventMessage message) => new(
         message.EventId,
@@ -684,7 +740,9 @@ public sealed class NodeHub(
         result.ReviewFindings.Select(f => new ReviewFindingMessage(
             f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
         result.VerificationSummary,
-        result.CreatedAt);
+        result.CreatedAt,
+        result.RequestBranch,
+        result.CheckpointCommitId);
 
     private const string SessionGroupsKey = "mail:sessionGroups";
 }

@@ -169,6 +169,70 @@ public sealed class ClaudeReservationHookTests : IDisposable
     }
 
     [Fact]
+    public async Task Read_inside_the_repository_is_allowed_without_a_lease()
+    {
+        var decision = await _evaluator.EvaluatePreAsync(
+            PreJson("Read", Path.Combine(_repo, "src", "Foo.cs")),
+            Context(Guid.Empty, 0));
+        Assert.True(decision.Allow);
+        Assert.Empty(_gateway.Authorizations);
+    }
+
+    [Fact]
+    public async Task Read_Glob_and_Grep_cannot_leave_the_repository()
+    {
+        var context = Context(Guid.Empty, 0);
+        var read = await _evaluator.EvaluatePreAsync(PreJson("Read", "/etc/passwd"), context);
+        Assert.False(read.Allow);
+        Assert.Contains("outside", read.Reason, StringComparison.Ordinal);
+
+        var glob = await _evaluator.EvaluatePreAsync(
+            JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["tool_name"] = "Glob",
+                ["tool_input"] = new Dictionary<string, string>
+                {
+                    ["pattern"] = "**/*.cs",
+                    ["path"] = "/tmp",
+                },
+            }),
+            context);
+        Assert.False(glob.Allow);
+
+        var grep = await _evaluator.EvaluatePreAsync(
+            JsonSerializer.Serialize(new Dictionary<string, object?>
+            {
+                ["tool_name"] = "Grep",
+                ["tool_input"] = new Dictionary<string, string>
+                {
+                    ["pattern"] = "secret",
+                    ["path"] = "../../etc/passwd",
+                },
+            }),
+            context);
+        Assert.False(grep.Allow);
+    }
+
+    [Fact]
+    public async Task Read_denies_a_symlink_that_escapes_the_repository()
+    {
+        var outside = Path.Combine(Path.GetTempPath(), "pcc-hook-out-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(outside, "secret");
+        var link = Path.Combine(_repo, "src", "escape.cs");
+        File.CreateSymbolicLink(link, outside);
+        try
+        {
+            var decision = await _evaluator.EvaluatePreAsync(PreJson("Read", link), Context(Guid.Empty, 0));
+            Assert.False(decision.Allow);
+            Assert.Contains("outside", decision.Reason, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(outside);
+        }
+    }
+
+    [Fact]
     public async Task Timeout_is_fail_closed()
     {
         var timedOut = new ClaudeReservationHookEvaluator(

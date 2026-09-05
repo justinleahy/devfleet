@@ -146,7 +146,7 @@ public class CompletionGateServiceTests
         Assert.Equal(["src/Feature.cs"], accepted.Result.ChangedFiles);
 
         await using var restarted = TestRepositories.CreateContext(sqlite, createSchema: false);
-        var gate = new CompletionGateService(new FrozenClock(), restarted);
+        var gate = new CompletionGateService(new FrozenClock(), restarted, new PiCommandCenter.Application.Live.ProjectionNotifier());
         var loaded = await gate.GetResultAsync(world.RequestId);
         Assert.NotNull(loaded);
         Assert.Equal(accepted.Result.SummaryMarkdown, loaded!.SummaryMarkdown);
@@ -279,7 +279,7 @@ public class CompletionGateServiceTests
         }
 
         await context.SaveChangesAsync();
-        return new World(context, new CompletionGateService(new FrozenClock(), context), project.Id, new WorkRequestId(queued.Id));
+        return new World(context, new CompletionGateService(new FrozenClock(), context, new PiCommandCenter.Application.Live.ProjectionNotifier()), project.Id, new WorkRequestId(queued.Id));
     }
 
     private static void AddSession(

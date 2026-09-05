@@ -274,15 +274,44 @@ describe("custom tool round-trip", () => {
       captured.push({ type, payload });
       return { ok: true };
     });
-    assert.deepEqual(tools.map((tool) => tool.name).sort(), [...ROOT_TOOL_NAMES].sort());
-    assert.equal(tools.length, 15);
+    const ORCHESTRATION_TOOLS = [
+      "create_plan", "revise_plan", "spawn_agent", "spawn_agents",
+      "get_agent_status", "await_agent", "send_agent_message", "read_agent_inbox",
+      "acknowledge_message", "request_reservation_handoff", "cancel_agent",
+      "inspect_project_diff", "request_verification", "submit_completion", "block_request",
+    ];
+    const names = tools.map((tool) => tool.name);
+    for (const name of ORCHESTRATION_TOOLS) {
+      assert.ok(names.includes(name), `missing orchestration tool ${name}`);
+    }
+    // Read-only built-ins round-trip as workspace.* requests.
+    assert.deepEqual(
+      ORCHESTRATION_TOOLS.map((name) => TOOL_REQUEST_TYPES[name]),
+      ["plan.submit", "plan.revise", "agent.spawn", "agent.spawn", "agent.status",
+        "agent.await", "agent.message.send", "agent.inbox.read", "agent.message.acknowledge",
+        "reservation.handoff.request", "agent.cancel", "project.diff.inspect",
+        "verification.request", "request.complete", "request.block"],
+    );
+    assert.equal(names.length, ROOT_TOOL_NAMES.length);
     for (const tool of tools) {
       const result = await tool.execute({ probe: 1 });
       assert.match(result as string, /"ok":true/);
     }
-    assert.equal(captured.length, 15);
+    assert.equal(captured.length, tools.length);
     for (const entry of captured) {
       assert.equal(TOOL_REQUEST_TYPES[Object.entries(TOOL_REQUEST_TYPES).find(([, t]) => t === entry.type)![0]], entry.type);
     }
+  });
+
+  it("maps request_verification to the canonical verification.request with profileId required and commandId optional", async () => {
+    const tools = buildRootTools(async (type) => ({ type }));
+    const tool = tools.find((entry) => entry.name === "request_verification");
+    assert.ok(tool, "request_verification tool must exist");
+    assert.equal(TOOL_REQUEST_TYPES["request_verification"], "verification.request");
+    assert.deepEqual(Object.keys(tool.properties).sort(), ["commandId", "profileId"]);
+    assert.equal(tool.properties["profileId"]?.optional, undefined, "profileId is required");
+    assert.equal(tool.properties["commandId"]?.optional, true, "commandId is optional");
+    const roundTrip = await tool.execute({ profileId: "build-and-test", commandId: "unit" });
+    assert.match(roundTrip, /verification\.request/);
   });
 });

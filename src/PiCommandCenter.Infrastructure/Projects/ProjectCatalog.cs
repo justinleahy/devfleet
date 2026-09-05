@@ -5,6 +5,7 @@ using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Projects;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Projects;
 using PiCommandCenter.Infrastructure.Persistence;
@@ -20,7 +21,8 @@ namespace PiCommandCenter.Infrastructure.Projects;
 public sealed class ProjectCatalog(
     TimeProvider clock,
     ControlPlaneDbContext db,
-    IOptions<ProjectCatalogOptions> options) : IProjectCatalog
+    IOptions<ProjectCatalogOptions> options,
+    IProjectionNotifier notifier) : IProjectCatalog
 {
     public async Task<IReadOnlyList<ProjectDto>> ListAsync(CancellationToken cancellationToken = default)
     {
@@ -96,6 +98,8 @@ public sealed class ProjectCatalog(
             throw new DuplicateProjectException(repositoryPath);
         }
 
+        notifier.Publish(ProjectionChange.Fleet());
+
         return ToDto(project);
     }
 
@@ -154,7 +158,7 @@ public sealed class ProjectCatalog(
                 return null;
             }
 
-            fullPath = Path.GetFullPath(repositoryPath);
+            fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(repositoryPath));
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException)
         {
@@ -165,6 +169,25 @@ public sealed class ProjectCatalog(
         if (!Directory.Exists(fullPath))
         {
             errors.Add($"Repository path '{fullPath}' does not exist or is not a directory.");
+            return null;
+        }
+
+        // A symlinked repository directory would register an alias identity: duplicate
+        // detection and lease path checks key on the stored path, so only the canonical
+        // (dereferenced) directory may ever be registered.
+        try
+        {
+            var link = Directory.ResolveLinkTarget(fullPath, returnFinalTarget: true);
+            if (link is not null)
+            {
+                errors.Add(
+                    $"Repository path '{fullPath}' is a symlink alias; register '{link.FullName}' instead.");
+                return null;
+            }
+        }
+        catch (IOException)
+        {
+            errors.Add($"Repository path '{fullPath}' is a broken symlink.");
             return null;
         }
 
@@ -229,7 +252,7 @@ public sealed class ProjectCatalog(
             _ => root,
         };
 
-        return Path.GetFullPath(expanded).TrimEnd(Path.DirectorySeparatorChar);
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(expanded));
     }
 
 

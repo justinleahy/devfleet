@@ -1,0 +1,23 @@
+.redirect {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: calc(var(--design-unit) * 2px);
+    padding: calc(var(--design-unit) * 8px);
+    color: var(--neutral-foreground-hint);
+}
+
+.redirect p {
+    margin: 0;
+}
+
+.redirect-link {
+    color: var(--accent-foreground-rest);
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+}
+
+.redirect-link:focus-visible {
+    outline: calc(var(--focus-stroke-width) * 1px) solid var(--focus-stroke-outer);
+    outline-offset: calc(var(--focus-stroke-width) * 1px);
+}

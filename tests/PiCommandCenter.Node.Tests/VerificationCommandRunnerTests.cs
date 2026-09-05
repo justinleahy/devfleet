@@ -287,6 +287,95 @@ public class VerificationCommandRunnerTests : IDisposable
         Assert.Empty(gateway.Releases);
     }
 
+    [Fact]
+    public async Task Injected_secret_and_host_home_are_not_exposed_and_a_normal_command_still_works()
+    {
+        const string secret = "pi-cc-injected-secret-marker-9f3a";
+        const string homeMarker = "/home/real-home-marker-9f3a";
+        var previousSecret = Environment.GetEnvironmentVariable("PI_CC_INJECTED_SECRET");
+        var previousHome = Environment.GetEnvironmentVariable("PI_CC_HOME_MARKER");
+        Environment.SetEnvironmentVariable("PI_CC_INJECTED_SECRET", secret);
+        Environment.SetEnvironmentVariable("PI_CC_HOME_MARKER", homeMarker);
+        try
+        {
+            var gateway = new FakeReservationGateway();
+            var leak = Runner(gateway, new VerificationCommandOptions
+            {
+                Id = "printenv",
+                Executable = "/usr/bin/printenv",
+                Arguments = [],
+                WorkingDirectory = ".",
+                TimeoutSeconds = 5,
+            });
+
+            var leaked = await leak.RunAsync(Ctx(_repo), "default", null, CancellationToken.None);
+            var combined = leaked.Commands[0].StandardOutput + leaked.Commands[0].StandardError;
+            Assert.DoesNotContain(secret, combined, StringComparison.Ordinal);
+            Assert.DoesNotContain(homeMarker, combined, StringComparison.Ordinal);
+            Assert.DoesNotContain("PI_CC_INJECTED_SECRET", combined, StringComparison.Ordinal);
+
+            var ok = await Runner(new FakeReservationGateway(), TrueCommand())
+                .RunAsync(Ctx(_repo), "default", null, CancellationToken.None);
+            Assert.True(ok.Succeeded);
+            Assert.Equal(0, ok.Commands[0].ExitCode);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("PI_CC_INJECTED_SECRET", previousSecret);
+            Environment.SetEnvironmentVariable("PI_CC_HOME_MARKER", previousHome);
+        }
+    }
+
+    [Fact]
+    public async Task Repository_verification_cannot_read_host_home_credentials()
+    {
+        var hostSecretPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            $".pi-cc-verification-secret-{Guid.NewGuid():N}");
+        const string marker = "credential-must-not-enter-verification";
+        await File.WriteAllTextAsync(hostSecretPath, marker);
+        try
+        {
+            var runner = Runner(new FakeReservationGateway(), new VerificationCommandOptions
+            {
+                Id = "credential-read",
+                Executable = "/usr/bin/cat",
+                Arguments = [hostSecretPath],
+                WorkingDirectory = ".",
+                TimeoutSeconds = 5,
+            });
+
+            var result = await runner.RunAsync(Ctx(_repo), "default", null, CancellationToken.None);
+
+            Assert.False(result.Succeeded);
+            Assert.NotEqual(0, result.Commands[0].ExitCode);
+            Assert.DoesNotContain(marker, result.Commands[0].StandardOutput, StringComparison.Ordinal);
+            Assert.DoesNotContain(marker, result.Commands[0].StandardError, StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(hostSecretPath);
+        }
+    }
+
+    [Fact]
+    public async Task Repository_verification_cannot_see_the_host_process_table()
+    {
+        var runner = Runner(new FakeReservationGateway(), new VerificationCommandOptions
+        {
+            Id = "host-process-check",
+            Executable = "/usr/bin/test",
+            Arguments = ["!", "-e", $"/proc/{Environment.ProcessId}/cmdline"],
+            WorkingDirectory = ".",
+            TimeoutSeconds = 5,
+        });
+
+        var result = await runner.RunAsync(Ctx(_repo), "default", null, CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(0, result.Commands[0].ExitCode);
+    }
+
     private static VerificationCommandOptions TrueCommand() => new()
     {
         Id = "true",

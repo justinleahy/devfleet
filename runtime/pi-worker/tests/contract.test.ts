@@ -5,6 +5,9 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 let sdk: Record<string, unknown> | undefined;
 let loadError: string | undefined;
@@ -59,5 +62,27 @@ describe("pinned SDK export contract", () => {
       typeof (sdk as Record<string, unknown>)["createSdkSessionFactory"],
       "function",
     );
+  });
+
+  it("does not execute repository-provided Pi extensions", { skip: !installed }, async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-command-center-sdk-"));
+    const repository = join(root, "repository");
+    const agentDir = join(root, "agent");
+    const marker = join(root, "extension-ran");
+    try {
+      await mkdir(join(repository, ".pi", "extensions"), { recursive: true });
+      await mkdir(agentDir, { recursive: true });
+      await writeFile(
+        join(repository, ".pi", "extensions", "malicious.mjs"),
+        `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "ran");`,
+      );
+
+      const createLoader = (sdk as Record<string, unknown>)["createRestrictedResourceLoader"] as
+        (cwd: string, dataDir: string, prompt: string) => Promise<unknown>;
+      await createLoader(repository, agentDir, "restricted");
+      await assert.rejects(access(marker));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

@@ -4,13 +4,17 @@ using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Requests;
+using PiCommandCenter.Domain.Sessions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using PiCommandCenter.Application.Mail;
 using PiCommandCenter.Node.Runtime;
 using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Verification;
 using PiCommandCenter.Domain.Verification;
 using PiCommandCenter.Node.Repository;
+using PiCommandCenter.Node.Security;
+
 using PiCommandCenter.Node.Verification;
 
 namespace PiCommandCenter.Node.Child;
@@ -22,6 +26,7 @@ public static class ChildAgentStatus
     public const string Completed = "completed";
     public const string Failed = "failed";
     public const string Cancelled = "cancelled";
+    public const string Blocked = "blocked";
 }
 
 /// <summary>
@@ -45,6 +50,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
     private readonly IPiOrchestrationRequestHandler _inner;
     private readonly INodeReservationGateway _reservations;
     private readonly INodeMailGateway _mail;
+    private readonly IAgentIdentityRegistry _identities;
     private readonly INodeEventSpool _spool;
     private readonly IVerificationCommandRunner _verification;
     private readonly IRepositoryInspector _repository;
@@ -60,6 +66,9 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, ChildAgent>>
         _childrenByRequest = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ChildAgent> _childrenBySession = new(StringComparer.Ordinal);
+
+    /// <summary>Requested-but-unaccepted lease handoffs, keyed by lease id.</summary>
+    private readonly ConcurrentDictionary<Guid, (string FromSessionId, string ToSessionId)> _pendingHandoffs = new();
     private readonly ConcurrentDictionary<string, string> _verificationSummaries = new(StringComparer.Ordinal);
 
     public PiChildSessionSupervisor(
@@ -67,6 +76,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         IPiOrchestrationRequestHandler inner,
         INodeReservationGateway reservations,
         INodeMailGateway mail,
+        IAgentIdentityRegistry identities,
         INodeEventSpool spool,
         TimeProvider timeProvider,
         ILogger<PiChildSessionSupervisor> logger,
@@ -81,6 +91,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         ArgumentNullException.ThrowIfNull(inner);
         ArgumentNullException.ThrowIfNull(reservations);
         ArgumentNullException.ThrowIfNull(mail);
+        ArgumentNullException.ThrowIfNull(identities);
         ArgumentNullException.ThrowIfNull(spool);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
@@ -94,6 +105,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         _inner = inner;
         _reservations = reservations;
         _mail = mail;
+        _identities = identities;
         _spool = spool;
         _fileOperations = new ReservedFileOperations(reservations);
         _timeProvider = timeProvider;
@@ -108,6 +120,10 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
     /// <summary>Non-terminal child count across all requests, for diagnostics.</summary>
     public int LiveChildCount => _childrenBySession.Values.Count(c => !c.IsTerminal);
+
+    /// <summary>Session ids of non-terminal children hosted by this node.</summary>
+    public IReadOnlyList<string> ActiveSessionIds
+        => [.. _childrenBySession.Values.Where(child => !child.IsTerminal).Select(child => child.SessionId)];
 
     public async Task<PiToolResponse> HandleAsync(
         PiOrchestrationContext context,
@@ -130,11 +146,32 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 "reservation.acquire" or "reserve_files" => await AcquireAsync(context, payload, cancellationToken),
                 "reservation.expand" or "expand_reservation" => await ExpandAsync(context, payload, cancellationToken),
                 "reservation.release" or "release_reservation" => await ReleaseAsync(context, payload, cancellationToken),
-                "reservation.handoff.request" or "request_reservation_handoff" => await TransferAsync(context, payload, cancellationToken),
+                "reservation.handoff.request" or "request_reservation_handoff" => await RequestHandoffAsync(context, payload, cancellationToken),
+                "reservation.handoff.accept" or "accept_reservation_handoff" => await AcceptHandoffAsync(context, payload, cancellationToken),
                 "project.diff.inspect" or "inspect_project_diff" => await InspectDiffAsync(context, cancellationToken),
                 "verification.request" or "request_verification" => await RequestVerificationAsync(context, payload, cancellationToken),
                 "request.complete" or "submit_completion" => await CompleteRequestAsync(context, payload, cancellationToken),
+                "child.result.submit" or "submit_child_result" => PiToolResponse.Success(
+                    payload is { } result ? JsonSerializer.Deserialize<object>(result.GetRawText()) : new { }),
                 "reserved_read" => await ReservedReadAsync(context, payload, cancellationToken),
+                "workspace.read" or "read" => WorkspaceQuery(
+                    context.RepositoryRoot,
+                    WorkspaceReadOperations.Read(context.RepositoryRoot ?? "", payload.GetStringProperty("path"))),
+                "workspace.grep" or "grep" => WorkspaceQuery(
+                    context.RepositoryRoot,
+                    WorkspaceReadOperations.Grep(
+                        context.RepositoryRoot ?? "",
+                        payload.GetStringProperty("path"),
+                        payload.GetStringProperty("pattern"))),
+                "workspace.find" or "find" => WorkspaceQuery(
+                    context.RepositoryRoot,
+                    WorkspaceReadOperations.Find(
+                        context.RepositoryRoot ?? "",
+                        payload.GetStringProperty("path"),
+                        payload.GetStringProperty("pattern") ?? payload.GetStringProperty("glob"))),
+                "workspace.ls" or "ls" => WorkspaceQuery(
+                    context.RepositoryRoot,
+                    WorkspaceReadOperations.List(context.RepositoryRoot ?? "", payload.GetStringProperty("path"))),
                 "reserved_write" => await RunSinglePathMutationAsync(
                     context, payload,
                     (ops, root, lease, sessionId, path, cancellationToken) => ops.WriteTextAsync(
@@ -358,7 +395,50 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             }
         }
 
-        var evidence = new CompletionEvidence(summary, changedFiles, findings, verificationSummary);
+        string? requestBranch = null;
+        string? checkpointCommitId = null;
+        if (context.CreateCheckpointAsync is not null)
+        {
+            if (changedFiles.Count == 0)
+            {
+                return PiToolResponse.Failure(
+                    "checkpoint_requires_paths",
+                    "Completion cannot create the configured request checkpoint without changed files.");
+            }
+
+            var checkpoint = await context.CreateCheckpointAsync(
+                new PiCheckpointRequest(
+                    payload.GetStringProperty("branchName") ?? string.Empty,
+                    payload.GetStringProperty("message") ?? $"Complete request {requestId}",
+                    changedFiles),
+                cancellationToken).ConfigureAwait(false);
+            if (!checkpoint.Ok)
+            {
+                return PiToolResponse.Failure(
+                    checkpoint.ErrorCode ?? "checkpoint_failed",
+                    checkpoint.ErrorMessage ?? "Checkpoint commit failed.");
+            }
+
+            requestBranch = checkpoint.BranchName;
+            checkpointCommitId = checkpoint.CommitId;
+            await context.EmitAsync(
+                "repository.checkpoint_created",
+                new Dictionary<string, object?>
+                {
+                    ["branchName"] = requestBranch,
+                    ["commitId"] = checkpointCommitId,
+                    ["paths"] = changedFiles,
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        var evidence = new CompletionEvidence(
+            summary,
+            changedFiles,
+            findings,
+            verificationSummary,
+            requestBranch,
+            checkpointCommitId);
         var decision = await _completion.EvaluateCompletionAsync(
             projectId, requestId, context.SessionId, evidence, cancellationToken)
             .ConfigureAwait(false);
@@ -490,28 +570,52 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 $"Runtime profile '{spec.RuntimeProfile}' is not in the profile allowlist.");
         }
 
+        IAgentRuntimeAdapter adapter;
+        try
+        {
+            adapter = _runtimes.Value.Resolve(spec.RuntimeProfile);
+        }
+        catch (Exception ex)
+        {
+            return SpawnFailure("runtime_profile_not_allowed", ex.Message);
+        }
+
         var sessionId = $"pi-child-{context.RequestId:N}-{Guid.NewGuid():N}";
+        var identity = await _identities.AllocateAsync(
+            new AllocateAgentIdentityCommand(
+                new ProjectId(Guid.Parse(context.ProjectId)),
+                sessionId,
+                spec.AgentName,
+                spec.Role,
+                adapter.RuntimeKind),
+            cancellationToken).ConfigureAwait(false);
+        var agentName = identity.AgentName;
+
+        // The project registry owns collision-safe names; every runtime and event uses it.
         var child = new ChildAgent(
             sessionId,
-            spec.AgentName,
+            agentName,
             spec.Role,
             spec.RuntimeProfile,
+            adapter.RuntimeKind,
             context.SessionId,
             context.RequestId,
             context.ProjectId,
             context.NodeId,
             context.RepositoryRoot!,
             _timeProvider.GetUtcNow());
-        if (!children.TryAdd(spec.AgentName, child))
+        if (!children.TryAdd(agentName, child))
         {
+            await _identities.ReleaseAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             return SpawnFailure(
                 "duplicate_agent_name",
-                $"An agent named '{spec.AgentName}' already exists for this request.");
+                $"An agent named '{agentName}' already exists for this request.");
         }
 
         if (!_childrenBySession.TryAdd(sessionId, child))
         {
-            children.TryRemove(spec.AgentName, out _);
+            children.TryRemove(agentName, out _);
+            await _identities.ReleaseAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             return SpawnFailure("duplicate_agent_name", "Child session id collision; retry the spawn.");
         }
 
@@ -525,7 +629,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             new Dictionary<string, object?>
             {
                 ["childSessionId"] = sessionId,
-                ["agentName"] = spec.AgentName,
+                ["agentName"] = agentName,
                 ["role"] = spec.Role,
                 ["runtimeProfile"] = spec.RuntimeProfile,
                 ["parentSessionId"] = context.SessionId,
@@ -543,7 +647,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 Guid.Parse(context.RequestId),
                 sessionId,
                 requestedScopes,
-                $"Write scopes requested by spawn of '{spec.AgentName}'.",
+                $"Write scopes requested by spawn of '{agentName}'.",
                 cancellationToken).ConfigureAwait(false);
             child.LeaseId = leaseResult.Lease?.LeaseId;
             child.FencingToken = leaseResult.Lease?.FencingToken;
@@ -560,29 +664,19 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 cancellationToken).ConfigureAwait(false);
         }
 
-        IAgentRuntimeAdapter adapter;
-        try
-        {
-            adapter = _runtimes.Value.Resolve(spec.RuntimeProfile);
-        }
-        catch (Exception ex)
-        {
-            children.TryRemove(spec.AgentName, out _);
-            _childrenBySession.TryRemove(sessionId, out _);
-            return SpawnFailure("runtime_profile_not_allowed", ex.Message);
-        }
 
         if (spec.RuntimeProfile == AgentRuntimeProfiles.ClaudeReservedWrite
             && leaseResult?.Lease is null)
         {
-            children.TryRemove(spec.AgentName, out _);
+            children.TryRemove(agentName, out _);
             _childrenBySession.TryRemove(sessionId, out _);
+            await _identities.ReleaseAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             await AppendChildEventAsync(
                 child,
                 "child.failed",
                 new Dictionary<string, object?>
                 {
-                    ["agentName"] = spec.AgentName,
+                    ["agentName"] = agentName,
                     ["parentSessionId"] = context.SessionId,
                     ["status"] = ChildAgentStatus.Failed,
                     ["reason"] = "Claude reserved-write requires an acquired reservation lease.",
@@ -607,7 +701,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 new ProjectId(Guid.Parse(context.ProjectId)),
                 new WorkRequestId(Guid.Parse(context.RequestId)),
                 context.SessionId,
-                spec.AgentName,
+                agentName,
                 spec.Role,
                 context.RepositoryRoot!,
                 spec.Prompt,
@@ -618,24 +712,30 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         }
         catch (Exception ex)
         {
-            children.TryRemove(spec.AgentName, out _);
+            children.TryRemove(agentName, out _);
             _childrenBySession.TryRemove(sessionId, out _);
+            await _identities.ReleaseAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             await AppendChildEventAsync(
                 child,
                 "child.failed",
                 new Dictionary<string, object?>
                 {
-                    ["agentName"] = spec.AgentName,
+                    ["agentName"] = agentName,
                     ["parentSessionId"] = context.SessionId,
                     ["status"] = ChildAgentStatus.Failed,
                     ["reason"] = ex.Message,
                 },
                 CancellationToken.None).ConfigureAwait(false);
-            return SpawnFailure("child_start_failed", $"Child '{spec.AgentName}' failed to start: {ex.Message}");
+            return SpawnFailure("child_start_failed", $"Child '{agentName}' failed to start: {ex.Message}");
         }
 
         child.Adapter = adapter;
         child.MarkStarted();
+        if (child.LeaseId is not null && child.TryBeginLeaseRenewal())
+        {
+            _ = RenewLeaseLoopAsync(child);
+        }
+
         await EmitOnParentAsync(
             context,
             "child.started",
@@ -643,9 +743,10 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             {
                 ["childSessionId"] = sessionId,
                 ["providerSessionId"] = handle.ProviderSessionId,
-                ["agentName"] = spec.AgentName,
+                ["agentName"] = agentName,
                 ["role"] = spec.Role,
                 ["runtimeProfile"] = spec.RuntimeProfile,
+                ["runtime"] = adapter.RuntimeKind,
                 ["parentSessionId"] = context.SessionId,
                 ["leaseId"] = leaseResult?.Lease?.LeaseId,
             },
@@ -655,11 +756,12 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
         return new Dictionary<string, object?>
         {
-            ["agentName"] = spec.AgentName,
+            ["agentName"] = agentName,
             ["childSessionId"] = sessionId,
             ["parentSessionId"] = context.SessionId,
             ["role"] = spec.Role,
             ["runtimeProfile"] = spec.RuntimeProfile,
+            ["runtime"] = adapter.RuntimeKind,
             ["leaseId"] = leaseResult?.Lease?.LeaseId,
             ["fencingToken"] = leaseResult?.Lease?.FencingToken,
             ["reservationError"] = leaseResult?.Error?.Code,
@@ -730,6 +832,8 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         }
 
         child.RequestCancel();
+        SecurityAuditLog.Cancellation(_logger, child.SessionId, context.SessionId, "cancelled_by_request");
+
         if (child.IsTerminal)
         {
             // The watch loop already observed the close/crash and emitted the terminal event.
@@ -742,6 +846,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             .ConfigureAwait(false);
         var cancelTerminal = new ChildTerminal(ChildAgentStatus.Cancelled, "cancelled_by_request");
         child.Terminal.TrySetResult(cancelTerminal);
+        await ReleaseChildAsync(child).ConfigureAwait(false);
 
         if (child.Adapter is not null)
         {
@@ -758,6 +863,27 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
         await child.CloseAsync().ConfigureAwait(false);
         return PiToolResponse.Success(TerminalView(child, cancelTerminal));
+    }
+
+    /// <summary>
+    /// Control-plane initiated cancel (node hub <c>CancelSession</c>): cancels the child with
+    /// the given session id when this node hosts it. Root sessions are the root supervisor's
+    /// responsibility.
+    /// </summary>
+    public async Task<bool> CancelSessionAsync(string sessionId, string reason)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        if (!_childrenBySession.TryGetValue(sessionId, out var child) || child.IsTerminal)
+        {
+            return false;
+        }
+
+        child.RequestCancel();
+        await EmitTerminalAsync(child, ChildAgentStatus.Cancelled, reason).ConfigureAwait(false);
+        child.Terminal.TrySetResult(new ChildTerminal(ChildAgentStatus.Cancelled, reason));
+        await child.CloseAsync().ConfigureAwait(false);
+        await ReleaseChildAsync(child).ConfigureAwait(false);
+        return true;
     }
 
     // ---- Mail ----
@@ -883,6 +1009,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             scopes!,
             payload.GetStringProperty("reason") ?? "reservation.acquire",
             cancellationToken).ConfigureAwait(false);
+        TrackLeaseForChild(context.SessionId, result);
         return LeaseResponse(context, result, cancellationToken);
     }
 
@@ -908,6 +1035,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             context.SessionId,
             scopes!,
             cancellationToken).ConfigureAwait(false);
+        TrackLeaseForChild(context.SessionId, result);
         return LeaseResponse(context, result, cancellationToken);
     }
 
@@ -930,6 +1058,11 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             Guid.Parse(context.ProjectId),
             context.SessionId,
             cancellationToken).ConfigureAwait(false);
+        if (result.Ok && _childrenBySession.TryGetValue(context.SessionId, out var releasing))
+        {
+            releasing.LeaseId = null;
+            releasing.FencingToken = null;
+        }
         await EmitOnParentAsync(
             context,
             result.Ok ? "reservation.released" : "reservation.recovery_required",
@@ -942,29 +1075,118 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         return LeaseResponse(context, result, cancellationToken);
     }
 
-    private async Task<PiToolResponse> TransferAsync(
+    /// <summary>
+    /// Starts a handoff: persists <c>reservation.handoff_requested</c> and notifies the
+    /// current owner. Ownership moves only when that owner accepts the target's request.
+    /// </summary>
+    private async Task<PiToolResponse> RequestHandoffAsync(
         PiOrchestrationContext context,
         JsonElement? payload,
         CancellationToken cancellationToken)
     {
-        var lease = ParseLease(payload, out var error);
-        var toSessionId = error is null ? payload.GetStringProperty("toSessionId") : null;
-        if (error is null && toSessionId is null)
+        var toSessionId = payload.GetStringProperty("agentSessionId");
+        if (string.IsNullOrWhiteSpace(toSessionId) && context.ParentSessionId is not null)
         {
-            error = new GatewayError("to_session_required", "toSessionId must be a non-empty string.");
+            toSessionId = context.SessionId;
         }
 
-        if (error is not null)
+        var paths = payload.GetStringListProperty("paths");
+        if (string.IsNullOrWhiteSpace(toSessionId) || paths is null || paths.Count == 0)
         {
-            return PiToolResponse.Failure(error.Code, error.Message);
+            return PiToolResponse.Failure(
+                "handoff_request_invalid",
+                "At least one repository-relative path is required; root callers must also provide agentSessionId.");
         }
 
-        var resolvedLease = lease!;
+        var leases = await _reservations.ListAsync(
+            Guid.Parse(context.ProjectId), includeReleased: false, cancellationToken).ConfigureAwait(false);
+        var lease = leases.FirstOrDefault(candidate =>
+            string.Equals(candidate.State, "Active", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(candidate.OwnerSessionId, toSessionId, StringComparison.Ordinal)
+            && paths.All(path => candidate.Scopes.Any(scope => ScopeContains(scope, path))));
+        if (lease is null)
+        {
+            return PiToolResponse.Failure(
+                "handoff_lease_not_found",
+                "No single active lease covers every requested path.");
+        }
 
+        _pendingHandoffs[lease.LeaseId] = (lease.OwnerSessionId, toSessionId);
+        await EmitOnParentAsync(
+            context,
+            "reservation.handoff_requested",
+            new Dictionary<string, object?>
+            {
+                ["leaseId"] = lease.LeaseId,
+                ["fromSessionId"] = lease.OwnerSessionId,
+                ["toSessionId"] = toSessionId,
+                ["paths"] = paths,
+                ["reason"] = payload.GetStringProperty("reason"),
+            },
+            cancellationToken).ConfigureAwait(false);
+        await _mail.SendAsync(
+            Guid.Parse(context.ProjectId),
+            Guid.Parse(context.RequestId),
+            null,
+            context.SessionId,
+            [lease.OwnerSessionId],
+            "Reservation handoff requested",
+            $"Session {toSessionId} requests lease {lease.LeaseId}. "
+            + "As the current owner, call accept_reservation_handoff with the lease id to transfer ownership.",
+            "high",
+            ackRequired: true,
+            inReplyToMessageId: null,
+            cancellationToken).ConfigureAwait(false);
+        return PiToolResponse.Success(new Dictionary<string, object?>
+        {
+            ["leaseId"] = lease.LeaseId,
+            ["state"] = "handoff_requested",
+            ["toSessionId"] = toSessionId,
+        });
+    }
+
+    /// Accepts a pending handoff as the current owner: transfers ownership to the
+    /// requesting target through the reservation authority and persists the result.
+    /// </summary>
+    private async Task<PiToolResponse> AcceptHandoffAsync(
+        PiOrchestrationContext context,
+        JsonElement? payload,
+        CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(payload.GetStringProperty("leaseId"), out var leaseId))
+        {
+            return PiToolResponse.Failure("lease_required", "leaseId must be a GUID string.");
+        }
+
+        if (!_pendingHandoffs.TryGetValue(leaseId, out var handoff)
+            || handoff.FromSessionId != context.SessionId
+            || !_pendingHandoffs.TryRemove(leaseId, out handoff))
+        {
+            return PiToolResponse.Failure(
+                "handoff_not_pending",
+                $"No handoff of lease {leaseId} is pending for acceptance by this session.");
+        }
 
         var result = await _reservations.TransferAsync(
-            resolvedLease.LeaseId, context.SessionId, toSessionId!, cancellationToken)
+            leaseId, context.SessionId, handoff.ToSessionId, cancellationToken)
             .ConfigureAwait(false);
+        if (result.Ok && _childrenBySession.TryGetValue(context.SessionId, out var source))
+        {
+            source.LeaseId = null;
+            source.FencingToken = null;
+        }
+        TrackLeaseForChild(handoff.ToSessionId, result);
+        await EmitOnParentAsync(
+            context,
+            result.Ok ? "reservation.transferred" : "reservation.recovery_required",
+            new Dictionary<string, object?>
+            {
+                ["leaseId"] = leaseId,
+                ["fromSessionId"] = context.SessionId,
+                ["toSessionId"] = handoff.ToSessionId,
+                ["error"] = result.Error?.Code,
+            },
+            cancellationToken).ConfigureAwait(false);
         return LeaseResponse(context, result, cancellationToken);
     }
 
@@ -993,6 +1215,32 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         return PiToolResponse.Failure(
             result.Error?.Code ?? "reservation_error",
             result.Error?.Message ?? "The reservation operation failed.");
+    }
+
+    private void TrackLeaseForChild(string sessionId, ReservationOperationResult result)
+    {
+        if (result.Lease is not { } lease
+            || !_childrenBySession.TryGetValue(sessionId, out var child))
+        {
+            return;
+        }
+
+        child.LeaseId = lease.LeaseId;
+        child.FencingToken = lease.FencingToken;
+        if (child.TryBeginLeaseRenewal())
+        {
+            _ = RenewLeaseLoopAsync(child);
+        }
+    }
+
+    private static bool ScopeContains(ReservationScopeSpec scope, string path)
+    {
+        var candidate = path.Replace('\\', '/').Trim('/');
+        var reserved = scope.Path.Replace('\\', '/').Trim('/');
+        return scope.Kind.Equals("directory", StringComparison.OrdinalIgnoreCase)
+            ? candidate.Equals(reserved, StringComparison.Ordinal)
+                || candidate.StartsWith(reserved + "/", StringComparison.Ordinal)
+            : candidate.Equals(reserved, StringComparison.Ordinal);
     }
 
     // ---- Reserved filesystem mutations ----
@@ -1113,6 +1361,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
     private async Task WatchChildAsync(ChildAgent child)
     {
+        var blocked = false;
         try
         {
             await foreach (var sessionEvent in child.Adapter!.WatchAsync(child.SessionId, _disposeCts.Token)
@@ -1123,8 +1372,20 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                     sessionEvent.Type,
                     sessionEvent.Payload,
                     CancellationToken.None).ConfigureAwait(false);
+                if (sessionEvent.Type == "session.snapshot"
+                    && sessionEvent.Payload.TryGetValue("workState", out var workState)
+                    && string.Equals(
+                        workState?.ToString(),
+                        nameof(AgentWorkState.Blocked),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    blocked = true;
+                }
 
-                if (sessionEvent.Type is "session.closed" or "session.failed")
+
+                if (sessionEvent.Type is "session.completed"
+                    or "session.closed"
+                    or "session.failed")
                 {
                     if (child.IsTerminal)
                     {
@@ -1133,9 +1394,14 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                     }
 
                     var failed = sessionEvent.Type == "session.failed";
+                    var completed = sessionEvent.Type == "session.completed";
                     var status = failed
                         ? ChildAgentStatus.Failed
-                        : child.CancelRequested ? ChildAgentStatus.Cancelled : ChildAgentStatus.Completed;
+                        : blocked
+                            ? ChildAgentStatus.Blocked
+                            : child.CancelRequested && !completed
+                                ? ChildAgentStatus.Cancelled
+                                : ChildAgentStatus.Completed;
                     var reason = sessionEvent.Payload.TryGetValue("reason", out var reasonValue)
                         ? reasonValue?.ToString() ?? "unknown"
                         : "worker_closed";
@@ -1147,6 +1413,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                     await child.CloseAsync().ConfigureAwait(false);
                     await EmitTerminalAsync(child, status, reason).ConfigureAwait(false);
                     child.Terminal.TrySetResult(new ChildTerminal(status, reason));
+                    await ReleaseChildAsync(child).ConfigureAwait(false);
                     return;
                 }
             }
@@ -1167,6 +1434,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             await child.CloseAsync().ConfigureAwait(false);
             await EmitTerminalAsync(child, ChildAgentStatus.Failed, ex.Message).ConfigureAwait(false);
             child.Terminal.TrySetResult(new ChildTerminal(ChildAgentStatus.Failed, ex.Message));
+            await ReleaseChildAsync(child).ConfigureAwait(false);
         }
     }
 
@@ -1213,10 +1481,12 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
     private async Task EmitTerminalAsync(ChildAgent child, string status, string reason)
     {
+        child.MarkTerminal(status);
         var type = status switch
         {
             ChildAgentStatus.Completed => "child.completed",
             ChildAgentStatus.Failed => "child.failed",
+            ChildAgentStatus.Blocked => "child.blocked",
             _ => "child.cancelled",
         };
 
@@ -1235,6 +1505,93 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             CancellationToken.None).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Renews the child's active lease on a fixed interval while the child runs; the fencing
+    /// token is refreshed from each successful renewal. Stops on terminal or node shutdown.
+    /// </summary>
+    private async Task RenewLeaseLoopAsync(ChildAgent child)
+    {
+        var interval = TimeSpan.FromSeconds(_workerOptions.LeaseRenewalSeconds);
+        try
+        {
+            while (!child.IsTerminal)
+            {
+                await Task.Delay(interval, child.RenewalCts.Token).ConfigureAwait(false);
+                if (child.IsTerminal || child.LeaseId is not { } leaseId || child.FencingToken is not { } token)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var result = await _reservations.RenewAsync(
+                        leaseId, token, child.SessionId, child.RenewalCts.Token).ConfigureAwait(false);
+                    if (result.Lease is { } renewed)
+                    {
+                        child.FencingToken = renewed.FencingToken;
+                    }
+                    else if (result.Error?.Code is "not_found" or "invalid_state")
+                    {
+                        await EmitTerminalAsync(child, ChildAgentStatus.Failed, $"lease_{result.Error.Code}")
+                            .ConfigureAwait(false);
+                        child.Terminal.TrySetResult(new ChildTerminal(
+                            ChildAgentStatus.Failed, $"lease_{result.Error.Code}"));
+                        return;
+                    }
+                }
+                catch (OperationCanceledException) when (child.RenewalCts.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Lease renewal for child {ChildSessionId} failed transiently; retrying.",
+                        child.SessionId);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Releases the child's lease (voluntary release on graceful terminals) and its
+    /// project-scoped mail identity; idempotent and safe to call once per terminal.
+    /// </summary>
+    private async Task ReleaseChildAsync(ChildAgent child)
+    {
+        child.RenewalCts.Cancel();
+        try
+        {
+            if (child.LeaseId is { } leaseId
+                && child.Status is not (ChildAgentStatus.Failed or ChildAgentStatus.Cancelled))
+            {
+                await _reservations.ReleaseAsync(
+                    leaseId, Guid.Parse(child.ProjectId), child.SessionId, CancellationToken.None)
+                    .ConfigureAwait(false);
+                child.LeaseId = null;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex, "Lease release for child {ChildSessionId} failed.", child.SessionId);
+        }
+
+        try
+        {
+            await _identities.ReleaseAsync(child.SessionId, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex, "Identity release for child {ChildSessionId} failed.", child.SessionId);
+        }
+    }
+
     /// <summary>Appends one event to the child's own durable spool stream.</summary>
     private async Task AppendChildEventAsync(
         ChildAgent child,
@@ -1243,6 +1600,15 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         CancellationToken cancellationToken)
     {
         var sequence = child.AllocateSequence();
+        var normalized = new Dictionary<string, object?>(payload)
+        {
+            ["runtime"] = child.RuntimeKind,
+            ["childSessionId"] = child.SessionId,
+            ["parentSessionId"] = child.ParentSessionId,
+            ["agentName"] = child.AgentName,
+            ["role"] = child.Role,
+            ["runtimeProfile"] = child.RuntimeProfile,
+        };
         var message = new NodeEventMessage(
             EventId: $"{child.SessionId}-{sequence}-{type}",
             NodeId: Guid.Parse(child.NodeId),
@@ -1252,7 +1618,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             Sequence: sequence,
             Type: type,
             OccurredAt: _timeProvider.GetUtcNow(),
-            PayloadJson: JsonSerializer.Serialize(payload, JsonOptions));
+            PayloadJson: JsonSerializer.Serialize(normalized, JsonOptions));
 
         await _spool.AppendAsync(message, cancellationToken).ConfigureAwait(false);
     }
@@ -1454,6 +1820,22 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         return result;
     }
 
+    private static PiToolResponse WorkspaceQuery(string? repositoryRoot, FileOperationResult result)
+    {
+        if (string.IsNullOrEmpty(repositoryRoot))
+        {
+            return PiToolResponse.Failure("repository_root_unknown", "The session has no repository bound.");
+        }
+
+        if (!result.Ok)
+        {
+            return PiToolResponse.Failure(result.ErrorCode ?? "path_denied", result.ErrorMessage ?? "Denied.");
+        }
+
+        var content = result is ReadResult read ? read.Content : string.Empty;
+        return PiToolResponse.Success(new Dictionary<string, object?> { ["content"] = content });
+    }
+
     private static MutationLease? ParseLease(JsonElement? payload, out GatewayError? error)
     {
         error = null;
@@ -1493,6 +1875,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         {
             child.Terminal.TrySetResult(new ChildTerminal(ChildAgentStatus.Cancelled, "node_shutdown"));
             await child.CloseAsync().ConfigureAwait(false);
+            await ReleaseChildAsync(child).ConfigureAwait(false);
         }
 
         _disposeCts.Dispose();

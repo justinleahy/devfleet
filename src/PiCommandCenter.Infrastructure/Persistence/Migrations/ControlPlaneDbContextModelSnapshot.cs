@@ -700,6 +700,14 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.Property<long>("CreatedAtUtcTicks")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("RequestBranch")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CheckpointCommitId")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ReviewFindingsJson")
                         .IsRequired()
                         .HasColumnType("TEXT");

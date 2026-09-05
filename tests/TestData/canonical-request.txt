@@ -1,0 +1,1 @@
+Add a /health/details endpoint, add tests, and update the README. Split the implementation so one agent changes the API and another changes the tests. Require independent review and run the configured test profile.

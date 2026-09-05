@@ -19,6 +19,8 @@
 @using PiCommandCenter.Web.Components
 @using PiCommandCenter.Web.Components.Coordination
 @using PiCommandCenter.Web.Components.Sessions
+@using PiCommandCenter.Application.Live
+@using PiCommandCenter.Web.Components.Live
 @implements IAsyncDisposable
 @inject IRequestQueue Queue
 @inject IProjectCatalog Catalog
@@ -28,6 +30,7 @@
 @inject IClock Clock
 @inject IVerificationRunStore VerificationRunStore
 @inject ICompletionGateService CompletionGate
+@inject IProjectionNotifier Notifier
 
 <PageTitle>@(_request?.Title ?? "Request") &middot; Pi Command Center</PageTitle>
 
@@ -88,7 +91,8 @@ else
             </div>
             <p class="page-lead">
                 Request state and agent sessions are read from the control-plane projection.
-                Refreshed every @RefreshSeconds s; snapshot @_snapshot.ToString("u").
+                Updated as writes commit, re-read at least every @SafetySeconds s;
+                snapshot @_snapshot.ToString("u").
             </p>
         </header>
 
@@ -838,7 +842,7 @@ else
 
 @code {
     private const int TimelineCap = 200;
-    private const int RefreshSeconds = 3;
+    private const int SafetySeconds = 30;
     private const int PayloadCap = 2000;
     private const int ReservationAuditCap = 20;
     private const string AllAgentsTarget = "*";
@@ -855,7 +859,7 @@ else
     private AgentSessionDto? _root;
     private WorkRequestDto? _request;
     private ProjectDto? _project;
-    private CancellationTokenSource? _refreshCts;
+    private LiveView? _live;
     private DateTimeOffset _snapshot;
     private string? _loadError;
     private string? _sessionError;
@@ -923,44 +927,30 @@ else
 
     protected override Task OnParametersSetAsync() => LoadAsync(showSpinner: true);
 
-    protected override Task OnAfterRenderAsync(bool firstRender)
+    protected override void OnAfterRender(bool firstRender)
     {
-        if (firstRender && _refreshCts is null)
+        if (firstRender && _live is null)
         {
-            _refreshCts = new CancellationTokenSource();
-            _ = RefreshLoopAsync(_refreshCts.Token);
+            // Reloads are driven by committed writes to this request; the safety interval inside
+            // LiveView covers anything a publisher missed.
+            _live = new LiveView(
+                Notifier,
+                change => change.AffectsRequest(RequestId),
+                () => InvokeAsync(async () =>
+                {
+                    await LoadAsync(showSpinner: false);
+                    StateHasChanged();
+                }));
         }
-
-        return Task.CompletedTask;
     }
 
     public async ValueTask DisposeAsync()
     {
-        var cts = _refreshCts;
-        _refreshCts = null;
-        if (cts is not null)
+        var live = _live;
+        _live = null;
+        if (live is not null)
         {
-            await cts.CancelAsync();
-            cts.Dispose();
-        }
-    }
-
-    private async Task RefreshLoopAsync(CancellationToken cancellationToken)
-    {
-        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(RefreshSeconds));
-        try
-        {
-            while (await timer.WaitForNextTickAsync(cancellationToken))
-            {
-                await InvokeAsync(async () =>
-                {
-                    await LoadAsync(showSpinner: false);
-                    StateHasChanged();
-                });
-            }
-        }
-        catch (OperationCanceledException)
-        {
+            await live.DisposeAsync();
         }
     }
 

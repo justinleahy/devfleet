@@ -36,4 +36,7 @@ public sealed class NodeOptions
 
     /// <summary>When true, untracked files do not fail a clean-start check.</summary>
     public bool AllowUntrackedFiles { get; set; }
+
+    /// <summary>Maximum number of concurrent active request claims this node holds.</summary>
+    public int MaxConcurrentRequests { get; set; } = 4;
 }

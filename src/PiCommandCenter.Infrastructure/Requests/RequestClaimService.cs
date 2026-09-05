@@ -1,6 +1,7 @@
 using System.Data;
 using System.Security.Cryptography;
 using Microsoft.EntityFrameworkCore;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Requests;
 using PiCommandCenter.Domain;
@@ -17,7 +18,10 @@ namespace PiCommandCenter.Infrastructure.Requests;
 /// claimers can never both satisfy the same request or oversubscribe a project.
 /// The unique primary key on <c>RequestClaims.RequestId</c> is the final backstop.
 /// </summary>
-public sealed class RequestClaimService(TimeProvider clock, ControlPlaneDbContext db) : IRequestClaimService
+public sealed class RequestClaimService(
+    TimeProvider clock,
+    ControlPlaneDbContext db,
+    IProjectionNotifier notifier) : IRequestClaimService
 {
     /// <summary>Request statuses that occupy project concurrency slots.</summary>
     private static readonly WorkRequestStatus[] InFlightStatuses =
@@ -106,6 +110,10 @@ public sealed class RequestClaimService(TimeProvider clock, ControlPlaneDbContex
             await db.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
+            notifier.Publish(ProjectionChange.Request(
+                claim.ProjectId.Value,
+                claim.RequestId.Value));
+
             return new RequestClaimDto(
                 claim.RequestId.Value,
                 claim.ProjectId.Value,
@@ -118,7 +126,9 @@ public sealed class RequestClaimService(TimeProvider clock, ControlPlaneDbContex
                 candidate.Title,
                 candidate.Prompt,
                 candidate.Kind.ToString(),
-                candidate.RiskLevel.ToString());
+                candidate.RiskLevel.ToString(),
+                projectById[candidate.ProjectId].CreateRequestBranch,
+                projectById[candidate.ProjectId].CreateRequestCommit);
         }
 
         return null;
@@ -134,12 +144,22 @@ public sealed class RequestClaimService(TimeProvider clock, ControlPlaneDbContex
         var now = clock.GetUtcNow();
 
         var claim = await db.RequestClaims
-            .SingleOrDefaultAsync(c => c.RequestId == requestId, cancellationToken)
-            ?? throw new InvalidOperationException(
+            .SingleOrDefaultAsync(c => c.RequestId == requestId, cancellationToken);
+        if (claim is null)
+        {
+            throw new ClaimRenewalRejectedException(
                 $"No active claim exists for request '{requestId}'.");
+        }
 
-        // Domain validation rejects a wrong node, a wrong token, and an expired lease.
-        var leaseExpiresAt = claim.Renew(nodeId, claimToken, lease, now);
+        DateTimeOffset leaseExpiresAt;
+        try
+        {
+            leaseExpiresAt = claim.Renew(nodeId, claimToken, lease, now);
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new ClaimRenewalRejectedException(ex.Message, ex);
+        }
 
         await db.SaveChangesAsync(cancellationToken);
         return leaseExpiresAt;

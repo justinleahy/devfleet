@@ -1,7 +1,9 @@
 using Microsoft.EntityFrameworkCore;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Transport;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Sessions;
+using PiCommandCenter.Infrastructure.Requests;
 
 namespace PiCommandCenter.Infrastructure.Transport;
 
@@ -14,7 +16,10 @@ namespace PiCommandCenter.Infrastructure.Transport;
 /// dimensions, unknown types are stored but change no status, and a duplicate event id never
 /// re-applies.
 /// </summary>
-public sealed class NodeEventSink(TimeProvider clock, ControlPlaneDbContext db) : INodeEventSink
+public sealed class NodeEventSink(
+    TimeProvider clock,
+    ControlPlaneDbContext db,
+    IProjectionNotifier? notifier = null) : INodeEventSink
 {
     public async Task<EventBatchAck> AppendAsync(EventBatch batch, CancellationToken cancellationToken = default)
     {
@@ -33,6 +38,7 @@ public sealed class NodeEventSink(TimeProvider clock, ControlPlaneDbContext db) 
         var knownIdSet = knownIds.ToHashSet();
 
         var receivedAtUtcTicks = clock.GetUtcNow().UtcTicks;
+        var touched = new HashSet<(Guid ProjectId, Guid RequestId)>();
         foreach (var nodeEvent in batch.Events)
         {
             if (string.IsNullOrWhiteSpace(nodeEvent.EventId) || knownIdSet.Contains(nodeEvent.EventId))
@@ -64,10 +70,29 @@ public sealed class NodeEventSink(TimeProvider clock, ControlPlaneDbContext db) 
                 var normalized = AgentSessionProjector.ToNormalizedEvent(nodeEvent);
                 await AgentSessionProjector.ApplyAsync(db, normalized, cancellationToken);
             }
+
+            if (nodeEvent.RequestId is not null)
+            {
+                await WorkRequestProjector.ApplyAsync(db, nodeEvent, cancellationToken);
+            }
+
+            touched.Add((nodeEvent.ProjectId, nodeEvent.RequestId ?? Guid.Empty));
         }
 
         // A single SaveChanges persists all new rows and projection transitions in one transaction.
         await db.SaveChangesAsync(cancellationToken);
+
+        // Published only after the transaction commits, so a live view that re-reads on the
+        // signal can never observe state older than the change that woke it.
+        if (notifier is not null)
+        {
+            foreach (var (projectId, requestId) in touched)
+            {
+                notifier.Publish(requestId == Guid.Empty
+                    ? ProjectionChange.Project(projectId)
+                    : ProjectionChange.Request(projectId, requestId));
+            }
+        }
 
         // Duplicate deliveries are acknowledged like fresh events: the sender spool clears.
         return new EventBatchAck(eventIds);

@@ -1,0 +1,5 @@
+.authorizing {
+    margin: 0;
+    padding: calc(var(--design-unit) * 8px);
+    color: var(--neutral-foreground-hint);
+}

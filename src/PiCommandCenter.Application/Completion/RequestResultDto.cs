@@ -7,4 +7,6 @@ public sealed record RequestResultDto(
     IReadOnlyList<string> ChangedFiles,
     IReadOnlyList<ReviewFinding> ReviewFindings,
     string VerificationSummary,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    string? RequestBranch = null,
+    string? CheckpointCommitId = null);

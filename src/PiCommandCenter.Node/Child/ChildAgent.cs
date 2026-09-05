@@ -23,6 +23,7 @@ public sealed class ChildAgent
         string agentName,
         string role,
         string runtimeProfile,
+        string runtimeKind,
         string parentSessionId,
         string requestId,
         string projectId,
@@ -33,6 +34,7 @@ public sealed class ChildAgent
         SessionId = sessionId;
         AgentName = agentName;
         Role = role;
+        RuntimeKind = runtimeKind;
         RuntimeProfile = runtimeProfile;
         ParentSessionId = parentSessionId;
         RequestId = requestId;
@@ -49,6 +51,8 @@ public sealed class ChildAgent
     public string Role { get; }
 
     public string RuntimeProfile { get; }
+
+    public string RuntimeKind { get; }
 
     public string ParentSessionId { get; }
 
@@ -67,6 +71,10 @@ public sealed class ChildAgent
 
     public long? FencingToken { get; set; }
 
+    private int _renewalStarted;
+
+    public bool TryBeginLeaseRenewal() => Interlocked.Exchange(ref _renewalStarted, 1) == 0;
+
     /// <summary>Adapter that owns the child process, set once start completes.</summary>
     public IAgentRuntimeAdapter? Adapter { get; set; }
 
@@ -80,11 +88,15 @@ public sealed class ChildAgent
     public TaskCompletionSource<ChildTerminal> Terminal { get; }
         = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+    /// <summary>Cancels the lease-renewal loop when the child reaches a terminal state.</summary>
+    public CancellationTokenSource RenewalCts { get; } = new();
+
     public bool IsTerminal => Terminal.Task.IsCompleted;
 
     public void MarkStarted() => Status = ChildAgentStatus.Running;
 
     public void RequestCancel() => CancelRequested = true;
+    public void MarkTerminal(string status) => Status = status;
 
     /// <summary>Cancels and disposes the runtime session exactly once.</summary>
     public async Task CloseAsync()

@@ -1,4 +1,8 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 using Microsoft.EntityFrameworkCore;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Reservations;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Requests;
@@ -15,8 +19,14 @@ namespace PiCommandCenter.Infrastructure.Reservations;
 /// an optimistic counter update, so concurrent acquisitions resolve deterministically to
 /// exactly one winner per scope.
 /// </summary>
-public sealed class ReservationService(TimeProvider clock, ControlPlaneDbContext db) : IReservationService
+public sealed class ReservationService(
+    TimeProvider clock,
+    ControlPlaneDbContext db,
+    IProjectionNotifier notifier,
+    ILogger<ReservationService>? logger = null) : IReservationService
 {
+    private readonly ILogger _logger = logger ?? NullLogger<ReservationService>.Instance;
+
     public static readonly TimeSpan DefaultLeaseDuration = TimeSpan.FromSeconds(120);
 
     public async Task<ReservationLeaseDto> AcquireAsync(
@@ -55,7 +65,7 @@ public sealed class ReservationService(TimeProvider clock, ControlPlaneDbContext
 
         await PersistNewLeaseAsync(lease, cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return ToDto(lease);
+        return Published(ToDto(lease));
     }
 
     public async Task<ReservationLeaseDto> RenewAsync(
@@ -68,7 +78,7 @@ public sealed class ReservationService(TimeProvider clock, ControlPlaneDbContext
         lease.Renew(RequireSession(command.SessionId), command.FencingToken, Now, DefaultLeaseDuration);
         ApplyToRow(lease, row);
         await db.SaveChangesAsync(cancellationToken);
-        return ToDto(lease);
+        return Published(ToDto(lease));
     }
 
     public async Task<ReservationLeaseDto> ExpandAsync(
@@ -92,7 +102,7 @@ public sealed class ReservationService(TimeProvider clock, ControlPlaneDbContext
         ApplyToRow(lease, row);
         await db.SaveChangesAsync(cancellationToken);
         await transaction.CommitAsync(cancellationToken);
-        return ToDto(lease);
+        return Published(ToDto(lease));
     }
 
     public async Task<ReservationLeaseDto> ReleaseAsync(
@@ -113,7 +123,7 @@ public sealed class ReservationService(TimeProvider clock, ControlPlaneDbContext
             snapshot: null,
             actor: lease.OwnerSessionId,
             cancellationToken);
-        return ToDto(lease);
+        return Published(ToDto(lease));
     }
 
     public async Task<ReservationLeaseDto> TransferAsync(
@@ -140,7 +150,7 @@ public sealed class ReservationService(TimeProvider clock, ControlPlaneDbContext
             snapshot: null,
             actor: to,
             cancellationToken);
-        return ToDto(lease);
+        return Published(ToDto(lease));
     }
 
     public async Task AuthorizeAsync(
@@ -214,7 +224,7 @@ public sealed class ReservationService(TimeProvider clock, ControlPlaneDbContext
             snapshot: null,
             actor: null,
             cancellationToken);
-        return ToDto(lease);
+        return Published(ToDto(lease));
     }
 
     public async Task<ReservationLeaseDto> ForceReleaseAsync(
@@ -247,7 +257,22 @@ public sealed class ReservationService(TimeProvider clock, ControlPlaneDbContext
             command.RepositoryStatusSnapshot,
             actor: command.RequestedBy,
             cancellationToken);
-        return ToDto(lease);
+        _logger.LogInformation(
+            "AUDIT force-release lease={LeaseId} actor={Actor} reason={Reason}",
+            lease.Id,
+            command.RequestedBy,
+            reason);
+        return Published(ToDto(lease));
+    }
+
+    /// <summary>
+    /// Signals live views after a lease mutation has been committed. Reservation state drives
+    /// the attention queue, so the fleet-wide page is woken through the request's project.
+    /// </summary>
+    private ReservationLeaseDto Published(ReservationLeaseDto lease)
+    {
+        notifier.Publish(ProjectionChange.Request(lease.ProjectId, lease.RequestId));
+        return lease;
     }
 
     private DateTimeOffset Now => clock.GetUtcNow();

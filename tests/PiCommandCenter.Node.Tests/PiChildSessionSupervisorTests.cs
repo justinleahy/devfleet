@@ -32,6 +32,7 @@ public class PiChildSessionSupervisorTests : IDisposable
     private readonly SqliteNodeEventSpool _spool;
     private readonly PiChildSessionSupervisor _supervisor;
     private readonly FakeReservationGateway _reservations = new();
+    private readonly FakeIdentityRegistry _identities = new();
     private readonly FakeVerificationRunner _verification = new();
     private readonly FakeRepositoryInspector _repository = new();
     private readonly FakeCrashRecovery _crash = new();
@@ -97,6 +98,19 @@ public class PiChildSessionSupervisorTests : IDisposable
     private static Dictionary<string, object?> Result(object? result)
         => Assert.IsType<Dictionary<string, object?>>(result);
 
+    private static string ExpectChildSessionId(PiToolResponse response)
+    {
+        var result = Result(response.Result);
+        if (!result.ContainsKey("childSessionId"))
+        {
+            throw new Xunit.Sdk.XunitException(
+                "spawn did not return childSessionId: "
+                + JsonSerializer.Serialize(result, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        }
+
+        return (string)result["childSessionId"]!;
+    }
+
     private async Task<NodeEventMessage[]> SpoolAwaitingAsync(Func<NodeEventMessage[], bool> ready)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
@@ -133,7 +147,7 @@ public class PiChildSessionSupervisorTests : IDisposable
 
         Assert.True(response.Ok, response.ErrorMessage ?? "spawn failed");
         var result = Result(response.Result);
-        var childSessionId = Assert.IsType<string>(result["childSessionId"]);
+        var childSessionId = ExpectChildSessionId(response);
         Assert.StartsWith("pi-child-", childSessionId);
         Assert.Equal("root-session-1", result["parentSessionId"]);
         Assert.Equal("implementer-1", result["agentName"]);
@@ -278,7 +292,7 @@ public class PiChildSessionSupervisorTests : IDisposable
             }),
             CancellationToken.None);
         Assert.True(spawn.Ok);
-        var childSessionId = (string)Result(spawn.Result)["childSessionId"]!;
+        var childSessionId = ExpectChildSessionId(spawn);
 
         var cancel = await _supervisor.HandleAsync(
             context,
@@ -465,6 +479,39 @@ public class PiChildSessionSupervisorTests : IDisposable
         Assert.Contains(_parentEvents, e => e.Type == "request.completed");
     }
 
+    [Fact]
+    public async Task Configured_completion_checkpoint_persists_git_evidence()
+    {
+        var requestId = Guid.NewGuid();
+        PiCheckpointRequest? captured = null;
+        var context = RootContext(requestId.ToString("D")) with
+        {
+            CreateCheckpointAsync = (request, _) =>
+            {
+                captured = request;
+                return Task.FromResult(PiCheckpointResult.Committed("abc123", "pi/request"));
+            },
+        };
+        _completion.Accept = true;
+
+        var response = await _supervisor.HandleAsync(
+            context,
+            "request.complete",
+            JsonSerializer.SerializeToElement(new
+            {
+                summaryMarkdown = "shipped",
+                changedFiles = new[] { "src/App.cs" },
+            }),
+            CancellationToken.None);
+
+        Assert.True(response.Ok);
+        Assert.Equal(["src/App.cs"], captured?.Paths);
+        var evidence = Assert.Single(_completion.Evidence);
+        Assert.Equal("abc123", evidence.CheckpointCommitId);
+        Assert.Equal("pi/request", evidence.RequestBranch);
+        Assert.Contains(_parentEvents, item => item.Type == "repository.checkpoint_created");
+    }
+
     [Theory]
     [InlineData("project.diff.inspect")]
     [InlineData("verification.request")]
@@ -517,7 +564,7 @@ public class PiChildSessionSupervisorTests : IDisposable
         Assert.NotEmpty(_crash.Owners);
     }
 
-    private PiChildSessionSupervisor CreateSupervisor(PiWorkerOptions worker)
+    private PiChildSessionSupervisor CreateSupervisor(PiWorkerOptions worker, FakeMailGateway? mail = null)
     {
         var inner = new NoopInnerHandler();
         var node = Options.Create(new NodeOptions { Id = Guid.NewGuid() });
@@ -547,7 +594,8 @@ public class PiChildSessionSupervisorTests : IDisposable
             Options.Create(worker),
             inner,
             _reservations,
-            new FakeMailGateway(),
+            mail ?? new FakeMailGateway(),
+            _identities,
             _spool,
             TimeProvider.System,
             NullLogger.Instance,
@@ -557,6 +605,397 @@ public class PiChildSessionSupervisorTests : IDisposable
             _crash,
             _completion,
             _workspace);
+    }
+
+    [Fact]
+    public async Task A_worker_session_completed_event_resolves_await_as_completed()
+    {
+var completing = CreateSupervisor(new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker-complete.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-complete"),
+            LeaseRenewalSeconds = 3600,
+        });
+        await using var _ = completing;
+
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await completing.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "finisher",
+                role = "implementer",
+                runtimeProfile = "local-pi",
+                prompt = "p",
+            }),
+            CancellationToken.None);
+        Assert.True(spawn.Ok, spawn.ErrorMessage ?? "spawn failed");
+
+        var awaited = await completing.HandleAsync(
+            context,
+            "agent.await",
+            JsonSerializer.SerializeToElement(new { agentName = "finisher", timeoutSeconds = 20 }),
+            CancellationToken.None);
+        Assert.True(awaited.Ok, awaited.ErrorMessage ?? "await failed");
+        Assert.Equal(ChildAgentStatus.Completed, Result(awaited.Result)["status"]);
+
+        var events = await SpoolAwaitingAsync(e => e.Any(x => x.Type == "child.completed"));
+        var completed = events.Single(x => x.Type == "child.completed");
+        Assert.Contains("\"runtime\":\"pi\"", completed.PayloadJson);
+    }
+
+    [Fact]
+    public async Task Provider_auth_blocked_close_never_emits_child_completed()
+    {
+        var blocked = CreateSupervisor(new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker-blocked.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-blocked"),
+            LeaseRenewalSeconds = 3600,
+        });
+        await using var _ = blocked;
+
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await blocked.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "needs-login",
+                role = "implementer",
+                runtimeProfile = "local-pi",
+                prompt = "p",
+            }),
+            CancellationToken.None);
+        Assert.True(spawn.Ok, spawn.ErrorMessage ?? "spawn failed");
+
+        var events = await SpoolAwaitingAsync(e => e.Any(x => x.Type == "child.blocked"));
+        Assert.Contains(events, x => x.Type == "child.blocked");
+        Assert.Contains("\"status\":\"blocked\"", events.Single(x => x.Type == "child.blocked").PayloadJson);
+        Assert.DoesNotContain(events, x => x.Type == "child.completed");
+    }
+
+    [Fact]
+    public async Task Child_events_carry_normalized_identity_metadata()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await _supervisor.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "documented",
+                role = "reviewer",
+                runtimeProfile = PiCommandCenter.Application.Runtime.AgentRuntimeProfiles.LocalPi,
+                prompt = "p",
+            }),
+            CancellationToken.None);
+        Assert.True(spawn.Ok);
+        var childSessionId = ExpectChildSessionId(spawn);
+
+        var events = await SpoolAwaitingAsync(e =>
+            e.Any(x => x.SessionId == childSessionId && x.Type == "turn.started"));
+        var payload = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(
+            events.Single(x => x.SessionId == childSessionId && x.Type == "turn.started").PayloadJson,
+            new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal("pi", payload["runtime"].GetString());
+        Assert.Equal("root-session-1", payload["parentSessionId"].GetString());
+        Assert.Equal("documented", payload["agentName"].GetString());
+        Assert.Equal("reviewer", payload["role"].GetString());
+        Assert.Equal(PiCommandCenter.Application.Runtime.AgentRuntimeProfiles.LocalPi, payload["runtimeProfile"].GetString());
+    }
+
+    [Fact]
+    public async Task Spawn_allocates_a_project_scoped_identity_and_terminal_releases_it()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await _supervisor.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "identified",
+                role = "implementer",
+                runtimeProfile = "local-pi",
+                prompt = "p",
+            }),
+            CancellationToken.None);
+        Assert.True(spawn.Ok);
+        var childSessionId = ExpectChildSessionId(spawn);
+
+        var allocation = _identities.Allocated.Single(a => a.SessionId == childSessionId);
+        Assert.Equal("identified", allocation.AgentName);
+        Assert.Equal("implementer", allocation.Role);
+        Assert.Equal("pi", allocation.Runtime);
+
+        await _supervisor.HandleAsync(
+            context,
+            "agent.cancel",
+            JsonSerializer.SerializeToElement(new { agentName = "identified" }),
+            CancellationToken.None);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!_identities.Released.Contains(childSessionId) && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+        }
+
+        Assert.Contains(childSessionId, _identities.Released);
+    }
+
+    [Fact]
+    public async Task Allocated_collision_safe_name_is_used_by_runtime_and_events()
+    {
+        _identities.AllocatedNameOverride = "implementer-2";
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+
+        var spawn = await _supervisor.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "implementer",
+                role = "implementer",
+                runtimeProfile = "local-pi",
+                prompt = "p",
+            }),
+            CancellationToken.None);
+
+        Assert.True(spawn.Ok);
+        var result = Result(spawn.Result);
+        Assert.Equal("implementer-2", result["agentName"]);
+        var started = _parentEvents.Single(item => item.Type == "child.started");
+        Assert.Equal("implementer-2", started.Payload["agentName"]);
+        Assert.Equal("pi", started.Payload["runtime"]);
+    }
+
+    [Fact]
+    public async Task Active_leases_are_renewed_on_the_configured_interval()
+    {
+var renewing = CreateSupervisor(new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-renew"),
+            LeaseRenewalSeconds = 1,
+        });
+        await using var _ = renewing;
+
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await renewing.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "renewed",
+                role = "implementer",
+                runtimeProfile = "local-pi",
+                prompt = "p",
+                requestedWriteScopes = new[] { new { kind = "file", path = "src/Renew.txt" } },
+            }),
+            CancellationToken.None);
+        Assert.True(spawn.Ok);
+        var childSessionId = ExpectChildSessionId(spawn);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (_reservations.Renewals.Count(renewal => renewal.SessionId == childSessionId) < 2
+               && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(100);
+        }
+
+        Assert.True(_reservations.Renewals.Count(renewal => renewal.SessionId == childSessionId) >= 2,
+            "Expected at least two lease renewals within the interval window.");
+    }
+
+    [Fact]
+    public async Task Transient_lease_renewal_failure_is_retried()
+    {
+        _reservations.RenewFailuresRemaining = 1;
+        await using var renewing = CreateSupervisor(new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-renew-retry"),
+            LeaseRenewalSeconds = 1,
+        });
+
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await renewing.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "retrying-writer",
+                role = "implementer",
+                runtimeProfile = "local-pi",
+                prompt = "p",
+                requestedWriteScopes = new[] { new { kind = "file", path = "src/Retry.txt" } },
+            }),
+            CancellationToken.None);
+        Assert.True(spawn.Ok);
+        var childSessionId = ExpectChildSessionId(spawn);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (_reservations.Renewals.Count(item => item.SessionId == childSessionId) < 2
+               && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(100);
+        }
+
+        Assert.True(_reservations.Renewals.Count(item => item.SessionId == childSessionId) >= 2);
+        Assert.Equal(0, _reservations.RenewFailuresRemaining);
+    }
+
+    [Fact]
+    public async Task Lease_acquired_after_spawn_is_renewed()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        await using var supervisor = CreateSupervisor(new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-late-lease"),
+            LeaseRenewalSeconds = 1,
+        });
+        var spawn = await supervisor.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "late-writer",
+                role = "implementer",
+                runtimeProfile = "local-pi",
+                prompt = "p",
+            }),
+            CancellationToken.None);
+        var childSessionId = ExpectChildSessionId(spawn);
+        var childContext = context with
+        {
+            SessionId = childSessionId,
+            ParentSessionId = context.SessionId,
+        };
+
+        var acquired = await supervisor.HandleAsync(
+            childContext,
+            "reservation.acquire",
+            JsonSerializer.SerializeToElement(new
+            {
+                scopes = new[] { new { kind = "file", path = "src/Late.cs" } },
+                reason = "late scope",
+            }),
+            CancellationToken.None);
+        Assert.True(acquired.Ok);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (_reservations.Renewals.All(item => item.SessionId != childSessionId)
+               && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(100);
+        }
+
+        Assert.Contains(_reservations.Renewals, item => item.SessionId == childSessionId);
+    }
+
+    [Fact]
+    public async Task Handoff_requires_explicit_accept_by_the_current_owner()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var target = context with
+        {
+            SessionId = "reviewer-session",
+            ParentSessionId = context.SessionId,
+        };
+        var owner = context with
+        {
+            SessionId = "implementer-session",
+            ParentSessionId = context.SessionId,
+        };
+        var lease = _reservations.GrantLease(
+            "implementer-session",
+            new ReservationScopeSpec("file", "src/Registration.cs"));
+        var mail = new FakeMailGateway();
+var supervisor = CreateSupervisor(new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-handoff"),
+            LeaseRenewalSeconds = 3600,
+        }, mail);
+        await using var _ = supervisor;
+
+        // The blocked target requests ownership; the node derives its session identity.
+        var request = await supervisor.HandleAsync(
+            target,
+            "reservation.handoff.request",
+            JsonSerializer.SerializeToElement(new
+            {
+                paths = new[] { "src/Registration.cs" },
+                reason = "reviewer needs ownership",
+            }),
+            CancellationToken.None);
+        Assert.True(request.Ok, request.ErrorMessage ?? "handoff request failed");
+        Assert.Equal("handoff_requested", Result(request.Result)["state"]);
+        Assert.Contains(_parentEvents, x => x.Type == "reservation.handoff_requested");
+        var handoffMail = Assert.Single(mail.Sends);
+        Assert.Equal(["implementer-session"], handoffMail.Recipients);
+        // The desired recipient cannot approve its own takeover.
+        var rejected = await supervisor.HandleAsync(
+            target,
+            "reservation.handoff.accept",
+            JsonSerializer.SerializeToElement(new { leaseId = lease.LeaseId }),
+            CancellationToken.None);
+        Assert.Equal("handoff_not_pending", rejected.ErrorCode);
+
+        // Transfer does not happen before acceptance.
+        Assert.DoesNotContain(_reservations.Transfers, t => t.LeaseId == lease.LeaseId);
+
+        // The current owner accepts; ownership moves to the requesting target.
+        var accept = await supervisor.HandleAsync(
+            owner,
+            "reservation.handoff.accept",
+            JsonSerializer.SerializeToElement(new { leaseId = lease.LeaseId }),
+            CancellationToken.None);
+        Assert.True(accept.Ok, accept.ErrorMessage ?? "handoff accept failed");
+        var transfer = Assert.Single(_reservations.Transfers);
+        Assert.Equal((lease.LeaseId, "implementer-session", "reviewer-session"),
+            (transfer.LeaseId, transfer.FromSessionId, transfer.ToSessionId));
+    }
+
+    [Fact]
+    public async Task Control_plane_cancel_requests_stop_the_child_and_release_lifecycle()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await _supervisor.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "remote-stopped",
+                role = "implementer",
+                runtimeProfile = "local-pi",
+                prompt = "p",
+            }),
+            CancellationToken.None);
+        Assert.True(spawn.Ok);
+        var childSessionId = ExpectChildSessionId(spawn);
+
+        var stopped = await _supervisor.CancelSessionAsync(childSessionId, "control_plane_request");
+        Assert.True(stopped);
+
+        var events = await SpoolAwaitingAsync(e => e.Any(x => x.Type == "child.cancelled"));
+        Assert.Contains("control_plane_request", events.Single(x => x.Type == "child.cancelled").PayloadJson);
+
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!_identities.Released.Contains(childSessionId) && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+        }
+
+        Assert.Contains(childSessionId, _identities.Released);
     }
 
     private sealed class NoopInnerHandler : IPiOrchestrationRequestHandler
@@ -648,6 +1087,8 @@ public class PiChildSessionSupervisorTests : IDisposable
         public bool Accept { get; set; }
         public IReadOnlyList<string> Missing { get; set; } = ["verification"];
         public List<VerificationRunDto> Runs { get; } = [];
+        public List<CompletionEvidence> Evidence { get; } = [];
+
 
         public Task RecordVerificationRunAsync(VerificationRunDto run, CancellationToken cancellationToken)
         {
@@ -657,11 +1098,22 @@ public class PiChildSessionSupervisorTests : IDisposable
 
         public Task<CompletionGateDecision> EvaluateCompletionAsync(
             Guid projectId, Guid requestId, string rootSessionId, CompletionEvidence evidence, CancellationToken cancellationToken)
-            => Task.FromResult(new CompletionGateDecision(
+        {
+            Evidence.Add(evidence);
+            return Task.FromResult(new CompletionGateDecision(
                 Accept,
                 Accept ? [] : Missing,
                 Accept
-                    ? new RequestResultDto(requestId, evidence.SummaryMarkdown, evidence.ChangedFiles ?? [], evidence.ReviewFindings, evidence.VerificationSummary, DateTimeOffset.UtcNow)
+                    ? new RequestResultDto(
+                        requestId,
+                        evidence.SummaryMarkdown,
+                        evidence.ChangedFiles ?? [],
+                        evidence.ReviewFindings,
+                        evidence.VerificationSummary,
+                        DateTimeOffset.UtcNow,
+                        evidence.RequestBranch,
+                        evidence.CheckpointCommitId)
                     : null));
+        }
     }
 }

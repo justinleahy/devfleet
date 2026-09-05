@@ -25,6 +25,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
     private readonly TimeSpan _heartbeatStaleAfter;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<PiRuntimeAdapter> _logger;
+    private readonly Application.Git.ITrustedGitService? _gitService;
     private readonly ConcurrentDictionary<string, PiWorkerSession> _sessions = new();
 
     public PiRuntimeAdapter(
@@ -33,7 +34,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         IPiWorkerProcessFactory processFactory,
         IPiOrchestrationRequestHandler orchestration,
         TimeProvider timeProvider,
-        ILogger<PiRuntimeAdapter> logger)
+        ILogger<PiRuntimeAdapter> logger,
+        Application.Git.ITrustedGitService? gitService = null)
     {
         ArgumentNullException.ThrowIfNull(nodeOptions);
         ArgumentNullException.ThrowIfNull(workerOptions);
@@ -44,6 +46,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         _options = workerOptions.Value;
         _heartbeatStaleAfter = TimeSpan.FromSeconds(Math.Max(1, nodeOptions.Value.HeartbeatSeconds) * 3);
         _nodeId = nodeOptions.Value.Id.ToString("D");
+        _gitService = gitService;
     }
 
     public string RuntimeKind => AgentRuntimeKinds.Pi;
@@ -86,7 +89,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
             request.RequestId.Value.ToString("D"),
             request.ParentSessionId,
             (type, payload, token) => EmitSessionEventAsync(sessionId, type, payload, token),
-            request.WorkingDirectory);
+            request.WorkingDirectory,
+            CreateCheckpointDelegate(request));
 
         var process = _processFactory.Start(
             _options.NodeExecutable, _options.WorkerPath, request.WorkingDirectory);
@@ -107,8 +111,19 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
             await session.StartAsync(
                 request.WorkingDirectory,
                 _options.AgentDataDirectory,
-                model: null,
+                model: _options.Model,
+                systemPrompt: _options.SystemPrompt,
+                request.Mode,
+                request.ParentSessionId,
                 cancellationToken).ConfigureAwait(false);
+
+            // The claimed session immediately receives its work prompt: the worker queues it
+            // as the first turn input, so a root starts working without a second nudge.
+            if (!string.IsNullOrWhiteSpace(request.Prompt))
+            {
+                await session.SendInputAsync(request.Prompt, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         catch (Exception)
         {
@@ -118,8 +133,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         }
 
         _logger.LogInformation(
-            "Started Pi root session {SessionId} (provider {ProviderSessionId}) for request {RequestId}.",
-            sessionId, session.ProviderSessionId, request.RequestId.Value);
+            "Started Pi {Mode} session {SessionId} (provider {ProviderSessionId}) for request {RequestId}.",
+            request.Mode, sessionId, session.ProviderSessionId, request.RequestId.Value);
         return new AgentSessionHandle(
             sessionId,
             session.ProviderSessionId,
@@ -180,6 +195,46 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
     /// <summary>Current stderr tail for diagnostics, when the session is known.</summary>
     public IReadOnlyList<string> GetStderrTail(string sessionId)
         => _sessions.TryGetValue(sessionId, out var session) ? session.StderrTail : [];
+
+    private Func<PiCheckpointRequest, CancellationToken, Task<PiCheckpointResult>>? CreateCheckpointDelegate(
+        AgentStartRequest request)
+    {
+        if (_gitService is null
+            || request.Mode != AgentRuntimeMode.Root
+            || !request.CreateRequestCommit)
+        {
+            return null;
+        }
+
+        var branchName = Git.PiRequestGit.RequestBranchName(request.RequestId.Value);
+        return async (checkpointRequest, token) =>
+        {
+            try
+            {
+                var committed = await _gitService.CreateCheckpointCommitAsync(
+                    new Application.Git.CheckpointCommitRequest(
+                        request.RequestId.Value,
+                        request.WorkingDirectory,
+                        string.IsNullOrWhiteSpace(checkpointRequest.BranchName)
+                            ? branchName
+                            : checkpointRequest.BranchName,
+                        checkpointRequest.Message,
+                        checkpointRequest.Paths),
+                    token).ConfigureAwait(false);
+                return PiCheckpointResult.Committed(committed.CommitId, committed.BranchName);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex, "Checkpoint commit failed for request {RequestId}.", request.RequestId.Value);
+                return PiCheckpointResult.Failure("checkpoint_failed", ex.Message);
+            }
+        };
+    }
 
     private async Task EmitSessionEventAsync(
         string sessionId,

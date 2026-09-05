@@ -192,7 +192,7 @@ public sealed class ReservationsEndpointsTests : IClassFixture<ControlPlaneFixtu
             Connection = new HubConnectionBuilder()
                 .WithUrl(
                     "http://server/nodeHub",
-                    options => { options.HttpMessageHandlerFactory = _ => fixture.Factory.Server.CreateHandler(); })
+                    fixture.ConfigureNodeHub)
                 .Build();
             Connection.StartAsync().GetAwaiter().GetResult();
         }

@@ -170,7 +170,8 @@ public sealed class VerificationCommandRunner : IVerificationCommandRunner
             workingDirectory,
             maxOutputBytes,
             timeout,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            sandboxRepositoryRoot: context.RepositoryRoot).ConfigureAwait(false);
 
         return new VerificationCommandResult(
             command.Id,

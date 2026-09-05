@@ -48,6 +48,12 @@ public sealed class NodeOptionsValidator : IValidateOptions<NodeOptions>
             failures.Add($"'{nameof(options.HeartbeatSeconds)}' must be positive.");
         }
 
+        if (options.MaxConcurrentRequests <= 0)
+        {
+            failures.Add($"'{nameof(options.MaxConcurrentRequests)}' must be positive.");
+        }
+
+
         if (options.ClaimLeaseSeconds <= 0)
         {
             failures.Add($"'{nameof(options.ClaimLeaseSeconds)}' must be positive.");

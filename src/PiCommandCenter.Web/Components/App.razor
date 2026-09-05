@@ -1,4 +1,5 @@
 @namespace PiCommandCenter.Web.Components
+@using Microsoft.AspNetCore.Http
 
 <!DOCTYPE html>
 <html lang="en">
@@ -12,13 +13,25 @@
     <link rel="stylesheet" href="PiCommandCenter.ControlPlane.styles.css" />
     <script src="_content/Microsoft.FluentUI.AspNetCore.Components/js/loading-theme.js" type="text/javascript"></script>
     <script src="_content/Microsoft.FluentUI.AspNetCore.Components/Microsoft.FluentUI.AspNetCore.Components.lib.module.js" type="module" async></script>
-    <HeadOutlet @rendermode="InteractiveServer" />
+    <HeadOutlet @rendermode="RouteRenderMode" />
 </head>
 
 <body>
     <loading-theme storage-name="theme"></loading-theme>
-    <Routes @rendermode="InteractiveServer" />
+    <Routes @rendermode="RouteRenderMode" />
     <script src="_framework/blazor.web.js"></script>
 </body>
 
 </html>
+
+@code {
+    // Sign-in and access-denied are marked [ExcludeFromInteractiveRouting] so they
+    // render statically: the login form must be a plain HTML POST that sets the
+    // authentication cookie before a circuit exists, and an unauthorized caller
+    // must never open one. Every other page keeps global server interactivity.
+    [CascadingParameter]
+    private HttpContext HttpContext { get; set; } = default!;
+
+    private IComponentRenderMode? RouteRenderMode =>
+        HttpContext.AcceptsInteractiveRouting() ? InteractiveServer : null;
+}

@@ -1,0 +1,33 @@
+@page "/access-denied"
+@namespace PiCommandCenter.Web.Components.Account
+@layout PiCommandCenter.Web.Components.Layout.EntryLayout
+@attribute [AllowAnonymous]
+@attribute [ExcludeFromInteractiveRouting]
+
+@* Reached when a request carries a valid session that is not the administrator.
+   Statically rendered: no circuit, no fleet data, nothing an unauthorized caller
+   could read from the projections. *@
+
+<PageTitle>Access denied &middot; Pi Command Center</PageTitle>
+
+<div class="denied-head">
+    <h1>Access denied</h1>
+    <p class="denied-lead">
+        This session is signed in, but it is not the control-plane administrator. The
+        fleet, request queues, and agent sessions stay hidden until an authorized
+        account signs in.
+    </p>
+</div>
+
+<AuthorizeView>
+    <Authorized>
+        <p class="denied-identity">
+            Signed in as <strong>@context.User.Identity?.Name</strong>.
+        </p>
+    </Authorized>
+</AuthorizeView>
+
+<div class="denied-actions">
+    <LogoutForm Label="Sign out" />
+    <a class="denied-link" href="/login">Go to sign-in</a>
+</div>

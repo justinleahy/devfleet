@@ -1,5 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
+using PiCommandCenter.ControlPlane.Security;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.Http.Connections.Client;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -75,6 +77,7 @@ public sealed class CoordinationEndToEndTests : IClassFixture<EndToEndFixture>, 
             {
                 options.HttpMessageHandlerFactory = _ => factory.Server.CreateHandler();
                 options.Transports = HttpTransportType.LongPolling;
+                options.AccessTokenProvider = () => Task.FromResult<string?>(_fixture.NodeTokenHex);
             })
             .Build();
         _connection.StartAsync().GetAwaiter().GetResult();
@@ -89,6 +92,7 @@ public sealed class CoordinationEndToEndTests : IClassFixture<EndToEndFixture>, 
             {
                 options.HttpMessageHandlerFactory = _ => factory.Server.CreateHandler();
                 options.Transports = HttpTransportType.LongPolling;
+                options.AccessTokenProvider = () => Task.FromResult<string?>(_fixture.NodeTokenHex);
             })
             .Build();
         await connection.StartAsync();
@@ -126,9 +130,9 @@ public sealed class CoordinationEndToEndTests : IClassFixture<EndToEndFixture>, 
         _requestId = JsonDocument.Parse(queuedBody).RootElement.GetProperty("id").GetGuid();
     }
 
-    private async Task SeedSessionsAsync()
+    private async Task SeedSessionsAsync(WebApplicationFactory<Program>? factory = null)
     {
-        using var scope = _fixture.Factory.Services.CreateScope();
+        using var scope = (factory ?? _fixture.Factory).Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
         var now = DateTimeOffset.UtcNow;
         db.FleetNodes.Add(FleetNode.Register(new NodeId(_nodeId), "e2e-node-" + _scope, "1.0.0", "{}", now));
@@ -327,9 +331,9 @@ public sealed class CoordinationEndToEndTests : IClassFixture<EndToEndFixture>, 
         var clock = new MutableClock(DateTimeOffset.UtcNow);
         using var factory = CreateControlPlane(clock);
         var hub = _extraConnection = await HubForAsync(factory);
-        var client = factory.CreateClient();
+        var client = _fixture.CreateAuthenticatedClient(factory);
         await RegisterProjectAndQueueRequestAsync(client);
-        await SeedSessionsAsync();
+        await SeedSessionsAsync(factory);
 
         var leaseResult = await hub.InvokeAsync<ReservationOperationResultMessage>("AcquireReservation",
             new AcquireReservationMessage(_projectId, _requestId, SessionA,
@@ -377,17 +381,24 @@ public sealed class CoordinationEndToEndTests : IClassFixture<EndToEndFixture>, 
         Assert.Contains("ForceReleased", kinds);
     }
 
-    private WebApplicationFactory<Program> CreateControlPlane(MutableClock clock) =>
-        new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+    private WebApplicationFactory<Program> CreateControlPlane(MutableClock clock)
+    {
+        var sqlitePath = Path.Combine(
+            Path.GetDirectoryName(_fixture.SqlitePath)!,
+            "scenario-d-" + _scope + ".db");
+        File.Create(sqlitePath).Dispose();
+        return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
-            builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={_fixture.SqlitePath}");
+            builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={sqlitePath}");
             builder.UseSetting("Projects:ApprovedRoots:0", _fixture.ApprovedRoot);
+            builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialFile);
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<TimeProvider>();
                 services.AddSingleton<TimeProvider>(clock);
             });
         });
+    }
 
     [Fact]
     public async Task Human_guidance_routes_to_root_single_child_and_all_active_agents()

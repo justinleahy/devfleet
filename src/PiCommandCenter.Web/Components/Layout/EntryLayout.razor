@@ -1,0 +1,26 @@
+@namespace PiCommandCenter.Web.Components.Layout
+@inherits LayoutComponentBase
+
+@* Unauthenticated entry surface: no navigation rail, no fleet data, no interactive
+   providers. Rendered statically so the sign-in form is a real HTML POST that can
+   establish the auth cookie before any Blazor circuit exists. *@
+
+<FluentDesignTheme StorageName="theme" />
+
+<div class="entry-shell">
+    <main class="entry-main">
+        <div class="entry-card">
+            <header class="entry-brand">
+                <span class="brand">Pi Command Center</span>
+                <span class="brand-sub">Raspberry Pi fleet control plane</span>
+            </header>
+
+            @Body
+        </div>
+
+        <footer class="entry-foot">
+            Local administrator access only. Protocol
+            v@(PiCommandCenter.Contracts.ProtocolVersion.Current).
+        </footer>
+    </main>
+</div>

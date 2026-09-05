@@ -20,7 +20,8 @@ public sealed record AgentStartRequest
         string prompt,
         AgentRuntimeMode mode,
         string runtimeProfile,
-        AgentRuntimeAuthorizationContext? authorization = null)
+        AgentRuntimeAuthorizationContext? authorization = null,
+        bool createRequestCommit = false)
     {
         SessionId = Require(sessionId, nameof(sessionId));
         ProjectId = projectId;
@@ -33,6 +34,7 @@ public sealed record AgentStartRequest
         Mode = mode;
         RuntimeProfile = Require(runtimeProfile, nameof(runtimeProfile));
         Authorization = authorization;
+        CreateRequestCommit = createRequestCommit;
     }
 
     /// <summary>Orchestrator-assigned session id (the projection identity).</summary>
@@ -69,6 +71,9 @@ public sealed record AgentStartRequest
     /// Successful reservation grant for reserved-write Claude. Null for read-only starts.
     /// </summary>
     public AgentRuntimeAuthorizationContext? Authorization { get; }
+
+    /// <summary>Whether the trusted supervisor must create a request checkpoint at completion.</summary>
+    public bool CreateRequestCommit { get; }
 
     private static string Require(string value, string paramName)
     {

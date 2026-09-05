@@ -13,5 +13,9 @@ public sealed class RequestResultRow
 
     public string VerificationSummaryJson { get; init; } = "{}";
 
+    public string? RequestBranch { get; init; }
+
+    public string? CheckpointCommitId { get; init; }
+
     public long CreatedAtUtcTicks { get; init; }
 }

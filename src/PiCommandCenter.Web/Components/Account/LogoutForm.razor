@@ -1,0 +1,17 @@
+@namespace PiCommandCenter.Web.Components.Account
+
+@* Sign-out is a state change, so it is a POST carrying the antiforgery token —
+   never a link a prefetch or a stray GET could trigger. The AntiforgeryToken
+   component supplies the token for both static and interactive renders. *@
+
+<form class="logout-form" method="post" action="/account/logout">
+    <AntiforgeryToken />
+    <input type="hidden" name="returnUrl" value="/login?signedout=1" />
+    <button class="logout-button" type="submit">@Label</button>
+</form>
+
+@code {
+    /// <summary>Button text; the access-denied surface asks for a more explicit label.</summary>
+    [Parameter]
+    public string Label { get; set; } = "Sign out";
+}

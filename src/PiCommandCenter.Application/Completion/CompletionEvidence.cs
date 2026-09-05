@@ -5,4 +5,6 @@ public sealed record CompletionEvidence(
     string SummaryMarkdown,
     IReadOnlyList<string>? ChangedFiles,
     IReadOnlyList<ReviewFinding> ReviewFindings,
-    string VerificationSummary);
+    string VerificationSummary,
+    string? RequestBranch = null,
+    string? CheckpointCommitId = null);

@@ -10,12 +10,16 @@
 @using PiCommandCenter.Domain.Nodes
 @using PiCommandCenter.Domain.Requests
 @using PiCommandCenter.Domain.Sessions
+@using PiCommandCenter.Application.Live
+@using PiCommandCenter.Web.Components.Live
+@implements IAsyncDisposable
 @inject IProjectCatalog Catalog
 @inject IRequestQueue Queue
 @inject INodeRegistry NodeRegistry
 @inject IAgentSessionStore SessionStore
 @inject IClock Clock
 @inject IToastService ToastService
+@inject IProjectionNotifier Notifier
 
 <PageTitle>Fleet &middot; Pi Command Center</PageTitle>
 
@@ -30,7 +34,7 @@
                 <h1>Fleet dashboard</h1>
                 <p class="page-lead">
                     Registered projects and their queued work, read straight from the control-plane
-                    database. Snapshot @_snapshot.ToString("u").
+                    database as each write commits. Snapshot @_snapshot.ToString("u").
                 </p>
             </FluentStack>
             <FluentSpacer />
@@ -344,13 +348,54 @@
     private int _attentionSessions;
     private int _trackedSessions;
 
+    private LiveView? _live;
+    private bool _busy;
+
     protected override Task OnInitializedAsync() => ReloadAsync();
 
-    private async Task ReloadAsync()
+    protected override void OnAfterRender(bool firstRender)
     {
-        _loading = true;
+        if (firstRender && _live is null)
+        {
+            // Fleet counters move on any committed write; LiveView collapses bursts and still
+            // re-reads on its safety interval.
+            _live = new LiveView(
+                Notifier,
+                change => change.AffectsFleet,
+                () => InvokeAsync(async () =>
+                {
+                    await ReloadAsync(showSpinner: false);
+                    StateHasChanged();
+                }));
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        var live = _live;
+        _live = null;
+        if (live is not null)
+        {
+            await live.DisposeAsync();
+        }
+    }
+
+    private Task ReloadAsync() => ReloadAsync(showSpinner: true);
+
+    private async Task ReloadAsync(bool showSpinner)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
         _loadError = null;
-        StateHasChanged();
+        if (showSpinner)
+        {
+            _loading = true;
+            StateHasChanged();
+        }
 
         await LoadNodesAsync();
 
@@ -397,6 +442,7 @@
         {
             _snapshot = Clock.UtcNow;
             _loading = false;
+            _busy = false;
         }
     }
 

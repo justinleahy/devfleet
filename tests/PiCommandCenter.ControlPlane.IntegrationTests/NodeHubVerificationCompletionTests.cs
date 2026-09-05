@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using PiCommandCenter.ControlPlane.Security;
 using PiCommandCenter.Application.Completion;
 using PiCommandCenter.ControlPlane.Hubs;
 using PiCommandCenter.Application.Nodes;
@@ -39,15 +40,7 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
     public NodeHubVerificationCompletionTests(ControlPlaneFixture fixture)
     {
         _fixture = fixture;
-        var factory = fixture.Factory;
-        _ = factory.CreateClient();
-        _connection = new HubConnectionBuilder()
-            .WithUrl(new Uri(factory.Server.BaseAddress, "nodeHub"), options =>
-            {
-                options.HttpMessageHandlerFactory = _ => factory.Server.CreateHandler();
-                options.Transports = HttpTransportType.LongPolling;
-            })
-            .Build();
+        _connection = fixture.CreateNodeHubConnection();
         _connection.StartAsync().GetAwaiter().GetResult();
     }
 
@@ -132,17 +125,23 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
                     "Shipped the change.",
                     ["src/a.cs"],
                     [],
-                    "all green")));
+                    "all green",
+                    "pi/request-checkpoint",
+                    "abc123checkpoint")));
 
         Assert.True(decision.Accepted);
         Assert.Empty(decision.MissingRequirements);
         Assert.NotNull(decision.Result);
         Assert.Equal("Shipped the change.", decision.Result.SummaryMarkdown);
+        Assert.Equal("pi/request-checkpoint", decision.Result.RequestBranch);
+        Assert.Equal("abc123checkpoint", decision.Result.CheckpointCommitId);
 
         using var client = _fixture.CreateClient();
         var before = await client.GetFromJsonAsync<RequestResultDto>($"/api/requests/{requestId}/result", Json);
         Assert.NotNull(before);
         Assert.Equal(requestId, before.RequestId);
+        Assert.Equal("pi/request-checkpoint", before.RequestBranch);
+        Assert.Equal("abc123checkpoint", before.CheckpointCommitId);
 
         var eventsBefore = await client.GetFromJsonAsync<JsonElement>($"/api/requests/{requestId}/events", Json);
         Assert.True(eventsBefore.GetProperty("events").GetArrayLength() >= 1);
@@ -151,12 +150,15 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={_fixture.SqlitePath}");
             builder.UseSetting("Projects:ApprovedRoots:0", _fixture.ApprovedRoot);
+            builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialFile);
         });
-        using var restartedClient = restarted.CreateClient();
+        using var restartedClient = _fixture.CreateAuthenticatedClient(restarted);
         var after = await restartedClient.GetFromJsonAsync<RequestResultDto>($"/api/requests/{requestId}/result", Json);
         Assert.NotNull(after);
         Assert.Equal(before.SummaryMarkdown, after.SummaryMarkdown);
         Assert.Equal(before.CreatedAt, after.CreatedAt);
+        Assert.Equal(before.RequestBranch, after.RequestBranch);
+        Assert.Equal(before.CheckpointCommitId, after.CheckpointCommitId);
 
         var missing = await restartedClient.GetAsync($"/api/requests/{Guid.NewGuid()}/result");
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);

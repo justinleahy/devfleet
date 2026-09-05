@@ -1,4 +1,5 @@
 @namespace PiCommandCenter.Web.Components.Layout
+@using PiCommandCenter.Web.Components.Account
 @inherits LayoutComponentBase
 
 <FluentDesignTheme StorageName="theme" />
@@ -19,6 +20,15 @@
                 <FluentBadge Appearance="Appearance.Neutral">
                     Protocol v@(PiCommandCenter.Contracts.ProtocolVersion.Current)
                 </FluentBadge>
+                <AuthorizeView>
+                    <Authorized>
+                        <div class="user-block">
+                            <span class="user-label">Signed in</span>
+                            <span class="user-name">@context.User.Identity?.Name</span>
+                        </div>
+                        <LogoutForm />
+                    </Authorized>
+                </AuthorizeView>
             </FluentStack>
         </FluentHeader>
 

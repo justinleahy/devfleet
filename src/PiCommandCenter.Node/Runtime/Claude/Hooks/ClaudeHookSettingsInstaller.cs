@@ -1,3 +1,5 @@
+using PiCommandCenter.Node.Security;
+
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -44,6 +46,8 @@ public sealed class ClaudeHookSettingsInstaller
         _server.Register(context);
 
         var sessionDir = Path.Combine(_root, Sanitize(context.SessionId));
+        CanonicalPrivatePath.EnsureOutsideRepository(sessionDir, context.RepositoryRoot);
+
         NodeOptionsPostConfigure.CreatePrivateDirectory(sessionDir);
         RestrictOwnerOnly(sessionDir, executable: true);
 
@@ -106,6 +110,19 @@ public sealed class ClaudeHookSettingsInstaller
                     new Dictionary<string, object?>
                     {
                         ["matcher"] = "Edit|Write",
+                        ["hooks"] = new object[]
+                        {
+                            new Dictionary<string, object?>
+                            {
+                                ["type"] = "command",
+                                ["command"] = preCommand,
+                                ["timeout"] = 5000,
+                            },
+                        },
+                    },
+                    new Dictionary<string, object?>
+                    {
+                        ["matcher"] = "Read|Glob|Grep",
                         ["hooks"] = new object[]
                         {
                             new Dictionary<string, object?>

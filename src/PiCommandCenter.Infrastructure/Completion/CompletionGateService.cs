@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+
 using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Requests;
@@ -7,12 +10,19 @@ using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Reservations;
 using PiCommandCenter.Domain.Sessions;
 using PiCommandCenter.Infrastructure.Persistence;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Infrastructure.Reservations;
 
 namespace PiCommandCenter.Infrastructure.Completion;
 
-public sealed class CompletionGateService(TimeProvider clock, ControlPlaneDbContext db) : ICompletionGateService
+public sealed class CompletionGateService(
+    TimeProvider clock,
+    ControlPlaneDbContext db,
+    IProjectionNotifier notifier,
+    ILogger<CompletionGateService>? logger = null) : ICompletionGateService
 {
+    private readonly ILogger _logger = logger ?? NullLogger<CompletionGateService>.Instance;
+
     public async Task<CompletionGateDecision> EvaluateAsync(
         ProjectId projectId,
         WorkRequestId requestId,
@@ -165,8 +175,19 @@ public sealed class CompletionGateService(TimeProvider clock, ControlPlaneDbCont
                 ChangedFilesJson = domainResult.ChangedFilesJson,
                 ReviewFindingsJson = domainResult.ReviewFindingsJson,
                 VerificationSummaryJson = domainResult.VerificationSummaryJson,
+                RequestBranch = BlankToNull(evidence.RequestBranch),
+                CheckpointCommitId = BlankToNull(evidence.CheckpointCommitId),
                 CreatedAtUtcTicks = domainResult.CreatedAt.UtcTicks,
             });
+        }
+
+        var overridden = findings.Count(f => f.UserOverridden);
+        if (overridden > 0)
+        {
+            _logger.LogInformation(
+                "AUDIT completion-override request={RequestId} findings={Count}",
+                requestId.Value,
+                overridden);
         }
 
         request.Complete(now);
@@ -176,6 +197,8 @@ public sealed class CompletionGateService(TimeProvider clock, ControlPlaneDbCont
             .AsNoTracking()
             .SingleAsync(r => r.RequestId == requestId.Value, cancellationToken)
             .ConfigureAwait(false);
+
+        notifier.Publish(ProjectionChange.Request(projectId.Value, requestId.Value));
 
         return new CompletionGateDecision(true, [], ToDto(persisted));
     }
@@ -198,7 +221,12 @@ public sealed class CompletionGateService(TimeProvider clock, ControlPlaneDbCont
         CompletionJson.DeserializeFiles(row.ChangedFilesJson),
         CompletionJson.DeserializeFindings(row.ReviewFindingsJson),
         CompletionJson.DeserializeSummary(row.VerificationSummaryJson),
-        new DateTimeOffset(row.CreatedAtUtcTicks, TimeSpan.Zero));
+        new DateTimeOffset(row.CreatedAtUtcTicks, TimeSpan.Zero),
+        row.RequestBranch,
+        row.CheckpointCommitId);
+
+    private static string? BlankToNull(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static bool IsPlanEvent(SessionEvent e)
     {

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Mail;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Mail;
@@ -12,7 +13,10 @@ namespace PiCommandCenter.Infrastructure.Mail;
 /// and all recipients are active sessions of the command's project AND request, so mail can
 /// never cross a project or request boundary. Read and acknowledgement state is per recipient.
 /// </summary>
-public sealed class MailService(TimeProvider clock, ControlPlaneDbContext db) : IMessageService
+public sealed class MailService(
+    TimeProvider clock,
+    ControlPlaneDbContext db,
+    IProjectionNotifier notifier) : IMessageService
 {
     private const int MaxSubjectLength = 256;
     private const int MaxSessionIdLength = 128;
@@ -48,6 +52,7 @@ public sealed class MailService(TimeProvider clock, ControlPlaneDbContext db) : 
 
         db.Set<MailMessageRow>().Add(row);
         await db.SaveChangesAsync(cancellationToken);
+        notifier.Publish(ProjectionChange.Request(row.ProjectId, row.RequestId));
         return ToDto(row);
     }
 
@@ -114,6 +119,7 @@ public sealed class MailService(TimeProvider clock, ControlPlaneDbContext db) : 
 
         db.Set<MailMessageRow>().Add(reply);
         await db.SaveChangesAsync(cancellationToken);
+        notifier.Publish(ProjectionChange.Request(reply.ProjectId, reply.RequestId));
         return ToDto(reply);
     }
 
@@ -153,6 +159,9 @@ public sealed class MailService(TimeProvider clock, ControlPlaneDbContext db) : 
         var recipient = await ResolveAddresseeAsync(messageId, sessionId, cancellationToken);
         recipient.ReadAtUtcTicks ??= clock.GetUtcNow().UtcTicks;
         await db.SaveChangesAsync(cancellationToken);
+        notifier.Publish(ProjectionChange.Request(
+            recipient.Message.ProjectId,
+            recipient.Message.RequestId));
         return ToDto(recipient.Message);
     }
 
@@ -166,6 +175,9 @@ public sealed class MailService(TimeProvider clock, ControlPlaneDbContext db) : 
 
         recipient.AcknowledgedAtUtcTicks ??= clock.GetUtcNow().UtcTicks;
         await db.SaveChangesAsync(cancellationToken);
+        notifier.Publish(ProjectionChange.Request(
+            recipient.Message.ProjectId,
+            recipient.Message.RequestId));
         return ToDto(recipient.Message);
     }
 

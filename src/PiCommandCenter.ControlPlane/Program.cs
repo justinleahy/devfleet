@@ -1,15 +1,47 @@
+using System.Net;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.FluentUI.AspNetCore.Components;
 using PiCommandCenter.Application;
 using PiCommandCenter.ControlPlane.Api;
+using PiCommandCenter.ControlPlane.Security;
 using PiCommandCenter.Infrastructure;
 using PiCommandCenter.Infrastructure.Persistence;
+using PiCommandCenter.Infrastructure.Security;
 using PiCommandCenter.Web.Components;
 using PiCommandCenter.ControlPlane.Hubs;
 using PiCommandCenter.ControlPlane.Hosting;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseStaticWebAssets();
+
+if (ControlPlaneAuthSetup.IsSetupRequested(args))
+{
+    var force = args.Any(argument => string.Equals(argument, "--force", StringComparison.OrdinalIgnoreCase));
+    try
+    {
+        var result = ControlPlaneAuthSetup.Run(builder.Configuration, force);
+        Console.WriteLine($"Username: {result.Username}");
+        Console.WriteLine($"Password: {result.OneTimePassword}");
+        Console.WriteLine($"Password file: {result.PasswordFile}");
+        Console.WriteLine($"Node credential file: {result.CredentialFile}");
+        Console.WriteLine("Store the administrator password now; it is not kept in plaintext.");
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine(ex.Message);
+        Environment.ExitCode = 1;
+    }
+
+    return;
+}
+
+if (!builder.Environment.IsEnvironment("Testing")
+    && string.IsNullOrWhiteSpace(builder.Configuration["Kestrel:Endpoints:Http:Url"])
+    && string.IsNullOrWhiteSpace(builder.Configuration["urls"])
+    && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ASPNETCORE_URLS")))
+{
+    builder.WebHost.UseUrls(builder.Configuration["ControlPlane:BaseUrl"] ?? "http://127.0.0.1:5000");
+}
 
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
@@ -39,6 +71,7 @@ builder.Services.AddHealthChecks();
 // infrastructure layer from "Projects:ApprovedRoots" — nothing is approved unless it
 // is explicitly listed there; "~" entries resolve to the current user's home directory.
 builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.AddControlPlaneAuthentication(builder.Configuration, builder.Environment);
 builder.Services.AddAgentMail();
 
 var app = builder.Build();
@@ -53,6 +86,8 @@ try
     var dbContext = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
     await dbContext.Database.MigrateAsync(app.Lifetime.ApplicationStopping);
     logger.LogInformation("Control-plane database migrations applied");
+    await scope.ServiceProvider.GetRequiredService<AdminAccountSynchronizer>()
+        .SynchronizeAsync(app.Lifetime.ApplicationStopping);
 }
 catch (Exception ex)
 {
@@ -61,16 +96,31 @@ catch (Exception ex)
 }
 
 app.UseStaticFiles();
+app.UseAuthentication();
+app.UseAuthorization();
 app.UseAntiforgery();
 
-app.MapStaticAssets();
+app.MapStaticAssets().AllowAnonymous();
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
-app.MapHealthChecks("/health");
+app.MapHealthChecks("/health")
+    .AllowAnonymous()
+    .AddEndpointFilter(async (context, next) =>
+    {
+        var ip = context.HttpContext.Connection.RemoteIpAddress;
+        if (ip is not null && !IPAddress.IsLoopback(ip))
+        {
+            return Results.Unauthorized();
+        }
+
+        return await next(context).ConfigureAwait(false);
+    });
+
+app.MapAccountEndpoints();
 app.MapProjectsEndpoints();
 app.MapRequestsEndpoints();
-app.MapHub<NodeHub>("/nodeHub");
+app.MapHub<NodeHub>("/nodeHub").RequireAuthorization(AuthPolicies.Node);
 
 app.MapMailEndpoints();
 app.MapReservationsEndpoints();
