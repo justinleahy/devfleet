@@ -1,0 +1,43 @@
+.composer {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+}
+
+.composer h3 {
+    margin: 0;
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+    font-weight: 600;
+}
+
+.composer-lead {
+    margin: 0;
+    max-width: 64ch;
+    color: var(--neutral-foreground-hint);
+}
+
+.composer-note {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+}
+
+.panel-empty {
+    margin: 0;
+    max-width: 64ch;
+    color: var(--neutral-foreground-hint);
+}
+
+.mono {
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-size: var(--type-ramp-minus-1-font-size);
+    overflow-wrap: anywhere;
+}
+
+.composer ::deep .field {
+    width: 100%;
+}
+
+.composer ::deep .field-wide {
+    display: block;
+}

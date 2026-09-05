@@ -1,0 +1,262 @@
+@namespace PiCommandCenter.Web.Components.Coordination
+@using PiCommandCenter.Application.Reservations
+@using PiCommandCenter.Domain.Reservations
+@using System.Net.Http.Json
+@inject IHttpClientFactory HttpClientFactory
+
+@*
+    One reservation lease group (SPEC §17.5, §31.5): owner, fencing token, state, scopes, and the
+    expiration countdown, plus the recovery and stale-deadline warnings an operator must see
+    before touching a force release.
+*@
+
+<article class="lease @StateClass()">
+    <header class="lease-head">
+        <h3>@OwnerLabel</h3>
+        <div class="badge-row">
+            <FluentBadge Appearance="@(State == ReservationLeaseState.Active ? Appearance.Accent : Appearance.Neutral)">
+                @Lease.StateName
+            </FluentBadge>
+            <FluentBadge Appearance="Appearance.Neutral">fencing token @Lease.FencingToken</FluentBadge>
+            <FluentBadge Appearance="Appearance.Neutral">
+                @Lease.Scopes.Count scope@(Lease.Scopes.Count == 1 ? string.Empty : "s")
+            </FluentBadge>
+        </div>
+    </header>
+
+    @if (State == ReservationLeaseState.RecoveryRequired)
+    {
+        <FluentMessageBar Intent="MessageIntent.Warning"
+                          Title="Expired ownership under recovery inspection"
+                          AllowDismiss="false">
+            These scopes stay blocked until the node confirms the owning process stopped, or a human
+            force-releases the lease with a reason and a repository status snapshot.
+        </FluentMessageBar>
+    }
+    else if (State == ReservationLeaseState.Active && Lease.ExpiresAt <= Now)
+    {
+        <FluentMessageBar Intent="MessageIntent.Warning"
+                          Title="Lease deadline passed without renewal"
+                          AllowDismiss="false">
+            The authority must mark this lease recovery-required before any covered scope can be
+            granted again; the former owner's process may still be writing.
+        </FluentMessageBar>
+    }
+
+    <dl class="facts">
+        <dt>Lease id</dt>
+        <dd class="mono">@Lease.LeaseId</dd>
+        <dt>Owner session</dt>
+        <dd class="mono">@Lease.OwnerSessionId</dd>
+        <dt>Reason</dt>
+        <dd>@(string.IsNullOrWhiteSpace(Lease.Reason) ? "none recorded" : Lease.Reason)</dd>
+        <dt>Acquired</dt>
+        <dd>
+            @Lease.AcquiredAt.ToString("u")
+            <span class="hint">(@TimeText.Relative(Lease.AcquiredAt, Now))</span>
+        </dd>
+        <dt>Expires</dt>
+        <dd>
+            @Lease.ExpiresAt.ToString("u")
+            <span class="@(Lease.ExpiresAt <= Now ? "lease-overdue" : "hint")">
+                (@TimeText.Deadline(Lease.ExpiresAt, Now))
+            </span>
+        </dd>
+        @if (Lease.ReleasedAt is { } released)
+        {
+            <dt>Released</dt>
+            <dd>
+                @released.ToString("u")
+                <span class="hint">(@TimeText.Relative(released, Now))</span>
+            </dd>
+        }
+    </dl>
+
+    <ul class="scope-list">
+        @foreach (var scope in Lease.Scopes)
+        {
+            <li class="scope">
+                <span class="scope-kind">@scope.KindName</span>
+                <span class="scope-path mono">@scope.Path</span>
+            </li>
+        }
+    </ul>
+
+    @if (State == ReservationLeaseState.RecoveryRequired)
+    {
+        <section class="force-release" aria-labelledby="@ForceReleaseHeadingId">
+            <h4 id="@ForceReleaseHeadingId">Force release (human only)</h4>
+            <p class="force-release-lead">
+                Releasing this lease group issues a fresh fencing token, so any surviving process of
+                the former owner fails its next mutation authorization. Only do this once you know
+                the owning process is gone.
+            </p>
+
+            @if (_forceError is not null)
+            {
+                <FluentMessageBar Intent="MessageIntent.Error"
+                                  Title="Force release was rejected"
+                                  AllowDismiss="false">
+                    @_forceError
+                </FluentMessageBar>
+            }
+
+            @if (_forceResult is not null)
+            {
+                <div role="status">
+                    <FluentMessageBar Intent="MessageIntent.Success" AllowDismiss="false">
+                        @_forceResult
+                    </FluentMessageBar>
+                </div>
+            }
+
+            <FluentTextField @bind-Value="_reason"
+                             Label="Reason (recorded in the audit trail)"
+                             Required="true"
+                             Class="field field-wide" />
+
+            <FluentTextArea @bind-Value="_snapshot"
+                            Label="Repository status snapshot"
+                            Required="true"
+                            Rows="3"
+                            Placeholder="git status --porcelain output at the time of the release"
+                            Class="field field-wide" />
+
+            <FluentCheckbox @bind-Value="_confirmed"
+                            Label="I confirm this force release and its fencing-token increment" />
+
+            <FluentButton Appearance="Appearance.Accent" OnClick="ForceReleaseAsync" Loading="@_forcing">
+                Force release lease
+            </FluentButton>
+        </section>
+    }
+</article>
+
+@code {
+    private string _reason = string.Empty;
+    private string _snapshot = string.Empty;
+    private bool _confirmed;
+    private bool _forcing;
+    private string? _forceError;
+    private string? _forceResult;
+
+    [Parameter]
+    [EditorRequired]
+    public ReservationLeaseDto Lease { get; set; } = default!;
+
+    /// <summary>Owner label resolved from the session projection by the page.</summary>
+    [Parameter]
+    [EditorRequired]
+    public string OwnerLabel { get; set; } = default!;
+
+    [Parameter]
+    public DateTimeOffset Now { get; set; }
+
+    /// <summary>Raised after a successful force release so the page can reload the lease list.</summary>
+    [Parameter]
+    public EventCallback OnForceReleased { get; set; }
+
+    private string ForceReleaseHeadingId => $"force-release-{Lease.LeaseId:N}";
+
+    /// <summary>
+    /// Human-only force release (SPEC §17.10). Only offered for recovery-required leases: an
+    /// active lease is released by its owner or transferred, never forced.
+    /// </summary>
+    private async Task ForceReleaseAsync()
+    {
+        if (_forcing || State != ReservationLeaseState.RecoveryRequired)
+        {
+            return;
+        }
+
+        _forceResult = null;
+        _forceError = true switch
+        {
+            _ when string.IsNullOrWhiteSpace(_reason) => "A reason is required for the audit trail.",
+            _ when string.IsNullOrWhiteSpace(_snapshot) => "A repository status snapshot is required for the audit trail.",
+            _ when !_confirmed => "Tick the confirmation box: force release is destructive.",
+            _ => null,
+        };
+
+        if (_forceError is not null)
+        {
+            return;
+        }
+
+        _forcing = true;
+        try
+        {
+            var client = HttpClientFactory.CreateClient("PiCommandCenter.ControlPlane");
+            var response = await client.PostAsJsonAsync(
+                $"/api/reservations/{Lease.LeaseId}/force-release",
+                new ForceReleaseBody(
+                    Lease.ProjectId,
+                    _reason.Trim(),
+                    _snapshot.Trim(),
+                    RequestedBy: "human",
+                    Confirm: true),
+                CancellationToken.None);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var released = await response.Content.ReadFromJsonAsync<ReservationLeaseDto>(CancellationToken.None);
+                _confirmed = false;
+                _reason = string.Empty;
+                _snapshot = string.Empty;
+                _forceResult = released is null
+                    ? $"Lease {Lease.LeaseId} was force-released."
+                    : $"Lease {released.LeaseId} is now {released.StateName} at fencing token {released.FencingToken}.";
+                await OnForceReleased.InvokeAsync();
+                return;
+            }
+
+            var problem = await ReadProblemAsync(response);
+            _forceError = problem ?? $"The control plane answered {(int)response.StatusCode} {response.ReasonPhrase}.";
+        }
+        catch (Exception ex)
+        {
+            _forceError = ex.Message;
+        }
+        finally
+        {
+            _forcing = false;
+        }
+    }
+
+    private static async Task<string?> ReadProblemAsync(HttpResponseMessage response)
+    {
+        try
+        {
+            var problem = await response.Content.ReadFromJsonAsync<ProblemBody>(CancellationToken.None);
+            if (problem is null)
+            {
+                return null;
+            }
+
+            return string.IsNullOrWhiteSpace(problem.Detail) ? problem.Title : problem.Detail;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Mirrors the control plane's <c>ForceReleaseRequest</c> body.</summary>
+    private sealed record ForceReleaseBody(
+        Guid ProjectId,
+        string Reason,
+        string RepositoryStatusSnapshot,
+        string? RequestedBy,
+        bool Confirm);
+
+    private sealed record ProblemBody(string? Title, string? Detail);
+
+    private ReservationLeaseState State => (ReservationLeaseState)Lease.State;
+
+    private string StateClass() => State switch
+    {
+        ReservationLeaseState.RecoveryRequired => "is-recovery",
+        ReservationLeaseState.Released => "is-released",
+        _ => Lease.ExpiresAt <= Now ? "is-overdue" : "is-active",
+    };
+}

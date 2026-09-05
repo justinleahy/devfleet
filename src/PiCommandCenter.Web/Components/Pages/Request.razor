@@ -2,17 +2,24 @@
 @namespace PiCommandCenter.Web.Components.Pages
 @rendermode InteractiveServer
 @using PiCommandCenter.Application
+@using PiCommandCenter.Application.Mail
 @using PiCommandCenter.Application.Projects
 @using PiCommandCenter.Application.Requests
+@using PiCommandCenter.Application.Reservations
 @using PiCommandCenter.Application.Sessions
 @using PiCommandCenter.Domain
 @using PiCommandCenter.Domain.Requests
+@using PiCommandCenter.Domain.Reservations
 @using PiCommandCenter.Domain.Sessions
+@using PiCommandCenter.Web.Components
+@using PiCommandCenter.Web.Components.Coordination
 @using PiCommandCenter.Web.Components.Sessions
 @implements IAsyncDisposable
 @inject IRequestQueue Queue
 @inject IProjectCatalog Catalog
 @inject IAgentSessionStore SessionStore
+@inject PiCommandCenter.Application.Mail.IMessageService Mail
+@inject IReservationService ReservationAuthority
 @inject IClock Clock
 
 <PageTitle>@(_request?.Title ?? "Request") &middot; Pi Command Center</PageTitle>
@@ -290,11 +297,162 @@ else
             }
         </section>
 
+        <section aria-labelledby="messages-heading">
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="12"
+                         Width="100%">
+                <h2 id="messages-heading">Messages</h2>
+                <FluentSpacer />
+                <span class="event-origin" role="status" aria-live="polite">
+                    @MessageSummary()
+                </span>
+            </FluentStack>
+
+            @if (_mailError is not null)
+            {
+                <FluentMessageBar Intent="MessageIntent.Error"
+                                  Title="Mail projection unavailable"
+                                  AllowDismiss="false">
+                    @_mailError
+                </FluentMessageBar>
+            }
+            else if (_threads.Count == 0)
+            {
+                <p class="panel-empty">
+                    No message is persisted for this request yet. Agent-to-agent coordination lands in
+                    the request thread <span class="mono">@PrimaryThreadId()</span>; the composer below
+                    writes the first human message into that same thread.
+                </p>
+            }
+            else
+            {
+                <div class="thread-stack">
+                    @foreach (var thread in _threads)
+                    {
+                        <FluentCard>
+                            <MessageThreadView ThreadId="thread.ThreadId"
+                                               Subject="thread.Subject"
+                                               Messages="thread.Messages"
+                                               IsPrimary="thread.IsPrimary"
+                                               Now="_snapshot"
+                                               SessionLabel="SessionLabel" />
+                        </FluentCard>
+                    }
+                </div>
+            }
+
+            <FluentCard>
+                <div class="panel">
+                    <GuidanceComposer ProjectId="request.ProjectId"
+                                      RequestId="request.Id"
+                                      ThreadId="@PrimaryThreadId()"
+                                      SubjectSeed="@GuidanceSubjectSeed(request)"
+                                      Targets="_guidanceTargets"
+                                      OnSent="ManualReloadAsync" />
+                </div>
+            </FluentCard>
+        </section>
+
+        <section aria-labelledby="reservations-heading">
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="12"
+                         Width="100%">
+                <h2 id="reservations-heading">Reservations</h2>
+                <FluentSpacer />
+                <span class="event-origin" role="status" aria-live="polite">
+                    @ReservationSummary()
+                </span>
+            </FluentStack>
+
+            @if (_reservationError is not null)
+            {
+                <FluentMessageBar Intent="MessageIntent.Error"
+                                  Title="Reservation authority unavailable"
+                                  AllowDismiss="false">
+                    @_reservationError
+                </FluentMessageBar>
+            }
+            else
+            {
+                @if (_recoveryLeaseCount > 0)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Warning"
+                                      Title="Recovery inspection outstanding"
+                                      AllowDismiss="false">
+                        @_recoveryLeaseCount lease group(s) of this request are in
+                        <span class="mono">recovery-required</span>. Their scopes cannot be re-granted
+                        until the node confirms the owning process stopped or a human force-releases.
+                    </FluentMessageBar>
+                }
+
+                @if (_leases.Count == 0)
+                {
+                    <p class="panel-empty">
+                        No lease group is held for this request. Agents acquire leases before any
+                        mutation, so an idle request holds none;
+                        @(_projectLeaseCount == 0
+                            ? "the project holds none either."
+                            : $"{_projectLeaseCount} lease group(s) are held elsewhere in this project.")
+                    </p>
+                }
+                else
+                {
+                    <div class="lease-stack">
+                        @foreach (var lease in _leases)
+                        {
+                            <FluentCard>
+                                <ReservationLeaseCard Lease="lease"
+                                                      OwnerLabel="@SessionLabel(lease.OwnerSessionId)"
+                                                      Now="_snapshot"
+                                                      OnForceReleased="ManualReloadAsync" />
+                            </FluentCard>
+                        }
+                    </div>
+                }
+
+                @if (_reservationEvents.Count > 0)
+                {
+                    <FluentCard>
+                        <div class="panel">
+                            <h3>Handoff and recovery activity</h3>
+                            <p class="panel-lead">
+                                Persisted <span class="mono">reservation.*</span> events for this
+                                request, newest first. Handoff, expiry, recovery, and force-release
+                                transitions are audited here.
+                            </p>
+                            <ul class="audit-list">
+                                @foreach (var evt in _reservationEvents)
+                                {
+                                    <li class="@(IsReservationWarning(evt.Type) ? "audit-warning" : null)">
+                                        <span class="event-type">@evt.Type</span>
+                                        <span class="event-origin">
+                                            @(evt.SessionId is null ? "request-scoped" : SessionLabel(evt.SessionId))
+                                            &middot; @evt.OccurredAt.ToString("u")
+                                            &middot; @TimeText.Relative(evt.OccurredAt, _snapshot)
+                                        </span>
+                                        @if (HasPayload(evt.PayloadJson))
+                                        {
+                                            <details>
+                                                <summary>payload</summary>
+                                                <pre class="event-payload">@Payload(evt.PayloadJson)</pre>
+                                            </details>
+                                        }
+                                    </li>
+                                }
+                            </ul>
+                        </div>
+                    </FluentCard>
+                }
+            }
+        </section>
+
         <section aria-labelledby="detail-heading">
-            <h2 id="detail-heading">Plan, messages, reservations, diff</h2>
+            <h2 id="detail-heading">Plan and diff</h2>
             <p class="panel-lead">
-                These views are projected from event families that have no read contract yet. Counts
-                below are the persisted events matching each family, so nothing is inferred.
+                These two views are projected from event families that have no read contract yet.
+                Counts below are the persisted events matching each family, so nothing is inferred.
             </p>
             <div class="pending-grid">
                 @foreach (var region in DetailRegions())
@@ -317,6 +475,8 @@ else
     private const int TimelineCap = 200;
     private const int RefreshSeconds = 3;
     private const int PayloadCap = 2000;
+    private const int ReservationAuditCap = 20;
+    private const string AllAgentsTarget = "*";
 
     [Parameter]
     public Guid RequestId { get; set; }
@@ -334,6 +494,16 @@ else
     private DateTimeOffset _snapshot;
     private string? _loadError;
     private string? _sessionError;
+    private readonly List<MessageThread> _threads = [];
+    private IReadOnlyList<GuidanceTarget> _guidanceTargets = Array.Empty<GuidanceTarget>();
+    private IReadOnlyList<ReservationLeaseDto> _leases = Array.Empty<ReservationLeaseDto>();
+    private IReadOnlyList<SessionEventDto> _reservationEvents = Array.Empty<SessionEventDto>();
+    private int _messageCount;
+    private int _unreadMessageCount;
+    private int _projectLeaseCount;
+    private int _recoveryLeaseCount;
+    private string? _mailError;
+    private string? _reservationError;
     private bool _loading = true;
     private bool _busy;
 
@@ -409,6 +579,8 @@ else
             _loadError = null;
             await LoadProjectAsync(_request.ProjectId);
             await LoadSessionsAsync(requestId);
+            await LoadMailAsync(_request);
+            await LoadReservationsAsync(_request);
         }
         catch (RequestNotFoundException)
         {
@@ -456,6 +628,219 @@ else
 
         BuildTree();
     }
+
+    private async Task LoadMailAsync(WorkRequestDto request)
+    {
+        var projectId = new ProjectId(request.ProjectId);
+        var primary = PrimaryThreadId();
+        _threads.Clear();
+        _messageCount = 0;
+        _unreadMessageCount = 0;
+
+        try
+        {
+            var threadIds = new List<string> { primary };
+            foreach (var threadId in DiscoveredThreadIds())
+            {
+                if (!threadIds.Contains(threadId, StringComparer.Ordinal))
+                {
+                    threadIds.Add(threadId);
+                }
+            }
+
+            foreach (var session in _sessions)
+            {
+                var unread = await Mail.GetUnreadAsync(projectId, session.Id, CancellationToken.None);
+                foreach (var message in unread)
+                {
+                    if (message.RequestId.Value == RequestId
+                        && !threadIds.Contains(message.ThreadId, StringComparer.Ordinal))
+                    {
+                        threadIds.Add(message.ThreadId);
+                    }
+                }
+            }
+
+            foreach (var threadId in threadIds)
+            {
+                var messages = await Mail.GetThreadAsync(projectId, threadId, CancellationToken.None);
+                var scoped = new List<AgentMessageDto>(messages.Count);
+                foreach (var message in messages)
+                {
+                    if (message.RequestId.Value != RequestId)
+                    {
+                        continue;
+                    }
+
+                    scoped.Add(message);
+                    _messageCount++;
+                    foreach (var recipient in message.Recipients)
+                    {
+                        if (recipient.ReadAtUtc is null)
+                        {
+                            _unreadMessageCount++;
+                            break;
+                        }
+                    }
+                }
+
+                if (scoped.Count > 0)
+                {
+                    _threads.Add(new MessageThread(
+                        threadId,
+                        scoped[0].Subject,
+                        string.Equals(threadId, primary, StringComparison.Ordinal),
+                        scoped));
+                }
+            }
+
+            _mailError = null;
+        }
+        catch (Exception ex)
+        {
+            _mailError = ex.Message;
+            _threads.Clear();
+            _messageCount = 0;
+            _unreadMessageCount = 0;
+        }
+
+        BuildGuidanceTargets();
+    }
+
+    /// <summary>
+    /// Thread ids proven by persisted <c>mail.*</c> events, so threads whose messages are already
+    /// read are still listed. Unparsable payloads are skipped rather than guessed at.
+    /// </summary>
+    private IEnumerable<string> DiscoveredThreadIds()
+    {
+        foreach (var evt in _events)
+        {
+            if (!evt.Type.StartsWith("mail.", StringComparison.Ordinal) || !HasPayload(evt.PayloadJson))
+            {
+                continue;
+            }
+
+            string? threadId = null;
+            try
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(evt.PayloadJson);
+                if (document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                    && document.RootElement.TryGetProperty("threadId", out var value)
+                    && value.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    threadId = value.GetString();
+                }
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                threadId = null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(threadId))
+            {
+                yield return threadId;
+            }
+        }
+    }
+
+    private async Task LoadReservationsAsync(WorkRequestDto request)
+    {
+        try
+        {
+            var leases = await ReservationAuthority.ListAsync(
+                request.ProjectId,
+                includeReleased: false,
+                CancellationToken.None);
+
+            var scoped = new List<ReservationLeaseDto>();
+            var recovery = 0;
+            foreach (var lease in leases)
+            {
+                if (lease.RequestId != RequestId)
+                {
+                    continue;
+                }
+
+                scoped.Add(lease);
+                if ((ReservationLeaseState)lease.State == ReservationLeaseState.RecoveryRequired)
+                {
+                    recovery++;
+                }
+            }
+
+            scoped.Sort((left, right) => left.AcquiredAt.CompareTo(right.AcquiredAt));
+            _leases = scoped;
+            _projectLeaseCount = leases.Count - scoped.Count;
+            _recoveryLeaseCount = recovery;
+            _reservationError = null;
+        }
+        catch (Exception ex)
+        {
+            _reservationError = ex.Message;
+            _leases = Array.Empty<ReservationLeaseDto>();
+            _projectLeaseCount = 0;
+            _recoveryLeaseCount = 0;
+        }
+
+        _reservationEvents = ReservationEvents();
+    }
+
+    private IReadOnlyList<SessionEventDto> ReservationEvents()
+    {
+        var audit = new List<SessionEventDto>();
+        for (var index = _events.Count - 1; index >= 0 && audit.Count < ReservationAuditCap; index--)
+        {
+            if (_events[index].Type.StartsWith("reservation.", StringComparison.Ordinal))
+            {
+                audit.Add(_events[index]);
+            }
+        }
+
+        return audit;
+    }
+
+    private void BuildGuidanceTargets()
+    {
+        var active = new List<string>();
+        var targets = new List<GuidanceTarget>();
+
+        if (_root is not null && IsAddressable(_root))
+        {
+            targets.Add(new GuidanceTarget(
+                _root.Id,
+                $"Root \u00b7 {_root.AgentName} ({_root.Role})",
+                new[] { _root.Id }));
+        }
+
+        foreach (var session in _sessions)
+        {
+            if (!IsAddressable(session))
+            {
+                continue;
+            }
+
+            active.Add(session.Id);
+            if (_root is not null && string.Equals(session.Id, _root.Id, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            targets.Add(new GuidanceTarget(
+                session.Id,
+                $"{session.Role} \u00b7 {session.AgentName}",
+                new[] { session.Id }));
+        }
+
+        if (active.Count > 1)
+        {
+            targets.Add(new GuidanceTarget(AllAgentsTarget, $"All active agents ({active.Count})", active));
+        }
+
+        _guidanceTargets = targets;
+    }
+
+    private static bool IsAddressable(AgentSessionDto session) =>
+        session.EndedAt is null && session.Liveness != AgentLiveness.Exited;
 
     private void BuildTree()
     {
@@ -539,39 +924,57 @@ else
     private static bool IsFailed(AgentWorkState state) =>
         state is AgentWorkState.Failed or AgentWorkState.Cancelled or AgentWorkState.Blocked;
 
+    private string PrimaryThreadId() => RequestId.ToString();
+
+    private static string GuidanceSubjectSeed(WorkRequestDto request) =>
+        $"[{request.Title}] Human guidance";
+
+    private string MessageSummary()
+    {
+        if (_mailError is not null)
+        {
+            return "mail projection unavailable";
+        }
+
+        return $"{_messageCount} message{(_messageCount == 1 ? string.Empty : "s")} in "
+            + $"{_threads.Count} thread{(_threads.Count == 1 ? string.Empty : "s")} \u00b7 "
+            + $"{_unreadMessageCount} unread \u00b7 refreshed {TimeText.Relative(_snapshot, Clock.UtcNow)}";
+    }
+
+    private string ReservationSummary()
+    {
+        if (_reservationError is not null)
+        {
+            return "reservation authority unavailable";
+        }
+
+        return $"{_leases.Count} lease group{(_leases.Count == 1 ? string.Empty : "s")} \u00b7 "
+            + $"{_recoveryLeaseCount} awaiting recovery \u00b7 "
+            + $"refreshed {TimeText.Relative(_snapshot, Clock.UtcNow)}";
+    }
+
+    private static bool IsReservationWarning(string type) => type
+        is "reservation.denied"
+        or "reservation.expired"
+        or "reservation.recovery_required"
+        or "reservation.force_released"
+        or "reservation.handoff_requested";
+
+    /// <summary>One mail thread of this request as rendered by <c>MessageThreadView</c>.</summary>
+    private sealed record MessageThread(
+        string ThreadId,
+        string Subject,
+        bool IsPrimary,
+        IReadOnlyList<AgentMessageDto> Messages);
+
     private readonly record struct DetailRegion(string Heading, string Prefix, string Note);
 
     private static DetailRegion[] DetailRegions() =>
     [
         new("Structured plan", "plan", "The plan view renders once create_plan and revise_plan expose a read contract."),
-        new("Messages", "message", "Agent inbox and guidance messages render once the message read contract lands."),
-        new("Reservations", "reservation", "Reservation leases render once the reservation read contract lands."),
         new("Diff summary", "diff", "Per-request diff summaries render once inspect_project_diff results are projected."),
     ];
 
-    private static string Relative(DateTimeOffset instant, DateTimeOffset now)
-    {
-        var delta = now - instant;
-        if (delta < TimeSpan.Zero)
-        {
-            delta = TimeSpan.Zero;
-        }
-
-        if (delta.TotalSeconds < 60)
-        {
-            return $"{(int)delta.TotalSeconds}s ago";
-        }
-
-        if (delta.TotalMinutes < 60)
-        {
-            return $"{(int)delta.TotalMinutes}m ago";
-        }
-
-        if (delta.TotalHours < 24)
-        {
-            return $"{(int)delta.TotalHours}h ago";
-        }
-
-        return $"{(int)delta.TotalDays}d ago";
-    }
+    private static string Relative(DateTimeOffset instant, DateTimeOffset now) =>
+        TimeText.Relative(instant, now);
 }

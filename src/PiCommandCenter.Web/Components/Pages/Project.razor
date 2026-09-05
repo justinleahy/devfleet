@@ -10,11 +10,14 @@
 @using PiCommandCenter.Domain.Nodes
 @using PiCommandCenter.Domain.Requests
 @using PiCommandCenter.Domain.Sessions
+@using PiCommandCenter.Application.Reservations
+@using PiCommandCenter.Web.Components.Coordination
 @inject IProjectCatalog Catalog
 @inject IRequestQueue Queue
 @inject INodeRegistry NodeRegistry
 @inject IAgentSessionStore SessionStore
 @inject IClock Clock
+@inject IReservationService ReservationAuthority
 @inject IToastService ToastService
 
 <PageTitle>@(_project?.DisplayName ?? "Project") &middot; Pi Command Center</PageTitle>
@@ -264,10 +267,49 @@ else
         }
 
         <section aria-labelledby="reservations-heading">
-            <h2 id="reservations-heading">Active reservations</h2>
-            <p class="panel-empty">
-                0 reservations. Leases are issued when sessions start, which is not wired yet.
-            </p>
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="12"
+                         Width="100%">
+                <h2 id="reservations-heading">Active reservations</h2>
+                <FluentSpacer />
+                <span class="node-seen" role="status" aria-live="polite">
+                    @(_reservationError is not null
+                        ? "reservation authority unavailable"
+                        : $"{_leases.Count} lease group(s) held")
+                </span>
+            </FluentStack>
+            @if (_reservationError is not null)
+            {
+                <FluentMessageBar Intent="MessageIntent.Error"
+                                  Title="Could not load reservations"
+                                  AllowDismiss="false">
+                    @_reservationError
+                </FluentMessageBar>
+            }
+            else if (_leases.Count == 0)
+            {
+                <p class="panel-empty">
+                    No lease group is held in this project. Agents acquire leases only while they
+                    mutate files, so an idle project holds none.
+                </p>
+            }
+            else
+            {
+                <ul class="request-list">
+                    @foreach (var lease in _leases)
+                    {
+                        <li>
+                            <FluentCard>
+                                <ReservationLeaseCard Lease="lease"
+                                                      OwnerLabel="@OwnerLabel(lease.OwnerSessionId)"
+                                                      Now="_snapshot"
+                                                      OnForceReleased="ReloadAsync" />
+                            </FluentCard>
+                        </li>
+                    }
+                </ul>
+            }
         </section>
     </FluentStack>
 }
@@ -302,6 +344,8 @@ else
     private string? _sessionError;
     private int _activeSessions;
     private int _trackedSessions;
+    private IReadOnlyList<ReservationLeaseDto> _leases = Array.Empty<ReservationLeaseDto>();
+    private string? _reservationError;
 
     protected override Task OnParametersSetAsync() => ReloadAsync();
 
@@ -342,6 +386,7 @@ else
             Partition(requests);
             await LoadSessionsAsync(requests);
             await LoadNodeAsync(_project.NodeId);
+            await LoadReservationsAsync();
         }
         catch (ProjectNotFoundException)
         {
@@ -369,6 +414,40 @@ else
             _node = null;
             _nodeError = ex.Message;
         }
+    }
+
+    private async Task LoadReservationsAsync()
+    {
+        try
+        {
+            _leases = await ReservationAuthority.ListAsync(
+                ProjectId,
+                includeReleased: false,
+                CancellationToken.None);
+            _reservationError = null;
+        }
+        catch (Exception ex)
+        {
+            _leases = Array.Empty<ReservationLeaseDto>();
+            _reservationError = ex.Message;
+        }
+    }
+
+    /// <summary>Names the owning session from the loaded projections, falling back to its id.</summary>
+    private string OwnerLabel(string sessionId)
+    {
+        foreach (var sessions in _sessionsByRequest.Values)
+        {
+            foreach (var session in sessions)
+            {
+                if (string.Equals(session.Id, sessionId, StringComparison.Ordinal))
+                {
+                    return $"{session.AgentName} ({session.Role})";
+                }
+            }
+        }
+
+        return sessionId;
     }
 
     private void ResetSessions()

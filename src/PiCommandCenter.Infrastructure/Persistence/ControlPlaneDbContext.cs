@@ -28,6 +28,13 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
     public DbSet<SessionEvent> SessionEvents => Set<SessionEvent>();
     public DbSet<AgentSessionRow> AgentSessions => Set<AgentSessionRow>();
 
+    public DbSet<PiCommandCenter.Infrastructure.Reservations.ReservationLeaseRow> ReservationLeases => Set<PiCommandCenter.Infrastructure.Reservations.ReservationLeaseRow>();
+    public DbSet<PiCommandCenter.Infrastructure.Reservations.ReservationScopeRow> ReservationScopes => Set<PiCommandCenter.Infrastructure.Reservations.ReservationScopeRow>();
+
+    public DbSet<PiCommandCenter.Infrastructure.Reservations.ProjectFencingTokenRow> ProjectFencingTokens => Set<PiCommandCenter.Infrastructure.Reservations.ProjectFencingTokenRow>();
+
+    public DbSet<PiCommandCenter.Infrastructure.Reservations.ReservationAuditFactRow> ReservationAuditFacts => Set<PiCommandCenter.Infrastructure.Reservations.ReservationAuditFactRow>();
+
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
         base.ConfigureConventions(configurationBuilder);
@@ -41,6 +48,9 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
     {
         base.OnModelCreating(builder);
 
+        // Mail, reservations, and other feature mappings live in their own
+        // IEntityTypeConfiguration classes (Infrastructure/Mail, Infrastructure/Reservations).
+        builder.ApplyConfigurationsFromAssembly(typeof(ControlPlaneDbContext).Assembly);
         builder.Entity<Project>(project =>
         {
             project.ToTable("Projects");

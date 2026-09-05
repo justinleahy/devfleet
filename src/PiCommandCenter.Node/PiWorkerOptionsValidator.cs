@@ -39,6 +39,21 @@ public sealed class PiWorkerOptionsValidator : IValidateOptions<PiWorkerOptions>
             failures.Add($"'{nameof(options.StartTimeoutSeconds)}' must be positive.");
         }
 
+        if (options.MaxChildAgentsPerRequest <= 0)
+        {
+            failures.Add($"'{nameof(options.MaxChildAgentsPerRequest)}' must be positive.");
+        }
+
+        if (options.AllowedChildRoles.Length == 0)
+        {
+            failures.Add($"'{nameof(options.AllowedChildRoles)}' must contain at least one role.");
+        }
+
+        if (options.AllowedRuntimeProfiles.Length == 0)
+        {
+            failures.Add($"'{nameof(options.AllowedRuntimeProfiles)}' must contain at least one profile.");
+        }
+
         if (options.RequestTimeoutSeconds <= 0)
         {
             failures.Add($"'{nameof(options.RequestTimeoutSeconds)}' must be positive.");

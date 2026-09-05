@@ -1,0 +1,200 @@
+@namespace PiCommandCenter.Web.Components.Coordination
+@using PiCommandCenter.Application.Mail
+@using PiCommandCenter.Domain.Mail
+
+@*
+    One mail thread of a request (SPEC §16.2, §31.3). Messages render in creation order with the
+    per-recipient delivery state the store actually holds: unread, read, or acknowledged. Nothing
+    is inferred — a message with no recipient rows shows exactly that.
+*@
+
+<article class="thread">
+    <header class="thread-head">
+        <h3>@Subject</h3>
+        <div class="badge-row">
+            @if (IsPrimary)
+            {
+                <FluentBadge Appearance="Appearance.Accent">request thread</FluentBadge>
+            }
+            <FluentBadge Appearance="Appearance.Neutral">
+                @Messages.Count message@(Messages.Count == 1 ? string.Empty : "s")
+            </FluentBadge>
+            @if (_unread > 0)
+            {
+                <FluentBadge Appearance="Appearance.Accent">@_unread unread</FluentBadge>
+            }
+            @if (_pendingAck > 0)
+            {
+                <FluentBadge Appearance="Appearance.Accent">@_pendingAck awaiting acknowledgement</FluentBadge>
+            }
+        </div>
+        <span class="thread-id mono">@ThreadId</span>
+    </header>
+
+    <ol class="message-list">
+        @foreach (var message in Messages)
+        {
+            <li class="message @(IsUnread(message) ? "is-unread" : null) @(message.IsFromHuman ? "is-human" : null)">
+                <div class="message-head">
+                    <span class="message-sender">
+                        @(message.IsFromHuman ? "Human operator" : SessionLabel(message.SenderSessionId!))
+                    </span>
+                    @if (message.IsFromHuman)
+                    {
+                        <FluentBadge Appearance="Appearance.Accent">human guidance</FluentBadge>
+                    }
+                    @if (message.Importance == MessageImportance.High)
+                    {
+                        <FluentBadge Appearance="Appearance.Accent">high</FluentBadge>
+                    }
+                    @if (message.AcknowledgementRequired)
+                    {
+                        <FluentBadge Appearance="Appearance.Neutral">acknowledgement required</FluentBadge>
+                    }
+                    <span class="message-time">
+                        <span class="visually-hidden">Sent at</span>
+                        @message.CreatedAtUtc.ToString("u")
+                        <span class="hint">(@TimeText.Relative(message.CreatedAtUtc, Now))</span>
+                    </span>
+                </div>
+
+                @if (!string.Equals(message.Subject, Subject, StringComparison.Ordinal))
+                {
+                    <p class="message-subject">@message.Subject</p>
+                }
+
+                <p class="message-body">@message.BodyMarkdown</p>
+
+                <div class="message-foot">
+                    <span class="mono hint">@message.Id</span>
+                    @if (message.Recipients.Count == 0)
+                    {
+                        <span class="hint">no recipient rows persisted</span>
+                    }
+                    else
+                    {
+                        <ul class="recipient-list">
+                            @foreach (var recipient in message.Recipients)
+                            {
+                                <li class="recipient @RecipientClass(message, recipient)">
+                                    <span class="recipient-name">@SessionLabel(recipient.SessionId)</span>
+                                    <span class="recipient-state">@RecipientState(message, recipient)</span>
+                                </li>
+                            }
+                        </ul>
+                    }
+                </div>
+            </li>
+        }
+    </ol>
+</article>
+
+@code {
+    private int _unread;
+    private int _pendingAck;
+
+    [Parameter]
+    [EditorRequired]
+    public string ThreadId { get; set; } = default!;
+
+    [Parameter]
+    [EditorRequired]
+    public string Subject { get; set; } = default!;
+
+    [Parameter]
+    [EditorRequired]
+    public IReadOnlyList<AgentMessageDto> Messages { get; set; } = default!;
+
+    /// <summary>True for the request's primary thread.</summary>
+    [Parameter]
+    public bool IsPrimary { get; set; }
+
+    [Parameter]
+    public DateTimeOffset Now { get; set; }
+
+    /// <summary>Resolves a session id to an operator-facing label.</summary>
+    [Parameter]
+    [EditorRequired]
+    public Func<string, string> SessionLabel { get; set; } = default!;
+
+    protected override void OnParametersSet()
+    {
+        _unread = 0;
+        _pendingAck = 0;
+        foreach (var message in Messages)
+        {
+            if (IsUnread(message))
+            {
+                _unread++;
+            }
+
+            if (AwaitsAcknowledgement(message))
+            {
+                _pendingAck++;
+            }
+        }
+    }
+
+    private static bool IsUnread(AgentMessageDto message)
+    {
+        foreach (var recipient in message.Recipients)
+        {
+            if (recipient.ReadAtUtc is null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool AwaitsAcknowledgement(AgentMessageDto message)
+    {
+        if (!message.AcknowledgementRequired)
+        {
+            return false;
+        }
+
+        foreach (var recipient in message.Recipients)
+        {
+            if (recipient.AcknowledgedAtUtc is null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string RecipientClass(AgentMessageDto message, AgentMessageRecipientDto recipient)
+    {
+        if (recipient.AcknowledgedAtUtc is not null)
+        {
+            return "is-acknowledged";
+        }
+
+        if (recipient.ReadAtUtc is null)
+        {
+            return "is-unread";
+        }
+
+        return message.AcknowledgementRequired ? "is-pending-ack" : "is-read";
+    }
+
+    private string RecipientState(AgentMessageDto message, AgentMessageRecipientDto recipient)
+    {
+        if (recipient.AcknowledgedAtUtc is { } acknowledged)
+        {
+            return $"acknowledged {TimeText.Relative(acknowledged, Now)}";
+        }
+
+        if (recipient.ReadAtUtc is { } read)
+        {
+            return message.AcknowledgementRequired
+                ? $"read {TimeText.Relative(read, Now)} \u00b7 acknowledgement pending"
+                : $"read {TimeText.Relative(read, Now)}";
+        }
+
+        return message.AcknowledgementRequired ? "unread \u00b7 acknowledgement pending" : "unread";
+    }
+}

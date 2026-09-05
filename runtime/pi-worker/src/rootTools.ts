@@ -73,7 +73,7 @@ export type ToolRequest = (
   payload: Record<string, unknown>,
 ) => Promise<unknown>;
 
-function roundTripTool(
+export function roundTripTool(
   name: string,
   label: string,
   description: string,

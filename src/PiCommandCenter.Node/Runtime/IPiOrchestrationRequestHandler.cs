@@ -13,7 +13,8 @@ public sealed record PiOrchestrationContext(
     string ProjectId,
     string RequestId,
     string? ParentSessionId,
-    Func<string, IReadOnlyDictionary<string, object?>, CancellationToken, Task> EmitAsync);
+    Func<string, IReadOnlyDictionary<string, object?>, CancellationToken, Task> EmitAsync,
+    string? RepositoryRoot = null);
 
 /// <summary>Structured answer returned to the worker for one custom-tool request.</summary>
 public sealed record PiToolResponse

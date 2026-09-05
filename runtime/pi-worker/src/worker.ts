@@ -38,6 +38,12 @@ export interface WorkerOptions {
 interface StartedSession {
   session: PiSessionLike;
   normalizer: EventNormalizer;
+  /** Child worker mode for this session; root when false. */
+  isChild: boolean;
+  /** Parent session id reported in `session.registered` for children. */
+  parentSessionId: string | null;
+  /** Last `submit_child_result` payload, kept for the completion event. */
+  childResult: unknown;
 }
 
 function errorEnvelope(
@@ -173,12 +179,6 @@ export class PiWorker {
   }
 
   private async startSession(envelope: Envelope): Promise<void> {
-    if (this.started !== undefined) {
-      this.options.send(
-        errorEnvelope(envelope, "session already started", "SESSION_EXISTS"),
-      );
-      return;
-    }
     const payload = (envelope.payload ?? {}) as Record<string, unknown>;
     const cwd = typeof payload["cwd"] === "string" ? payload["cwd"] : process.cwd();
     const agentDir =
@@ -189,19 +189,34 @@ export class PiWorker {
       );
       return;
     }
+    const isChild = payload["mode"] === "child";
+    const parentSessionId =
+      typeof payload["parentSessionId"] === "string"
+        ? payload["parentSessionId"]
+        : null;
+    if (isChild && parentSessionId === null) {
+      this.options.send(
+        errorEnvelope(
+          envelope,
+          "child session.start requires parentSessionId",
+          "MISSING_FIELD",
+        ),
+      );
+      return;
+    }
     const config: RootSessionConfig = {
       sessionId: envelope.sessionId,
       cwd,
       agentDir,
-      model: typeof payload["model"] === "string" ? payload["model"] : undefined,
-      thinkingLevel:
-        typeof payload["thinkingLevel"] === "string"
-          ? payload["thinkingLevel"]
-          : undefined,
-      systemPrompt:
-        typeof payload["systemPrompt"] === "string"
-          ? payload["systemPrompt"]
-          : undefined,
+      ...(typeof payload["model"] === "string" ? { model: payload["model"] } : {}),
+      ...(typeof payload["thinkingLevel"] === "string"
+        ? { thinkingLevel: payload["thinkingLevel"] }
+        : {}),
+      ...(typeof payload["systemPrompt"] === "string"
+        ? { systemPrompt: payload["systemPrompt"] }
+        : {}),
+      ...(isChild ? { mode: "child" as const } : {}),
+      ...(isChild && parentSessionId !== null ? { parentSessionId } : {}),
     };
     const session = await this.options.factory.create(config);
     const normalizer = new EventNormalizer(
@@ -209,18 +224,67 @@ export class PiWorker {
       (frame) => this.options.send(frame.envelope),
       this.now,
     );
-    session.subscribe((event) => normalizer.handle(event));
-    this.started = { session, normalizer };
+    const started: StartedSession = {
+      session,
+      normalizer,
+      isChild,
+      parentSessionId,
+      childResult: undefined,
+    };
+    session.subscribe((event) => {
+      normalizer.handle(event);
+      this.observeChildEvent(started, event);
+    });
+    this.started = started;
     this.sessionId = envelope.sessionId;
     this.startHeartbeat(envelope.sessionId);
+    if (isChild) {
+      // Hierarchy event: children announce their parent immediately after
+      // registration so the node can build the agent tree.
+      normalizer.emitSessionEvent("session.registered", {
+        mode: "child",
+        parentSessionId,
+      });
+    }
     this.options.send(
       okEnvelope(envelope, {
         sdkSessionId: session.sessionId,
         sessionFile: session.sessionFile ?? null,
         agentDir,
         cwd,
+        mode: isChild ? "child" : "root",
       }),
     );
+  }
+
+  /**
+   * Track the child result lifecycle: capture the durable payload from
+   * `submit_child_result` tool completions and normalize terminal state into
+   * `session.completed` / `session.failed` events.
+   */
+  private observeChildEvent(started: StartedSession, event: unknown): void {
+    if (!started.isChild) {
+      return;
+    }
+    const record = (event ?? {}) as Record<string, unknown>;
+    const type = typeof record["type"] === "string" ? record["type"] : "";
+    if (type === "tool_execution_end" && record["toolName"] === "submit_child_result") {
+      started.childResult = record["response"] ?? null;
+      return;
+    }
+    if (type === "agent_end") {
+      const failed = record["isError"] === true;
+      started.normalizer.emitSessionEvent(
+        failed ? "session.failed" : "session.completed",
+        {
+          ...(failed
+            ? { error: boundedError(String(record["error"] ?? "child run failed")) }
+            : {}),
+          result: started.childResult ?? null,
+        },
+      );
+      started.childResult = undefined;
+    }
   }
 
   private async input(envelope: Envelope): Promise<void> {
@@ -251,6 +315,12 @@ export class PiWorker {
         type: "worker_error",
         message: boundedError(message),
       });
+      if (started.isChild) {
+        started.normalizer.emitSessionEvent("session.failed", {
+          error: boundedError(message),
+          result: null,
+        });
+      }
     });
     this.options.send(okEnvelope(envelope, { queued: "prompt" }));
   }

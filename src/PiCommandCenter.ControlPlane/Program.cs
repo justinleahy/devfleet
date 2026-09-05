@@ -39,6 +39,7 @@ builder.Services.AddHealthChecks();
 // infrastructure layer from "Projects:ApprovedRoots" — nothing is approved unless it
 // is explicitly listed there; "~" entries resolve to the current user's home directory.
 builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.AddAgentMail();
 
 var app = builder.Build();
 
@@ -71,6 +72,8 @@ app.MapProjectsEndpoints();
 app.MapRequestsEndpoints();
 app.MapHub<NodeHub>("/nodeHub");
 
+app.MapMailEndpoints();
+app.MapReservationsEndpoints();
 app.Run();
 
 /// <summary>Exposed for WebApplicationFactory-based integration tests.</summary>

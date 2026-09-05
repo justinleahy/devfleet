@@ -37,7 +37,14 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<INodeEventSpool>(static sp => sp.GetRequiredService<SqliteNodeEventSpool>())
             .AddSingleton<NodeTransportClient>()
             .AddSingleton<Runtime.IPiWorkerProcessFactory, Runtime.NodeWorkerProcessFactory>()
-            .AddSingleton<Runtime.IPiOrchestrationRequestHandler, Runtime.PiOrchestrationRequestHandler>()
+            .AddSingleton<Runtime.PiOrchestrationRequestHandler>()
+            .AddSingleton<Child.INodeReservationGateway, Child.NodeTransportReservationGateway>()
+            .AddSingleton<Child.INodeMailGateway, Child.NodeTransportMailGateway>()
+            .AddSingleton(static sp => ActivatorUtilities.CreateInstance<Child.PiChildSessionSupervisor>(
+                sp,
+                sp.GetRequiredService<Runtime.PiOrchestrationRequestHandler>()))
+            .AddSingleton<Runtime.IPiOrchestrationRequestHandler>(
+                static sp => sp.GetRequiredService<Child.PiChildSessionSupervisor>())
             .AddSingleton<Runtime.PiRuntimeAdapter>()
             .AddSingleton<IAgentRuntimeAdapter>(static sp => sp.GetRequiredService<Runtime.PiRuntimeAdapter>())
             .AddSingleton<PiRootSessionSupervisor>()

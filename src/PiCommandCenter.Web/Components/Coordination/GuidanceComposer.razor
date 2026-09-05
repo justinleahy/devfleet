@@ -1,0 +1,231 @@
+@namespace PiCommandCenter.Web.Components.Coordination
+@using PiCommandCenter.Application.Mail
+@using PiCommandCenter.Domain
+@using PiCommandCenter.Domain.Mail
+@using PiCommandCenter.Domain.Requests
+@inject PiCommandCenter.Application.Mail.IMessageService Messages
+
+@*
+    Human guidance composer (SPEC §16.5). Sends one high-importance, human-originated message
+    into the request thread, addressed to the root session, one child, or every active agent.
+    The component owns only its form state: the page owns which sessions are addressable.
+*@
+
+<section class="composer" aria-labelledby="@HeadingId">
+    <h3 id="@HeadingId">Send human guidance</h3>
+    <p class="composer-lead">
+        Guidance is written into the request thread as a high-importance message with no sender
+        session, so every agent sees it as human-originated.
+    </p>
+
+    @if (Targets.Count == 0)
+    {
+        <p class="panel-empty">
+            No agent session of this request can receive mail yet. A target appears here as soon as
+            a runtime reports <span class="mono">session.registered</span>.
+        </p>
+    }
+    else
+    {
+        @if (_error is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Guidance was not sent"
+                              AllowDismiss="false">
+                @_error
+            </FluentMessageBar>
+        }
+
+        @if (_sent is not null)
+        {
+            <div role="status">
+                <FluentMessageBar Intent="MessageIntent.Success" AllowDismiss="false">
+                    @_sent
+                </FluentMessageBar>
+            </div>
+        }
+
+        <FluentSelect TOption="GuidanceTarget"
+                      Label="Recipients"
+                      Items="@Targets"
+                      OptionText="@(target => target.Label)"
+                      OptionValue="@(target => target.Value)"
+                      @bind-Value="_target"
+                      Class="field field-wide" />
+
+        <FluentTextField @bind-Value="_subject"
+                         Label="Subject"
+                         Required="true"
+                         Class="field field-wide" />
+
+        <FluentTextArea @bind-Value="_body"
+                        Label="Guidance"
+                        Required="true"
+                        Rows="4"
+                        Placeholder="Stop expanding the reservation and hand src/A.cs to the reviewer."
+                        Class="field field-wide" />
+
+        <FluentCheckbox @bind-Value="_ackRequired"
+                        Label="Require acknowledgement from every recipient" />
+
+        <FluentStack Orientation="Orientation.Horizontal"
+                     VerticalAlignment="VerticalAlignment.Center"
+                     HorizontalGap="12"
+                     Width="auto">
+            <FluentButton Appearance="Appearance.Accent" OnClick="SendAsync" Loading="@_sending">
+                Send guidance
+            </FluentButton>
+            <span class="composer-note">
+                High importance &middot; thread <span class="mono">@ThreadId</span> &middot;
+                @RecipientSummary()
+            </span>
+        </FluentStack>
+    }
+</section>
+
+@code {
+    private string _target = string.Empty;
+    private string _subject = string.Empty;
+    private string _body = string.Empty;
+    private bool _ackRequired = true;
+    private bool _sending;
+    private string? _error;
+    private string? _sent;
+
+    [Parameter]
+    [EditorRequired]
+    public Guid ProjectId { get; set; }
+
+    [Parameter]
+    [EditorRequired]
+    public Guid RequestId { get; set; }
+
+    /// <summary>The request thread guidance is recorded in.</summary>
+    [Parameter]
+    [EditorRequired]
+    public string ThreadId { get; set; } = default!;
+
+    /// <summary>Subject prefilled the first time the composer renders.</summary>
+    [Parameter]
+    public string SubjectSeed { get; set; } = string.Empty;
+
+    [Parameter]
+    [EditorRequired]
+    public IReadOnlyList<GuidanceTarget> Targets { get; set; } = Array.Empty<GuidanceTarget>();
+
+    /// <summary>Raised after a message is persisted so the page can reload the thread.</summary>
+    [Parameter]
+    public EventCallback OnSent { get; set; }
+
+    private string HeadingId => $"guidance-{RequestId:N}";
+
+    protected override void OnParametersSet()
+    {
+        if (_subject.Length == 0)
+        {
+            _subject = SubjectSeed;
+        }
+
+        if (Targets.Count == 0)
+        {
+            _target = string.Empty;
+            return;
+        }
+
+        var stillOffered = false;
+        foreach (var target in Targets)
+        {
+            if (string.Equals(target.Value, _target, StringComparison.Ordinal))
+            {
+                stillOffered = true;
+                break;
+            }
+        }
+
+        if (!stillOffered)
+        {
+            _target = Targets[0].Value;
+        }
+    }
+
+    private GuidanceTarget? Selected()
+    {
+        foreach (var target in Targets)
+        {
+            if (string.Equals(target.Value, _target, StringComparison.Ordinal))
+            {
+                return target;
+            }
+        }
+
+        return null;
+    }
+
+    private string RecipientSummary()
+    {
+        var selected = Selected();
+        if (selected is null)
+        {
+            return "no target selected";
+        }
+
+        var count = selected.Recipients.Count;
+        return count == 1 ? "1 recipient" : $"{count} recipients";
+    }
+
+    private async Task SendAsync()
+    {
+        if (_sending)
+        {
+            return;
+        }
+
+        var selected = Selected();
+        _sent = null;
+        _error = selected switch
+        {
+            null => "Select who should receive the guidance.",
+            { Recipients.Count: 0 } => "The selected target has no active session to address.",
+            _ when string.IsNullOrWhiteSpace(_subject) => "Subject must not be empty.",
+            _ when string.IsNullOrWhiteSpace(_body) => "Guidance body must not be empty.",
+            _ => null,
+        };
+
+        if (_error is not null || selected is null)
+        {
+            return;
+        }
+
+        _sending = true;
+        try
+        {
+            var command = new SendAgentMessageCommand(
+                new ProjectId(ProjectId),
+                new WorkRequestId(RequestId),
+                ThreadId,
+                SenderSessionId: null,
+                selected.Recipients,
+                _subject.Trim(),
+                _body.Trim(),
+                MessageImportance.High,
+                _ackRequired);
+
+            var message = await Messages.SendAsync(command, CancellationToken.None);
+            _body = string.Empty;
+            _sent = $"Guidance {message.Id} delivered to {message.Recipients.Count} recipient(s).";
+            await OnSent.InvokeAsync();
+        }
+        catch (MailException ex)
+        {
+            _error = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            _error = ex.Message;
+        }
+        finally
+        {
+            _sending = false;
+        }
+    }
+}

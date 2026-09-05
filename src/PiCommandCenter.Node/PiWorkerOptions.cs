@@ -27,4 +27,15 @@ public sealed class PiWorkerOptions
 
     /// <summary>Timeout for correlated protocol requests (<c>session.input</c>, snapshot, tools), in seconds.</summary>
     public int RequestTimeoutSeconds { get; set; } = 60;
+
+    /// <summary>Maximum number of simultaneously running child agents per request (SPEC §10).</summary>
+    public int MaxChildAgentsPerRequest { get; set; } = 4;
+
+    /// <summary>Roles a child agent may take (SPEC §13.3 pipeline roles).</summary>
+    public string[] AllowedChildRoles { get; set; } =
+        ["root", "architect", "implementer", "reviewer", "verifier"];
+
+    /// <summary>Runtime profiles a child agent may run under (SPEC §15).</summary>
+    public string[] AllowedRuntimeProfiles { get; set; } =
+        ["local-pi", "pi-reserved-write", "pi-read-only"];
 }

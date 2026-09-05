@@ -51,7 +51,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         SupportsSendInput: true,
         SupportsCancel: true,
         SupportsSnapshot: true,
-        SupportsChildSpawn: false,
+        SupportsChildSpawn: true,
         SupportsPlanTools: true);
 
     /// <summary>
@@ -63,12 +63,17 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Mode != AgentRuntimeMode.Root)
+        if (request.Mode is not (AgentRuntimeMode.Root or AgentRuntimeMode.Child))
         {
-            // The child supervisor owns child process lifecycle; the root adapter must not fake it.
-            throw new NotSupportedException(
-                "PiRuntimeAdapter currently starts root sessions only; child sessions require the child supervisor.");
+            throw new NotSupportedException($"Agent runtime mode '{request.Mode}' is not supported.");
         }
+
+        if (request.Mode == AgentRuntimeMode.Child && request.ParentSessionId is null)
+        {
+            throw new ArgumentException(
+                "A child session requires a parent session id.", nameof(request));
+        }
+
 
         // The orchestrator owns the session id; AgentStartRequest validates it non-empty.
         var sessionId = request.SessionId;
@@ -78,7 +83,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
             request.ProjectId.Value.ToString("D"),
             request.RequestId.Value.ToString("D"),
             request.ParentSessionId,
-            (type, payload, token) => EmitSessionEventAsync(sessionId, type, payload, token));
+            (type, payload, token) => EmitSessionEventAsync(sessionId, type, payload, token),
+            request.WorkingDirectory);
 
         var process = _processFactory.Start(
             _options.NodeExecutable, _options.WorkerPath, request.WorkingDirectory);

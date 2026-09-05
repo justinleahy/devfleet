@@ -94,6 +94,142 @@ public sealed class NodeTransportClient : IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Sends a mail message on behalf of one of this node's agent sessions.</summary>
+    public async Task<MailDeliveryMessage> SendMailAsync(SendMailMessage message, CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<MailDeliveryMessage>(
+            "SendMail",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Replies in an existing thread; recipients are the thread's other participants.</summary>
+    public async Task<MailDeliveryMessage> ReplyMailAsync(ReplyMailMessage message, CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<MailDeliveryMessage>(
+            "ReplyMail",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Fetches the unread inbox for one of this node's agent sessions.</summary>
+    public async Task<MailInboxMessage> FetchInboxAsync(FetchMailInboxMessage message, CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<MailInboxMessage>(
+            "FetchInbox",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Fetches one thread for one of this node's agent sessions.</summary>
+    public async Task<MailInboxMessage> FetchThreadAsync(FetchMailThreadMessage message, CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<MailInboxMessage>(
+            "FetchThread",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Marks one delivered message read for one of this node's agent sessions.</summary>
+    public async Task<MailReceiptMessage> MarkMailReadAsync(MarkMailReadMessage message, CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<MailReceiptMessage>(
+            "MarkMailRead",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Acknowledges one delivered message for one of this node's agent sessions.</summary>
+    public async Task<MailReceiptMessage> AcknowledgeMailAsync(AcknowledgeMailMessage message, CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<MailReceiptMessage>(
+            "AcknowledgeMail",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Acquires a reservation lease, or returns the typed conflict/error.</summary>
+    public Task<ReservationOperationResultMessage> AcquireReservationAsync(
+        AcquireReservationMessage message,
+        CancellationToken cancellationToken)
+        => InvokeReservationAsync("AcquireReservation", message, cancellationToken);
+
+    /// <summary>Extends a lease's expiry.</summary>
+    public Task<ReservationOperationResultMessage> RenewReservationAsync(
+        ReservationMutationMessage message,
+        CancellationToken cancellationToken)
+        => InvokeReservationAsync("RenewReservation", message, cancellationToken);
+
+    /// <summary>Widens a lease with additional scopes.</summary>
+    public Task<ReservationOperationResultMessage> ExpandReservationAsync(
+        ExpandReservationMessage message,
+        CancellationToken cancellationToken)
+        => InvokeReservationAsync("ExpandReservation", message, cancellationToken);
+
+    /// <summary>Releases a lease owned by one of this node's sessions.</summary>
+    public Task<ReservationOperationResultMessage> ReleaseReservationAsync(
+        ReleaseReservationMessage message,
+        CancellationToken cancellationToken)
+        => InvokeReservationAsync("ReleaseReservation", message, cancellationToken);
+
+    /// <summary>Moves a lease to a new owner session.</summary>
+    public Task<ReservationOperationResultMessage> TransferReservationAsync(
+        TransferReservationMessage message,
+        CancellationToken cancellationToken)
+        => InvokeReservationAsync("TransferReservation", message, cancellationToken);
+
+    /// <summary>
+    /// Authorizes one mutation against a lease immediately before it is applied; the
+    /// caller MUST invoke this for every reserved filesystem mutation (both source and
+    /// destination for moves).
+    /// </summary>
+    public Task<MutationAuthorizationResultMessage> AuthorizeMutationAsync(
+        MutationAuthorizationMessage message,
+        CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return connection.InvokeAsync<MutationAuthorizationResultMessage>(
+            "AuthorizeMutation",
+            message,
+            cancellationToken);
+    }
+
+    /// <summary>Flags a lease as requiring recovery.</summary>
+    public Task<ReservationOperationResultMessage> MarkRecoveryRequiredAsync(
+        MarkRecoveryMessage message,
+        CancellationToken cancellationToken)
+        => InvokeReservationAsync("MarkReservationRecovery", message, cancellationToken);
+
+    /// <summary>Lists a project's leases with all transport-visible lease facts.</summary>
+    public async Task<ReservationLeaseMessage[]> ListReservationsAsync(
+        ListReservationsMessage message,
+        CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<ReservationLeaseMessage[]>(
+            "ListReservations",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<ReservationOperationResultMessage> InvokeReservationAsync<TMessage>(
+        string methodName,
+        TMessage message,
+        CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<ReservationOperationResultMessage>(
+            methodName,
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<RequestClaimMessage?> ClaimNextAsync(int leaseSeconds, CancellationToken cancellationToken)
     {
         var connection = RequireConnection();

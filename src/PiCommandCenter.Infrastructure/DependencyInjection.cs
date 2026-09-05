@@ -47,7 +47,7 @@ public static class DependencyInjection
         services.AddScoped<IRequestClaimService, RequestClaimService>();
         services.AddScoped<INodeEventSink, NodeEventSink>();
         services.AddScoped<IAgentSessionStore, AgentSessionStore>();
-
+        services.AddReservations();
         return services;
     }
 }

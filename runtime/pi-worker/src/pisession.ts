@@ -31,6 +31,10 @@ export interface RootSessionConfig {
   cwd: string;
   /** Application-controlled Pi agent directory; sessions persist under it. */
   agentDir: string;
+  /** Session mode: root orchestrator (default) or delegated child worker. */
+  mode?: "root" | "child" | undefined;
+  /** Parent session id for child sessions; supplied by the calling session. */
+  parentSessionId?: string | undefined;
   /** Optional model selector, e.g. "anthropic/claude-opus-4-5". */
   model?: string | undefined;
   /** Optional thinking level (off|minimal|low|medium|high|xhigh|max). */

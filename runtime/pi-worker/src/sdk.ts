@@ -25,6 +25,12 @@ import {
   buildRootTools,
   type RootTool,
 } from "./rootTools.ts";
+import {
+  CHILD_BUILTIN_TOOLS,
+  CHILD_SYSTEM_PROMPT,
+  CHILD_TOOL_NAMES,
+  buildChildTools,
+} from "./childTools.ts";
 
 /** Worker→node request transport backed by the correlated request broker. */
 export type NodeRequest = (
@@ -75,13 +81,21 @@ function adaptTool(tool: RootTool): ToolDefinition {
 
 /**
  * Production factory. Each call creates one SDK AgentSession: one worker
- * process per session, persisted under `config.agentDir`, with the root
- * tool allowlist `read grep find ls` + 15 orchestration round-trips.
+ * process per session, persisted under `config.agentDir`. Root mode gets the
+ * allowlist `read grep find ls` + 15 orchestration round-trips; child mode
+ * gets the same read-only built-ins plus the reservation-enforced child
+ * tools (SPEC.md sections 18.1, 25.2, 25.3). Neither mode receives the
+ * default unrestricted edit/write/shell tools.
  */
 export function createSdkSessionFactory(nodeRequest: NodeRequest): PiSessionFactory {
   return {
     async create(config: RootSessionConfig): Promise<PiSessionLike> {
-      const tools = buildRootTools(async (type, payload) =>
+      const isChild = config.mode === "child";
+      const buildTools = isChild ? buildChildTools : buildRootTools;
+      const builtins = isChild ? CHILD_BUILTIN_TOOLS : ROOT_BUILTIN_TOOLS;
+      const customNames = isChild ? CHILD_TOOL_NAMES : ROOT_TOOL_NAMES;
+      const defaultPrompt = isChild ? CHILD_SYSTEM_PROMPT : ROOT_SYSTEM_PROMPT;
+      const tools = buildTools(async (type, payload) =>
         nodeRequest(config.sessionId, type, payload),
       );
       const modelRuntime = await ModelRuntime.create();
@@ -90,14 +104,14 @@ export function createSdkSessionFactory(nodeRequest: NodeRequest): PiSessionFact
         cwd: config.cwd,
         agentDir: config.agentDir,
         settingsManager,
-        systemPromptOverride: () => config.systemPrompt ?? ROOT_SYSTEM_PROMPT,
+        systemPromptOverride: () => config.systemPrompt ?? defaultPrompt,
       });
       await resourceLoader.reload();
       const { session } = await createAgentSession({
         cwd: config.cwd,
         agentDir: config.agentDir,
         modelRuntime,
-        tools: [...ROOT_BUILTIN_TOOLS, ...ROOT_TOOL_NAMES],
+        tools: [...builtins, ...customNames],
         customTools: tools.map(adaptTool),
         resourceLoader,
         sessionManager: SessionManager.create(config.cwd),

@@ -156,6 +156,17 @@ export class EventNormalizer {
     return this.seq;
   }
 
+  /**
+   * Emit one lifecycle event frame (e.g. `session.registered`,
+   * `session.completed`, `session.failed`) through the same strictly
+   * increasing sequence as every other event, flushing pending deltas first
+   * to preserve ordering.
+   */
+  emitSessionEvent(type: string, data: unknown): void {
+    this.flushDelta();
+    this.emitEvent(type, data, false);
+  }
+
   private tryAccumulateDelta(record: Record<string, unknown>): boolean {
     const update = record["assistantMessageEvent"] as
       | Record<string, unknown>

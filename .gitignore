@@ -3,6 +3,7 @@
 **/obj/
 *.user
 *.suo
+**/TestResults/
 
 # Node.js
 node_modules/

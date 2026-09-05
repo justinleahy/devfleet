@@ -309,6 +309,39 @@ h3 {
     font-variant-numeric: tabular-nums;
 }
 
+/* Messages and reservations */
+.thread-stack,
+.lease-stack {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+}
+
+.audit-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+}
+
+.audit-list li {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    padding: calc(var(--design-unit) * 2px) 0 calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+    border-block-start: 1px solid var(--neutral-stroke-divider-rest);
+    border-inline-start: 2px solid transparent;
+}
+
+.audit-list li:first-child {
+    border-block-start: 0;
+}
+
+.audit-list li.audit-warning {
+    border-inline-start-color: var(--warning);
+}
+
 @media (max-width: 620px) {
     .panel {
         padding: calc(var(--design-unit) * 4px);
