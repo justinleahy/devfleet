@@ -2,6 +2,8 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Domain;
+using PiCommandCenter.Domain.Requests;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Node.Runtime;
@@ -34,7 +36,7 @@ public static class ChildAgentStatus
 public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, IAsyncDisposable
 {
     private readonly PiWorkerOptions _workerOptions;
-    private readonly IPiWorkerProcessFactory _processFactory;
+    private readonly Lazy<IAgentRuntimeRegistry> _runtimes;
     private readonly IPiOrchestrationRequestHandler _inner;
     private readonly INodeReservationGateway _reservations;
     private readonly INodeMailGateway _mail;
@@ -51,24 +53,23 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
     public PiChildSessionSupervisor(
         IOptions<PiWorkerOptions> workerOptions,
-        IPiWorkerProcessFactory processFactory,
         IPiOrchestrationRequestHandler inner,
         INodeReservationGateway reservations,
         INodeMailGateway mail,
         INodeEventSpool spool,
         TimeProvider timeProvider,
-        ILogger<PiChildSessionSupervisor> logger)
+        ILogger<PiChildSessionSupervisor> logger,
+        Lazy<IAgentRuntimeRegistry> runtimes)
     {
         ArgumentNullException.ThrowIfNull(workerOptions);
-        ArgumentNullException.ThrowIfNull(processFactory);
         ArgumentNullException.ThrowIfNull(inner);
         ArgumentNullException.ThrowIfNull(reservations);
         ArgumentNullException.ThrowIfNull(mail);
         ArgumentNullException.ThrowIfNull(spool);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(runtimes);
         _workerOptions = workerOptions.Value;
-        _processFactory = processFactory;
         _inner = inner;
         _reservations = reservations;
         _mail = mail;
@@ -76,6 +77,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         _fileOperations = new ReservedFileOperations(reservations);
         _timeProvider = timeProvider;
         _logger = logger;
+        _runtimes = runtimes;
     }
 
     /// <summary>Non-terminal child count across all requests, for diagnostics.</summary>
@@ -271,40 +273,64 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 cancellationToken).ConfigureAwait(false);
         }
 
-        PiWorkerSession? session = null;
+        IAgentRuntimeAdapter adapter;
         try
         {
-            var identity = new PiOrchestrationContext(
-                sessionId,
-                context.NodeId,
-                context.ProjectId,
-                context.RequestId,
-                context.SessionId,
-                child.EmitAsync,
-                context.RepositoryRoot!);
-            var root = context.RepositoryRoot!;
-            var process = _processFactory.Start(
-                _workerOptions.NodeExecutable, _workerOptions.WorkerPath, root);
-            session = new PiWorkerSession(
-                identity,
-                process,
-                this,
-                TimeSpan.FromSeconds(_workerOptions.RequestTimeoutSeconds),
-                _timeProvider,
-                _logger);
-            await session.StartAsync(
-                root,
-                _workerOptions.AgentDataDirectory,
-                model: null,
-                cancellationToken).ConfigureAwait(false);
+            adapter = _runtimes.Value.Resolve(spec.RuntimeProfile);
         }
         catch (Exception ex)
         {
-            if (session is not null)
-            {
-                await session.DisposeAsync().ConfigureAwait(false);
-            }
+            children.TryRemove(spec.AgentName, out _);
+            _childrenBySession.TryRemove(sessionId, out _);
+            return SpawnFailure("runtime_profile_not_allowed", ex.Message);
+        }
 
+        if (spec.RuntimeProfile == AgentRuntimeProfiles.ClaudeReservedWrite
+            && leaseResult?.Lease is null)
+        {
+            children.TryRemove(spec.AgentName, out _);
+            _childrenBySession.TryRemove(sessionId, out _);
+            await AppendChildEventAsync(
+                child,
+                "child.failed",
+                new Dictionary<string, object?>
+                {
+                    ["agentName"] = spec.AgentName,
+                    ["parentSessionId"] = context.SessionId,
+                    ["status"] = ChildAgentStatus.Failed,
+                    ["reason"] = "Claude reserved-write requires an acquired reservation lease.",
+                },
+                CancellationToken.None).ConfigureAwait(false);
+            return SpawnFailure(
+                "reservation_required",
+                "Claude reserved-write start requires an acquired lease and fencing token.");
+        }
+
+        AgentRuntimeAuthorizationContext? authorization = null;
+        if (leaseResult?.Lease is { } lease)
+        {
+            authorization = new AgentRuntimeAuthorizationContext(lease.LeaseId, lease.FencingToken);
+        }
+
+        AgentSessionHandle? handle = null;
+        try
+        {
+            var start = new AgentStartRequest(
+                sessionId,
+                new ProjectId(Guid.Parse(context.ProjectId)),
+                new WorkRequestId(Guid.Parse(context.RequestId)),
+                context.SessionId,
+                spec.AgentName,
+                spec.Role,
+                context.RepositoryRoot!,
+                spec.Prompt,
+                AgentRuntimeMode.Child,
+                spec.RuntimeProfile,
+                authorization);
+            handle = await adapter.StartAsync(start, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
             children.TryRemove(spec.AgentName, out _);
             _childrenBySession.TryRemove(sessionId, out _);
             await AppendChildEventAsync(
@@ -321,7 +347,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             return SpawnFailure("child_start_failed", $"Child '{spec.AgentName}' failed to start: {ex.Message}");
         }
 
-        child.Session = session;
+        child.Adapter = adapter;
         child.MarkStarted();
         await EmitOnParentAsync(
             context,
@@ -329,7 +355,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             new Dictionary<string, object?>
             {
                 ["childSessionId"] = sessionId,
-                ["providerSessionId"] = session.ProviderSessionId,
+                ["providerSessionId"] = handle.ProviderSessionId,
                 ["agentName"] = spec.AgentName,
                 ["role"] = spec.Role,
                 ["runtimeProfile"] = spec.RuntimeProfile,
@@ -430,11 +456,11 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         var cancelTerminal = new ChildTerminal(ChildAgentStatus.Cancelled, "cancelled_by_request");
         child.Terminal.TrySetResult(cancelTerminal);
 
-        if (child.Session is not null)
+        if (child.Adapter is not null)
         {
             try
             {
-                await child.Session.CancelAsync(cancellationToken).ConfigureAwait(false);
+                await child.Adapter.CancelAsync(child.SessionId, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -802,7 +828,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
     {
         try
         {
-            await foreach (var sessionEvent in child.Session!.ReadAllEventsAsync(_disposeCts.Token)
+            await foreach (var sessionEvent in child.Adapter!.WatchAsync(child.SessionId, _disposeCts.Token)
                 .ConfigureAwait(false))
             {
                 await AppendChildEventAsync(

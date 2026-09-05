@@ -1,5 +1,7 @@
-using System.Text.Json;
+using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Node.Runtime;
+using PiCommandCenter.Node.Runtime.Claude;
+
 
 namespace PiCommandCenter.Node.Child;
 
@@ -65,8 +67,8 @@ public sealed class ChildAgent
 
     public long? FencingToken { get; set; }
 
-    /// <summary>The worker session, set once the handshake completes.</summary>
-    public PiWorkerSession? Session { get; set; }
+    /// <summary>Adapter that owns the child process, set once start completes.</summary>
+    public IAgentRuntimeAdapter? Adapter { get; set; }
 
     /// <summary>True once a cancel was requested by <c>agent.cancel</c>.</summary>
     public bool CancelRequested { get; private set; }
@@ -84,7 +86,7 @@ public sealed class ChildAgent
 
     public void RequestCancel() => CancelRequested = true;
 
-    /// <summary>Closes and disposes the worker session exactly once.</summary>
+    /// <summary>Cancels and disposes the runtime session exactly once.</summary>
     public async Task CloseAsync()
     {
         if (Interlocked.Exchange(ref _closed, 1) != 0)
@@ -92,34 +94,40 @@ public sealed class ChildAgent
             return;
         }
 
-        var session = Session;
-        if (session is not null)
+        var adapter = Adapter;
+        if (adapter is null)
         {
-            try
+            return;
+        }
+
+        try
+        {
+            if (adapter is PiRuntimeAdapter pi)
             {
-                await session.CloseAsync(CancellationToken.None).ConfigureAwait(false);
+                await pi.CloseSessionAsync(SessionId, CancellationToken.None).ConfigureAwait(false);
             }
-            finally
+            else if (adapter is ClaudeCodeRuntimeAdapter claude)
             {
-                await session.DisposeAsync().ConfigureAwait(false);
+                await claude.CloseSessionAsync(SessionId, CancellationToken.None).ConfigureAwait(false);
             }
+            else
+            {
+                await adapter.CancelAsync(SessionId, CancellationToken.None).ConfigureAwait(false);
+            }
+        }
+        catch (Exception)
+        {
+            // Terminal close is best-effort; watch/cancel already recorded the outcome.
         }
     }
 
     /// <summary>Monotonic spool sequence for this child's event stream.</summary>
     public long AllocateSequence() => Interlocked.Increment(ref _sequence);
 
-    /// <summary>
-    /// Emits one orchestration event onto the child's own normalized event stream; used by the
-    /// identity closure handed to <see cref="PiWorkerSession"/>.
-    /// </summary>
+    /// <summary>Unused for adapter-backed children; retained for diagnostics.</summary>
     public Task EmitAsync(
         string type,
         IReadOnlyDictionary<string, object?> payload,
         CancellationToken cancellationToken)
-    {
-        var session = Session ?? throw new InvalidOperationException(
-            $"Child session {SessionId} is not started; cannot persist orchestration event '{type}'.");
-        return session.EmitOrchestrationEventAsync(type, payload, cancellationToken);
-    }
+        => Task.CompletedTask;
 }

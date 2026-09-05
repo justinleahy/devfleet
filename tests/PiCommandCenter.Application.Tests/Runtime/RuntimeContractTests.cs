@@ -71,6 +71,7 @@ public class RuntimeContractTests
         Assert.Null(request.ParentSessionId);
         Assert.Equal(AgentRuntimeMode.Root, request.Mode);
         Assert.Equal("root-readonly", request.RuntimeProfile);
+        Assert.Null(request.Authorization);
     }
 
     [Fact]
@@ -86,6 +87,18 @@ public class RuntimeContractTests
         Assert.Throws<ArgumentException>(() => new AgentStartRequest(
             "s", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), "",
             "root", "root", "/repo", "prompt", AgentRuntimeMode.Root, "default"));
+    }
+
+    [Fact]
+    public void AgentStartRequest_keeps_host_owned_authorization()
+    {
+        var grant = new AgentRuntimeAuthorizationContext(Guid.NewGuid(), 42);
+        var request = new AgentStartRequest(
+            "s", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), "parent",
+            "writer", "implementer", "/repo", "prompt", AgentRuntimeMode.Child,
+            AgentRuntimeProfiles.ClaudeReservedWrite, grant);
+
+        Assert.Equal(grant, request.Authorization);
     }
 
     [Fact]

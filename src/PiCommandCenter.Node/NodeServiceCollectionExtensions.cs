@@ -42,13 +42,43 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<Child.INodeMailGateway, Child.NodeTransportMailGateway>()
             .AddSingleton(static sp => ActivatorUtilities.CreateInstance<Child.PiChildSessionSupervisor>(
                 sp,
-                sp.GetRequiredService<Runtime.PiOrchestrationRequestHandler>()))
+                sp.GetRequiredService<Runtime.PiOrchestrationRequestHandler>(),
+                new Lazy<IAgentRuntimeRegistry>(sp.GetRequiredService<IAgentRuntimeRegistry>)))
             .AddSingleton<Runtime.IPiOrchestrationRequestHandler>(
                 static sp => sp.GetRequiredService<Child.PiChildSessionSupervisor>())
             .AddSingleton<Runtime.PiRuntimeAdapter>()
             .AddSingleton<IAgentRuntimeAdapter>(static sp => sp.GetRequiredService<Runtime.PiRuntimeAdapter>())
+            .AddOptions<ClaudeCodeOptions>()
+            .BindConfiguration(ClaudeCodeOptions.SectionName)
+            .ValidateOnStart()
+            .Services
+            .AddSingleton<IValidateOptions<ClaudeCodeOptions>, ClaudeCodeOptionsValidator>()
+            .AddSingleton<Runtime.Claude.IOfficialAgentProcessFactory, Runtime.Claude.OfficialAgentProcessFactory>()
+            .AddSingleton<Runtime.Claude.ClaudeCodeRuntimeAdapter>()
+            .AddSingleton<IAgentRuntimeAdapter>(
+                static sp => sp.GetRequiredService<Runtime.Claude.ClaudeCodeRuntimeAdapter>())
+            .AddOptions<AntigravityOptions>()
+            .BindConfiguration(AntigravityOptions.SectionName)
+            .ValidateOnStart()
+            .Services
+            .AddSingleton<IValidateOptions<AntigravityOptions>, AntigravityOptionsValidator>()
+            .AddSingleton<IPostConfigureOptions<AntigravityOptions>, AntigravityOptionsPostConfigure>()
+            .AddSingleton<Runtime.Antigravity.IAntigravityProcessFactory, Runtime.Antigravity.AntigravityProcessFactory>()
+            .AddSingleton<Runtime.Antigravity.AntigravityRuntimeAdapter>()
+            .AddSingleton<IAgentRuntimeAdapter>(
+                static sp => sp.GetRequiredService<Runtime.Antigravity.AntigravityRuntimeAdapter>())
+            .AddSingleton<IAgentRuntimeRegistry>(static sp => new Runtime.AgentRuntimeRegistry(
+                sp.GetRequiredService<Runtime.PiRuntimeAdapter>(),
+                sp.GetRequiredService<Runtime.Claude.ClaudeCodeRuntimeAdapter>(),
+                sp.GetRequiredService<Runtime.Antigravity.AntigravityRuntimeAdapter>()))
             .AddSingleton<PiRootSessionSupervisor>()
             .AddSingleton<NodeWorker>()
+            .AddSingleton<Runtime.Claude.Hooks.ClaudeHookAuditLog>()
+            .AddSingleton<Runtime.Claude.Hooks.ClaudeReservationHookEvaluator>()
+            .AddSingleton<Runtime.Claude.Hooks.ClaudeReservationHookServer>()
+            .AddSingleton<Runtime.Claude.Hooks.ClaudeHookSettingsInstaller>()
+            .AddHostedService(static sp =>
+                sp.GetRequiredService<Runtime.Claude.Hooks.ClaudeReservationHookServer>())
             .AddHostedService(static sp => sp.GetRequiredService<NodeWorker>());
 
         return services;

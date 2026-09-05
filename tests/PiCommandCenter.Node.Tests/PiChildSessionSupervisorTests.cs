@@ -1,10 +1,14 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Node;
 using PiCommandCenter.Node.Child;
 using PiCommandCenter.Node.Runtime;
+using PiCommandCenter.Node.Runtime.Antigravity;
+using PiCommandCenter.Node.Runtime.Claude;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -34,22 +38,15 @@ public class PiChildSessionSupervisorTests : IDisposable
             Id = Guid.NewGuid(),
             EventSpoolPath = Path.Combine(_root, "spool.db"),
         }));
-        _supervisor = new PiChildSessionSupervisor(
-            Options.Create(new PiWorkerOptions
-            {
-                NodeExecutable = "node",
-                WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker.mjs"),
-                AgentDataDirectory = Path.Combine(_root, "agent-data"),
-                RequestTimeoutSeconds = 1,
-                MaxChildAgentsPerRequest = 2,
-            }),
-            new NodeWorkerProcessFactory(),
-            new NoopInnerHandler(),
-            _reservations,
-            new FakeMailGateway(),
-            _spool,
-            TimeProvider.System,
-            NullLogger.Instance);
+        var worker = new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data"),
+            RequestTimeoutSeconds = 1,
+            MaxChildAgentsPerRequest = 2,
+        };
+        _supervisor = CreateSupervisor(worker);
     }
 
     public void Dispose()
@@ -206,7 +203,7 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "child-a",
                 role = "reviewer",
-                runtimeProfile = "pi-read-only",
+                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -219,7 +216,7 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "child-a",
                 role = "reviewer",
-                runtimeProfile = "pi-read-only",
+                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -235,7 +232,7 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "child-b",
                 role = "reviewer",
-                runtimeProfile = "pi-read-only",
+                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -248,7 +245,7 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "child-c",
                 role = "reviewer",
-                runtimeProfile = "pi-read-only",
+                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -301,21 +298,13 @@ public class PiChildSessionSupervisorTests : IDisposable
     [Fact]
     public async Task A_worker_crash_produces_the_child_failed_terminal_event()
     {
-        var crashing = new PiChildSessionSupervisor(
-            Options.Create(new PiWorkerOptions
-            {
-                NodeExecutable = "node",
-                WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker-crash.mjs"),
-                AgentDataDirectory = Path.Combine(_root, "agent-data-crash"),
-                RequestTimeoutSeconds = 1,
-            }),
-            new NodeWorkerProcessFactory(),
-            new NoopInnerHandler(),
-            _reservations,
-            new FakeMailGateway(),
-            _spool,
-            TimeProvider.System,
-            NullLogger.Instance);
+        var crashing = CreateSupervisor(new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker-crash.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-crash"),
+            RequestTimeoutSeconds = 1,
+        });
         await using var _ = crashing;
 
         var context = RootContext(Guid.NewGuid().ToString("D"));
@@ -381,6 +370,74 @@ public class PiChildSessionSupervisorTests : IDisposable
 
         Assert.Contains(("src/Feature/New.cs", "write"), _reservations.Authorizations);
         Assert.Contains(("src/Feature/New.cs", "edit"), _reservations.Authorizations);
+    }
+
+    [Fact]
+    public void Arbitrary_runtime_profiles_are_rejected()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var response = Invoke(_supervisor, context, "agent.spawn",
+            new { agentName = "x", role = "implementer", runtimeProfile = "agent-picked-bin", prompt = "p" });
+        Assert.Equal("runtime_profile_not_allowed", Result(response.Result)["error"] is Dictionary<string, object?> e
+            ? e["code"]
+            : null);
+    }
+
+    [Fact]
+    public async Task Claude_reserved_write_without_a_lease_is_refused()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await _supervisor.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "writer",
+                role = "implementer",
+                runtimeProfile = AgentRuntimeProfiles.ClaudeReservedWrite,
+                prompt = "p",
+            }),
+            CancellationToken.None);
+        Assert.Equal("reservation_required", Result(spawn.Result)["error"] is Dictionary<string, object?> e
+            ? e["code"]
+            : spawn.ErrorCode);
+    }
+
+    private PiChildSessionSupervisor CreateSupervisor(PiWorkerOptions worker)
+    {
+        var inner = new NoopInnerHandler();
+        var node = Options.Create(new NodeOptions { Id = Guid.NewGuid() });
+        var pi = new PiRuntimeAdapter(
+            node,
+            Options.Create(worker),
+            new NodeWorkerProcessFactory(),
+            inner,
+            TimeProvider.System,
+            NullLogger<PiRuntimeAdapter>.Instance);
+        var settings = Path.Combine(_root, $"claude-settings-{Guid.NewGuid():N}.json");
+        File.WriteAllText(settings, "{}");
+        var claude = new ClaudeCodeRuntimeAdapter(
+            node,
+            Options.Create(new ClaudeCodeOptions { SettingsPath = settings }),
+            new OfficialAgentProcessFactory(),
+            TimeProvider.System,
+            NullLogger<ClaudeCodeRuntimeAdapter>.Instance);
+        var antigravity = new AntigravityRuntimeAdapter(
+            node,
+            Options.Create(new AntigravityOptions()),
+            new AntigravityProcessFactory(),
+            TimeProvider.System,
+            NullLogger<AntigravityRuntimeAdapter>.Instance);
+        var registry = new AgentRuntimeRegistry(pi, claude, antigravity);
+        return new PiChildSessionSupervisor(
+            Options.Create(worker),
+            inner,
+            _reservations,
+            new FakeMailGateway(),
+            _spool,
+            TimeProvider.System,
+            NullLogger.Instance,
+            new Lazy<IAgentRuntimeRegistry>(registry));
     }
 
     private sealed class NoopInnerHandler : IPiOrchestrationRequestHandler

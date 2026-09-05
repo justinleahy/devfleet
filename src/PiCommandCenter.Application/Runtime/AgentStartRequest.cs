@@ -19,7 +19,8 @@ public sealed record AgentStartRequest
         string workingDirectory,
         string prompt,
         AgentRuntimeMode mode,
-        string runtimeProfile)
+        string runtimeProfile,
+        AgentRuntimeAuthorizationContext? authorization = null)
     {
         SessionId = Require(sessionId, nameof(sessionId));
         ProjectId = projectId;
@@ -31,6 +32,7 @@ public sealed record AgentStartRequest
         Prompt = Require(prompt, nameof(prompt));
         Mode = mode;
         RuntimeProfile = Require(runtimeProfile, nameof(runtimeProfile));
+        Authorization = authorization;
     }
 
     /// <summary>Orchestrator-assigned session id (the projection identity).</summary>
@@ -62,6 +64,11 @@ public sealed record AgentStartRequest
 
     /// <summary>Runtime profile per SPEC §15.1.</summary>
     public string RuntimeProfile { get; }
+
+    /// <summary>
+    /// Successful reservation grant for reserved-write Claude. Null for read-only starts.
+    /// </summary>
+    public AgentRuntimeAuthorizationContext? Authorization { get; }
 
     private static string Require(string value, string paramName)
     {

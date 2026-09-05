@@ -1,3 +1,5 @@
+using PiCommandCenter.Application.Runtime;
+
 namespace PiCommandCenter.Node;
 
 /// <summary>
@@ -37,5 +39,6 @@ public sealed class PiWorkerOptions
 
     /// <summary>Runtime profiles a child agent may run under (SPEC §15).</summary>
     public string[] AllowedRuntimeProfiles { get; set; } =
-        ["local-pi", "pi-reserved-write", "pi-read-only"];
+        [AgentRuntimeProfiles.LocalPi, AgentRuntimeProfiles.ClaudeReadOnly,
+            AgentRuntimeProfiles.ClaudeReservedWrite, AgentRuntimeProfiles.AntigravityReadOnly];
 }
