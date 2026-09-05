@@ -6,6 +6,8 @@ using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain.Sessions;
+using PiCommandCenter.Node.Child;
+using PiCommandCenter.Node.Repository;
 
 namespace PiCommandCenter.Node;
 
@@ -22,23 +24,36 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
     private readonly Runtime.PiRuntimeAdapter _adapter;
     private readonly INodeEventSpool _spool;
     private readonly TimeProvider _timeProvider;
+    private readonly IRepositoryInspector _repository;
+    private readonly RequestWorkspaceTracker _workspace;
+    private readonly IRuntimeCrashRecovery _crashRecovery;
+    private readonly NodeOptions _nodeOptions;
     private readonly ILogger<PiRootSessionSupervisor> _logger;
     private readonly CancellationTokenSource _disposeCts = new();
     private readonly ConcurrentDictionary<Guid, ActiveRootSession> _sessions = new();
 
     public PiRootSessionSupervisor(
         IOptions<PiWorkerOptions> options,
+        IOptions<NodeOptions> nodeOptions,
         Runtime.PiRuntimeAdapter adapter,
         INodeEventSpool spool,
+        IRepositoryInspector repository,
+        RequestWorkspaceTracker workspace,
+        IRuntimeCrashRecovery crashRecovery,
         TimeProvider timeProvider,
         ILogger<PiRootSessionSupervisor> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(nodeOptions);
         _adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
         _spool = spool ?? throw new ArgumentNullException(nameof(spool));
+        _repository = repository ?? throw new ArgumentNullException(nameof(repository));
+        _workspace = workspace ?? throw new ArgumentNullException(nameof(workspace));
+        _crashRecovery = crashRecovery ?? throw new ArgumentNullException(nameof(crashRecovery));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _options = options.Value;
+        _nodeOptions = nodeOptions.Value;
     }
 
     /// <summary>Session ids of all currently running root sessions, for node heartbeats.</summary>
@@ -51,6 +66,23 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(claim);
+        RepositoryBaseline baseline;
+        try
+        {
+            baseline = await _repository.CaptureBaselineAsync(
+                claim.RepositoryPath,
+                _nodeOptions.RequireCleanStart,
+                _nodeOptions.AllowUntrackedFiles,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (RepositoryDirtyException ex)
+        {
+            throw new InvalidOperationException(
+                "BLOCKED — repository is dirty at request start: " + string.Join(", ", ex.DirtyPaths),
+                ex);
+        }
+
+        _workspace.SetBaseline(claim.RequestId, baseline);
         if (!Directory.Exists(claim.RepositoryPath))
         {
             throw new InvalidOperationException(
@@ -99,6 +131,17 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
                 ["requestTitle"] = claim.Title,
                 ["requestKind"] = claim.Kind,
                 ["riskLevel"] = claim.RiskLevel,
+            },
+            cancellationToken).ConfigureAwait(false);
+        await AppendAsync(
+            active,
+            sessionId,
+            sequence: 0,
+            type: "repository.checkpoint_created",
+            payload: new Dictionary<string, object?>
+            {
+                ["branch"] = baseline.Branch,
+                ["baseCommit"] = baseline.BaseCommit,
             },
             cancellationToken).ConfigureAwait(false);
 
@@ -184,6 +227,29 @@ public sealed class PiRootSessionSupervisor : IAsyncDisposable
                     sessionEvent.Type,
                     sessionEvent.Payload,
                     CancellationToken.None).ConfigureAwait(false);
+                if (sessionEvent.Type == "session.failed")
+                {
+                    var reason = sessionEvent.Payload.TryGetValue("reason", out var value)
+                        ? value?.ToString() ?? "session.failed"
+                        : "session.failed";
+                    try
+                    {
+                        await _crashRecovery.MarkOwnedLeasesRecoveryRequiredAsync(
+                            active.Claim.NodeId,
+                            active.Claim.ProjectId,
+                            active.Claim.RequestId,
+                            active.SessionId,
+                            reason,
+                            CancellationToken.None).ConfigureAwait(false);
+                    }
+                    catch (Exception recoveryEx)
+                    {
+                        _logger.LogWarning(
+                            recoveryEx,
+                            "Failed to mark leases recovery-required after root crash {SessionId}.",
+                            active.SessionId);
+                    }
+                }
             }
         }
         catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested)

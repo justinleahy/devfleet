@@ -10,6 +10,10 @@ using PiCommandCenter.Node.Runtime;
 using PiCommandCenter.Node.Runtime.Antigravity;
 using PiCommandCenter.Node.Runtime.Claude;
 
+using PiCommandCenter.Application.Completion;
+using PiCommandCenter.Application.Verification;
+using PiCommandCenter.Node.Repository;
+using PiCommandCenter.Node.Verification;
 namespace PiCommandCenter.Node.Tests;
 
 /// <summary>
@@ -28,6 +32,11 @@ public class PiChildSessionSupervisorTests : IDisposable
     private readonly SqliteNodeEventSpool _spool;
     private readonly PiChildSessionSupervisor _supervisor;
     private readonly FakeReservationGateway _reservations = new();
+    private readonly FakeVerificationRunner _verification = new();
+    private readonly FakeRepositoryInspector _repository = new();
+    private readonly FakeCrashRecovery _crash = new();
+    private readonly FakeCompletionGateway _completion = new();
+    private readonly RequestWorkspaceTracker _workspace = new();
     private readonly List<(string Type, IReadOnlyDictionary<string, object?> Payload)> _parentEvents = [];
 
     public PiChildSessionSupervisorTests()
@@ -403,6 +412,111 @@ public class PiChildSessionSupervisorTests : IDisposable
             : spawn.ErrorCode);
     }
 
+    [Fact]
+    public void Completion_ignores_model_accepted_flag_and_returns_missing_requirements()
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D"));
+        _workspace.SetBaseline(requestId, new RepositoryBaseline("main", "abc", "", true, []));
+        _completion.Accept = false;
+        _completion.Missing = ["mandatory_verification"];
+        var response = Invoke(_supervisor, context, "request.complete", new
+        {
+            accepted = true,
+            summaryMarkdown = "done",
+            verificationSummary = "green",
+        });
+        Assert.True(response.Ok);
+        var result = Result(response.Result);
+        Assert.Equal(false, result["accepted"]);
+        Assert.DoesNotContain(_parentEvents, e => e.Type == "request.completed");
+    }
+
+    [Fact]
+    public void Failed_verification_blocks_and_does_not_complete()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        _verification.Succeed = false;
+        var response = Invoke(_supervisor, context, "verification.request", new { profileId = "default" });
+        Assert.False(response.Ok);
+        Assert.Equal("verification_failed", response.ErrorCode);
+        Assert.Contains(_parentEvents, e => e.Type == "verification.failed");
+    }
+
+    [Fact]
+    public void Unknown_profile_id_is_rejected()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        _verification.RejectCode = "unknown_profile";
+        var response = Invoke(_supervisor, context, "verification.request", new { profileId = "agent-shell" });
+        Assert.Equal("unknown_profile", response.ErrorCode);
+    }
+
+    [Fact]
+    public void Accepted_completion_emits_request_completed_only_after_gate()
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D"));
+        _workspace.SetBaseline(requestId, new RepositoryBaseline("main", "abc", "", true, []));
+        _completion.Accept = true;
+        var response = Invoke(_supervisor, context, "request.complete", new { summaryMarkdown = "shipped" });
+        Assert.True(response.Ok);
+        Assert.Equal(true, Result(response.Result)["accepted"]);
+        Assert.Contains(_parentEvents, e => e.Type == "request.completed");
+    }
+
+    [Theory]
+    [InlineData("project.diff.inspect")]
+    [InlineData("verification.request")]
+    [InlineData("request.complete")]
+    public void Completion_tools_do_not_fall_through_to_the_inner_handler(string requestType)
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D"));
+        _workspace.SetBaseline(requestId, new RepositoryBaseline("main", "abc", "", true, []));
+        _completion.Accept = true;
+        object payload = requestType == "verification.request"
+            ? new { profileId = "default" }
+            : new { summaryMarkdown = "shipped" };
+        var response = Invoke(_supervisor, context, requestType, payload);
+        Assert.NotEqual(PiOrchestrationRequestHandler.NotAvailableUntilChildSupervisor, response.ErrorCode);
+        Assert.NotEqual("not_handled", response.ErrorCode);
+        Assert.True(response.Ok, response.ErrorCode + ": " + response.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task Worker_crash_marks_leases_recovery_required()
+    {
+        var crashing = CreateSupervisor(new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker-crash.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-crash-2"),
+            RequestTimeoutSeconds = 1,
+        });
+        await using var _ = crashing;
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await crashing.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "doomed2",
+                role = "implementer",
+                runtimeProfile = "local-pi",
+                prompt = "p",
+                requestedWriteScopes = new[] { new { kind = "directory", path = "src" } },
+            }),
+            CancellationToken.None);
+        Assert.True(spawn.Ok, spawn.ErrorMessage ?? "spawn failed");
+        await crashing.HandleAsync(
+            context,
+            "agent.await",
+            JsonSerializer.SerializeToElement(new { agentName = "doomed2", timeoutSeconds = 20 }),
+            CancellationToken.None);
+        Assert.NotEmpty(_crash.Owners);
+    }
+
     private PiChildSessionSupervisor CreateSupervisor(PiWorkerOptions worker)
     {
         var inner = new NoopInnerHandler();
@@ -437,7 +551,12 @@ public class PiChildSessionSupervisorTests : IDisposable
             _spool,
             TimeProvider.System,
             NullLogger.Instance,
-            new Lazy<IAgentRuntimeRegistry>(registry));
+            new Lazy<IAgentRuntimeRegistry>(registry),
+            _verification,
+            _repository,
+            _crash,
+            _completion,
+            _workspace);
     }
 
     private sealed class NoopInnerHandler : IPiOrchestrationRequestHandler
@@ -458,5 +577,91 @@ public class PiChildSessionSupervisorTests : IDisposable
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
         {
         }
+    }
+
+    private sealed class FakeVerificationRunner : IVerificationCommandRunner
+    {
+        public string? LastProfileId { get; private set; }
+        public bool Succeed { get; set; } = true;
+        public string RejectCode { get; set; } = "";
+
+        public Task<VerificationProfileRunResult> RunAsync(
+            VerificationRunContext context,
+            string profileId,
+            string? commandId,
+            CancellationToken cancellationToken)
+        {
+            LastProfileId = profileId;
+            if (!string.IsNullOrEmpty(RejectCode))
+            {
+                throw new VerificationRejectedException(RejectCode, "profile not configured");
+            }
+
+            var command = new VerificationCommandResult(
+                commandId ?? "cmd",
+                "true",
+                [],
+                ".",
+                Succeed ? 0 : 1,
+                TimeSpan.FromMilliseconds(1),
+                Succeed ? "ok" : "fail",
+                "",
+                false,
+                false,
+                false,
+                false,
+                null,
+                true);
+            return Task.FromResult(new VerificationProfileRunResult(profileId, [command], Succeed));
+        }
+    }
+
+    private sealed class FakeRepositoryInspector : IRepositoryInspector
+    {
+        public Task<RepositoryBaseline> CaptureBaselineAsync(
+            string repositoryRoot, bool requireCleanStart, bool allowUntrackedFiles, CancellationToken cancellationToken)
+            => Task.FromResult(new RepositoryBaseline("main", "abc", "", true, []));
+
+        public Task<RepositoryDiffInspection> InspectDiffAsync(
+            string repositoryRoot, string baseCommit, IReadOnlyList<ReservationLeaseInfo> leases, CancellationToken cancellationToken)
+            => Task.FromResult(new RepositoryDiffInspection("main", baseCommit, [], []));
+
+        public Task DetectExternalChangesAsync(
+            string repositoryRoot, string baseCommit, IReadOnlyList<ReservationLeaseInfo> leases, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+    }
+
+    private sealed class FakeCrashRecovery : IRuntimeCrashRecovery
+    {
+        public List<string> Owners { get; } = [];
+
+        public Task MarkOwnedLeasesRecoveryRequiredAsync(
+            Guid nodeId, Guid projectId, Guid? requestId, string ownerSessionId, string reason, CancellationToken cancellationToken)
+        {
+            Owners.Add(ownerSessionId);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeCompletionGateway : INodeCompletionGateway
+    {
+        public bool Accept { get; set; }
+        public IReadOnlyList<string> Missing { get; set; } = ["verification"];
+        public List<VerificationRunDto> Runs { get; } = [];
+
+        public Task RecordVerificationRunAsync(VerificationRunDto run, CancellationToken cancellationToken)
+        {
+            Runs.Add(run);
+            return Task.CompletedTask;
+        }
+
+        public Task<CompletionGateDecision> EvaluateCompletionAsync(
+            Guid projectId, Guid requestId, string rootSessionId, CompletionEvidence evidence, CancellationToken cancellationToken)
+            => Task.FromResult(new CompletionGateDecision(
+                Accept,
+                Accept ? [] : Missing,
+                Accept
+                    ? new RequestResultDto(requestId, evidence.SummaryMarkdown, evidence.ChangedFiles ?? [], evidence.ReviewFindings, evidence.VerificationSummary, DateTimeOffset.UtcNow)
+                    : null));
     }
 }

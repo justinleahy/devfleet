@@ -73,6 +73,24 @@ public sealed class NodeTransportReservationGateway : INodeReservationGateway
             result.Error is null ? null : new GatewayError(result.Error.Code, result.Error.Message));
     }
 
+    public async Task<IReadOnlyList<ReservationLeaseInfo>> ListAsync(
+        Guid projectId,
+        bool includeReleased,
+        CancellationToken cancellationToken)
+    {
+        var leases = await _transport.ListReservationsAsync(
+            new ListReservationsMessage(projectId, includeReleased),
+            cancellationToken).ConfigureAwait(false);
+        return [.. leases.Select(ToLease)];
+    }
+
+    public Task<ReservationOperationResult> MarkRecoveryRequiredAsync(
+        Guid leaseId,
+        string reason,
+        CancellationToken cancellationToken)
+        => InvokeAsync(_transport.MarkRecoveryRequiredAsync(
+            new MarkRecoveryMessage(leaseId, reason), cancellationToken));
+
     private static ReservationScopeMessage[] ToScopes(IReadOnlyList<ReservationScopeSpec> scopes)
         => [.. scopes.Select(s => new ReservationScopeMessage(
             s.Kind switch
@@ -111,5 +129,6 @@ public sealed class NodeTransportReservationGateway : INodeReservationGateway
             lease.FencingToken,
             lease.StateName,
             lease.ExpiresAt,
-            [.. lease.Scopes.Select(s => new ReservationScopeSpec(s.KindName, s.Path))]);
+            [.. lease.Scopes.Select(s => new ReservationScopeSpec(s.KindName, s.Path))],
+            lease.OwnerSessionId);
 }

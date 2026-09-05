@@ -30,4 +30,10 @@ public sealed class NodeOptions
 
     /// <summary>Path to the local event spool database; '~' expands to the user home.</summary>
     public string EventSpoolPath { get; set; } = "~/.local/share/pi-command-center/node-spool.db";
+
+    /// <summary>When true, a dirty working tree blocks claim start (SPEC §19.4).</summary>
+    public bool RequireCleanStart { get; set; } = true;
+
+    /// <summary>When true, untracked files do not fail a clean-start check.</summary>
+    public bool AllowUntrackedFiles { get; set; }
 }

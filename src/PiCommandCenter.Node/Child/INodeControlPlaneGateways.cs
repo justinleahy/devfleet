@@ -11,7 +11,8 @@ public sealed record ReservationLeaseInfo(
     long FencingToken,
     string State,
     DateTimeOffset ExpiresAt,
-    IReadOnlyList<ReservationScopeSpec> Scopes);
+    IReadOnlyList<ReservationScopeSpec> Scopes,
+    string OwnerSessionId = "");
 
 /// <summary>Structured authority error (conflict, not_found, invalid_fencing_token, …).</summary>
 public sealed record GatewayError(string Code, string Message);
@@ -91,6 +92,16 @@ public interface INodeReservationGateway
         string sessionId,
         string targetPath,
         string operation,
+        CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<ReservationLeaseInfo>> ListAsync(
+        Guid projectId,
+        bool includeReleased,
+        CancellationToken cancellationToken);
+
+    Task<ReservationOperationResult> MarkRecoveryRequiredAsync(
+        Guid leaseId,
+        string reason,
         CancellationToken cancellationToken);
 }
 

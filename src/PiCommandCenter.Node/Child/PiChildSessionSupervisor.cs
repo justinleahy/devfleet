@@ -7,6 +7,11 @@ using PiCommandCenter.Domain.Requests;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Node.Runtime;
+using PiCommandCenter.Application.Completion;
+using PiCommandCenter.Application.Verification;
+using PiCommandCenter.Domain.Verification;
+using PiCommandCenter.Node.Repository;
+using PiCommandCenter.Node.Verification;
 
 namespace PiCommandCenter.Node.Child;
 
@@ -41,6 +46,11 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
     private readonly INodeReservationGateway _reservations;
     private readonly INodeMailGateway _mail;
     private readonly INodeEventSpool _spool;
+    private readonly IVerificationCommandRunner _verification;
+    private readonly IRepositoryInspector _repository;
+    private readonly IRuntimeCrashRecovery _crashRecovery;
+    private readonly INodeCompletionGateway _completion;
+    private readonly RequestWorkspaceTracker _workspace;
     private readonly ReservedFileOperations _fileOperations;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<PiChildSessionSupervisor> _logger;
@@ -50,6 +60,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, ChildAgent>>
         _childrenByRequest = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ChildAgent> _childrenBySession = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _verificationSummaries = new(StringComparer.Ordinal);
 
     public PiChildSessionSupervisor(
         IOptions<PiWorkerOptions> workerOptions,
@@ -59,7 +70,12 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         INodeEventSpool spool,
         TimeProvider timeProvider,
         ILogger<PiChildSessionSupervisor> logger,
-        Lazy<IAgentRuntimeRegistry> runtimes)
+        Lazy<IAgentRuntimeRegistry> runtimes,
+        IVerificationCommandRunner verification,
+        IRepositoryInspector repository,
+        IRuntimeCrashRecovery crashRecovery,
+        INodeCompletionGateway completion,
+        RequestWorkspaceTracker workspace)
     {
         ArgumentNullException.ThrowIfNull(workerOptions);
         ArgumentNullException.ThrowIfNull(inner);
@@ -69,6 +85,11 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(runtimes);
+        ArgumentNullException.ThrowIfNull(verification);
+        ArgumentNullException.ThrowIfNull(repository);
+        ArgumentNullException.ThrowIfNull(crashRecovery);
+        ArgumentNullException.ThrowIfNull(completion);
+        ArgumentNullException.ThrowIfNull(workspace);
         _workerOptions = workerOptions.Value;
         _inner = inner;
         _reservations = reservations;
@@ -78,6 +99,11 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         _timeProvider = timeProvider;
         _logger = logger;
         _runtimes = runtimes;
+        _verification = verification;
+        _repository = repository;
+        _crashRecovery = crashRecovery;
+        _completion = completion;
+        _workspace = workspace;
     }
 
     /// <summary>Non-terminal child count across all requests, for diagnostics.</summary>
@@ -105,6 +131,9 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 "reservation.expand" or "expand_reservation" => await ExpandAsync(context, payload, cancellationToken),
                 "reservation.release" or "release_reservation" => await ReleaseAsync(context, payload, cancellationToken),
                 "reservation.handoff.request" or "request_reservation_handoff" => await TransferAsync(context, payload, cancellationToken),
+                "project.diff.inspect" or "inspect_project_diff" => await InspectDiffAsync(context, cancellationToken),
+                "verification.request" or "request_verification" => await RequestVerificationAsync(context, payload, cancellationToken),
+                "request.complete" or "submit_completion" => await CompleteRequestAsync(context, payload, cancellationToken),
                 "reserved_read" => await ReservedReadAsync(context, payload, cancellationToken),
                 "reserved_write" => await RunSinglePathMutationAsync(
                     context, payload,
@@ -139,6 +168,264 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             return PiToolResponse.Failure("child_supervisor_error", ex.Message);
         }
     }
+
+    private async Task<PiToolResponse> InspectDiffAsync(
+        PiOrchestrationContext context,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(context.RepositoryRoot)
+            || !Guid.TryParse(context.RequestId, out var requestId)
+            || !Guid.TryParse(context.ProjectId, out var projectId))
+        {
+            return PiToolResponse.Failure("repository_root_unknown", "The session has no repository bound.");
+        }
+
+        if (!_workspace.TryGetBaseline(requestId, out var baseline))
+        {
+            return PiToolResponse.Failure("baseline_missing", "No repository baseline was captured for this request.");
+        }
+
+        var leases = await _reservations.ListAsync(projectId, includeReleased: false, cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            await _repository.DetectExternalChangesAsync(
+                context.RepositoryRoot, baseline.BaseCommit, leases, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (ExternalRepositoryModificationException ex)
+        {
+            await context.EmitAsync(
+                "repository.external_change_detected",
+                new Dictionary<string, object?> { ["paths"] = ex.Paths },
+                cancellationToken).ConfigureAwait(false);
+            return PiToolResponse.Failure(
+                "external_repository_modification",
+                "BLOCKED — Unattributed external repository modification");
+        }
+
+        var inspection = await _repository.InspectDiffAsync(
+            context.RepositoryRoot, baseline.BaseCommit, leases, cancellationToken)
+            .ConfigureAwait(false);
+        await context.EmitAsync(
+            "repository.changed",
+            new Dictionary<string, object?>
+            {
+                ["paths"] = inspection.ChangedFiles.Select(f => f.Path).ToArray(),
+                ["branch"] = inspection.Branch,
+                ["baseCommit"] = inspection.BaseCommit,
+            },
+            cancellationToken).ConfigureAwait(false);
+        return PiToolResponse.Success(new Dictionary<string, object?>
+        {
+            ["branch"] = inspection.Branch,
+            ["baseCommit"] = inspection.BaseCommit,
+            ["changedFiles"] = inspection.ChangedFiles,
+            ["unattributedPaths"] = inspection.UnattributedPaths,
+        });
+    }
+
+    private async Task<PiToolResponse> RequestVerificationAsync(
+        PiOrchestrationContext context,
+        JsonElement? payload,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(context.RepositoryRoot)
+            || !Guid.TryParse(context.RequestId, out var requestId)
+            || !Guid.TryParse(context.ProjectId, out var projectId))
+        {
+            return PiToolResponse.Failure("repository_root_unknown", "The session has no repository bound.");
+        }
+
+        var profileId = payload.GetStringProperty("profileId");
+        if (string.IsNullOrWhiteSpace(profileId))
+        {
+            return PiToolResponse.Failure("profile_required", "A configured verification profile id is required.");
+        }
+
+        var commandId = payload.GetStringProperty("commandId");
+        await context.EmitAsync(
+            "verification.started",
+            new Dictionary<string, object?> { ["profileId"] = profileId, ["commandId"] = commandId },
+            cancellationToken).ConfigureAwait(false);
+
+        VerificationProfileRunResult run;
+        try
+        {
+            run = await _verification.RunAsync(
+                new VerificationRunContext(projectId, requestId, context.SessionId, context.RepositoryRoot),
+                profileId,
+                commandId,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (VerificationRejectedException ex)
+        {
+            await context.EmitAsync(
+                "verification.failed",
+                new Dictionary<string, object?> { ["profileId"] = profileId, ["reason"] = ex.Message },
+                cancellationToken).ConfigureAwait(false);
+            return PiToolResponse.Failure(ex.Code, ex.Message);
+        }
+
+        var now = _timeProvider.GetUtcNow();
+        foreach (var command in run.Commands)
+        {
+            var status = command.TimedOut
+                ? VerificationRunStatus.TimedOut
+                : command.Cancelled
+                    ? VerificationRunStatus.Cancelled
+                    : command.ExitCode == 0
+                        ? VerificationRunStatus.Passed
+                        : VerificationRunStatus.Failed;
+            await _completion.RecordVerificationRunAsync(
+                new VerificationRunDto(
+                    Guid.Empty,
+                    requestId,
+                    run.ProfileId,
+                    command.CommandId,
+                    status,
+                    command.ExitCode,
+                    now - command.Duration,
+                    now,
+                    Truncate(command.StandardOutput + command.StandardError),
+                    command.ArtifactPath,
+                    command.Mandatory),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        var summary = run.Succeeded
+            ? $"Profile '{run.ProfileId}' passed {run.Commands.Count} command(s)."
+            : $"Profile '{run.ProfileId}' failed.";
+        _verificationSummaries[context.RequestId] = summary;
+
+        if (run.Succeeded)
+        {
+            await context.EmitAsync(
+                "verification.completed",
+                new Dictionary<string, object?>
+                {
+                    ["profileId"] = run.ProfileId,
+                    ["succeeded"] = true,
+                    ["summary"] = summary,
+                },
+                cancellationToken).ConfigureAwait(false);
+            return PiToolResponse.Success(new Dictionary<string, object?>
+            {
+                ["profileId"] = run.ProfileId,
+                ["succeeded"] = true,
+                ["summary"] = summary,
+            });
+        }
+
+        await context.EmitAsync(
+            "verification.failed",
+            new Dictionary<string, object?> { ["profileId"] = run.ProfileId, ["reason"] = summary },
+            cancellationToken).ConfigureAwait(false);
+        return PiToolResponse.Failure("verification_failed", summary);
+    }
+
+    private async Task<PiToolResponse> CompleteRequestAsync(
+        PiOrchestrationContext context,
+        JsonElement? payload,
+        CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(context.RequestId, out var requestId)
+            || !Guid.TryParse(context.ProjectId, out var projectId))
+        {
+            return PiToolResponse.Failure("request_identity_unknown", "The session is not bound to a request.");
+        }
+
+        var summary = payload.GetStringProperty("summaryMarkdown")
+            ?? payload.GetStringProperty("summary")
+            ?? string.Empty;
+        var verificationSummary = payload.GetStringProperty("verificationSummary")
+            ?? (_verificationSummaries.TryGetValue(context.RequestId, out var recorded) ? recorded : string.Empty);
+        var findings = ParseFindings(payload);
+        IReadOnlyList<string> changedFiles = payload.GetStringListProperty("changedFiles") ?? [];
+
+        if (string.IsNullOrEmpty(context.RepositoryRoot) is false
+            && Guid.TryParse(context.RequestId, out _)
+            && _workspace.TryGetBaseline(requestId, out var baseline))
+        {
+            var leases = await _reservations.ListAsync(projectId, includeReleased: true, cancellationToken)
+                .ConfigureAwait(false);
+            var inspection = await _repository.InspectDiffAsync(
+                context.RepositoryRoot, baseline.BaseCommit, leases, cancellationToken)
+                .ConfigureAwait(false);
+            if (changedFiles.Count == 0)
+            {
+                changedFiles = [.. inspection.ChangedFiles.Select(f => f.Path)];
+            }
+        }
+
+        var evidence = new CompletionEvidence(summary, changedFiles, findings, verificationSummary);
+        var decision = await _completion.EvaluateCompletionAsync(
+            projectId, requestId, context.SessionId, evidence, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!decision.Accepted)
+        {
+            await context.EmitAsync(
+                "request.completion_rejected",
+                new Dictionary<string, object?>
+                {
+                    ["missingRequirements"] = decision.MissingRequirements,
+                },
+                cancellationToken).ConfigureAwait(false);
+            return PiToolResponse.Success(new Dictionary<string, object?>
+            {
+                ["accepted"] = false,
+                ["missingRequirements"] = decision.MissingRequirements,
+            });
+        }
+
+        await context.EmitAsync(
+            "request.completed",
+            new Dictionary<string, object?> { ["summaryMarkdown"] = summary },
+            cancellationToken).ConfigureAwait(false);
+        return PiToolResponse.Success(new Dictionary<string, object?>
+        {
+            ["accepted"] = true,
+            ["missingRequirements"] = Array.Empty<string>(),
+            ["result"] = decision.Result,
+        });
+    }
+
+    private static IReadOnlyList<ReviewFinding> ParseFindings(JsonElement? payload)
+    {
+        if (payload is not JsonElement root
+            || root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("reviewFindings", out var array)
+            || array.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var findings = new List<ReviewFinding>();
+        foreach (var item in array.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            findings.Add(new ReviewFinding(
+                item.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String
+                    ? id.GetString() ?? string.Empty
+                    : string.Empty,
+                item.TryGetProperty("summary", out var s) && s.ValueKind == JsonValueKind.String
+                    ? s.GetString() ?? string.Empty
+                    : string.Empty,
+                item.TryGetProperty("blocking", out var b) && b.ValueKind == JsonValueKind.True,
+                item.TryGetProperty("resolved", out var r) && r.ValueKind == JsonValueKind.True,
+                item.TryGetProperty("userOverridden", out var o) && o.ValueKind == JsonValueKind.True));
+        }
+
+        return findings;
+    }
+
+    private static string? Truncate(string text)
+        => text.Length <= 2048 ? text : text[..2048];
 
     // ---- Spawn ----
 
@@ -852,6 +1139,11 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                     var reason = sessionEvent.Payload.TryGetValue("reason", out var reasonValue)
                         ? reasonValue?.ToString() ?? "unknown"
                         : "worker_closed";
+                    if (failed)
+                    {
+                        await NotifyCrashAsync(child, reason).ConfigureAwait(false);
+                    }
+
                     await child.CloseAsync().ConfigureAwait(false);
                     await EmitTerminalAsync(child, status, reason).ConfigureAwait(false);
                     child.Terminal.TrySetResult(new ChildTerminal(status, reason));
@@ -859,7 +1151,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 }
             }
 
-            // The event stream completed without an explicit close: treat as a crash.
+            await NotifyCrashAsync(child, "worker_stream_ended").ConfigureAwait(false);
             await child.CloseAsync().ConfigureAwait(false);
             await EmitTerminalAsync(child, ChildAgentStatus.Failed, "worker_stream_ended")
                 .ConfigureAwait(false);
@@ -871,10 +1163,51 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Watch loop for child {ChildSessionId} failed.", child.SessionId);
+            await NotifyCrashAsync(child, ex.Message).ConfigureAwait(false);
             await child.CloseAsync().ConfigureAwait(false);
             await EmitTerminalAsync(child, ChildAgentStatus.Failed, ex.Message).ConfigureAwait(false);
             child.Terminal.TrySetResult(new ChildTerminal(ChildAgentStatus.Failed, ex.Message));
+        }
+    }
+
+    private async Task NotifyCrashAsync(ChildAgent child, string reason)
+    {
+        if (!Guid.TryParse(child.NodeId, out var nodeId)
+            || !Guid.TryParse(child.ProjectId, out var projectId))
+        {
+            return;
+        }
+
+        Guid? requestId = Guid.TryParse(child.RequestId, out var parsed) ? parsed : null;
+        try
+        {
+            await _crashRecovery.MarkOwnedLeasesRecoveryRequiredAsync(
+                nodeId, projectId, requestId, child.SessionId, reason, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to mark leases recovery-required for {SessionId}.", child.SessionId);
+        }
+
+        try
+        {
+            await _mail.SendAsync(
+                projectId,
+                requestId ?? Guid.Empty,
+                threadId: null,
+                senderSessionId: child.SessionId,
+                recipients: [child.ParentSessionId],
+                subject: "Child runtime crash",
+                bodyMarkdown: $"Child '{child.AgentName}' failed: {reason}",
+                importance: "high",
+                ackRequired: true,
+                inReplyToMessageId: null,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to mail parent about crash of {SessionId}.", child.SessionId);
         }
     }
 

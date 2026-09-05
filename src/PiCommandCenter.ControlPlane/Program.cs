@@ -74,6 +74,7 @@ app.MapHub<NodeHub>("/nodeHub");
 
 app.MapMailEndpoints();
 app.MapReservationsEndpoints();
+app.MapRequestResultEndpoints();
 app.Run();
 
 /// <summary>Exposed for WebApplicationFactory-based integration tests.</summary>

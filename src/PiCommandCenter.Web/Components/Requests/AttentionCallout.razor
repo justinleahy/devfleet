@@ -1,0 +1,90 @@
+@namespace PiCommandCenter.Web.Components.Requests
+
+@*
+    One attention item (SPEC §31.6). The callout states the persisted fact, the operator action
+    that answers it, and the evidence it was derived from, so nothing here is advisory guesswork.
+*@
+
+<article class="callout @(Signal.Severity == AttentionSeverity.Error ? "is-error" : "is-warning")">
+    <header class="callout-head">
+        <span class="callout-mark" aria-hidden="true">@(Signal.Severity == AttentionSeverity.Error ? "!" : "?")</span>
+        <h3>@Signal.Title</h3>
+        <FluentBadge Appearance="Appearance.Neutral">@Label(Signal.Kind)</FluentBadge>
+    </header>
+
+    <p class="callout-detail">@Signal.Detail</p>
+
+    <p class="callout-evidence mono">
+        <span class="visually-hidden">Persisted evidence</span>
+        @Signal.Evidence &middot; @Signal.ObservedAt.ToString("u")
+        @if (Now is { } now)
+        {
+            <span> (@TimeText.Relative(Signal.ObservedAt, now))</span>
+        }
+    </p>
+
+    <FluentStack Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
+        @if (ShowRequestLink)
+        {
+            <FluentAnchor Href="@RequestHref()" Appearance="Appearance.Outline">
+                Open @Signal.RequestTitle
+            </FluentAnchor>
+        }
+        <FluentAnchor Href="@ActionHref()" Appearance="Appearance.Accent">
+            @ActionLabel()
+        </FluentAnchor>
+    </FluentStack>
+</article>
+
+@code {
+    [Parameter]
+    [EditorRequired]
+    public AttentionSignal Signal { get; set; } = default!;
+
+    /// <summary>Snapshot instant used for the relative age; omitted on pages without a clock.</summary>
+    [Parameter]
+    public DateTimeOffset? Now { get; set; }
+
+    /// <summary>Set on fleet-wide surfaces where the request is not already the page subject.</summary>
+    [Parameter]
+    public bool ShowRequestLink { get; set; }
+
+    private string RequestHref() => $"/requests/{Signal.RequestId}";
+
+    /// <summary>The section that answers the signal: guidance, reservations, or verification.</summary>
+    private string ActionHref() => Signal.Kind switch
+    {
+        AttentionKind.HumanInput or AttentionKind.Approval or AttentionKind.ProviderAuthMissing
+            or AttentionKind.AgentError => $"{RequestHref()}#messages-heading",
+        AttentionKind.ReservationConflict or AttentionKind.HandoffRequested
+            or AttentionKind.DisconnectedWithLease or AttentionKind.RecoveryRequired =>
+            $"{RequestHref()}#reservations-heading",
+        AttentionKind.VerificationFailed => $"{RequestHref()}#verification-heading",
+        _ => $"{RequestHref()}#diff-heading",
+    };
+
+    private string ActionLabel() => Signal.Kind switch
+    {
+        AttentionKind.HumanInput or AttentionKind.Approval => "Send guidance",
+        AttentionKind.ProviderAuthMissing => "Read the blocked status",
+        AttentionKind.AgentError => "Read the reported error",
+        AttentionKind.ReservationConflict or AttentionKind.HandoffRequested => "Review reservations",
+        AttentionKind.DisconnectedWithLease or AttentionKind.RecoveryRequired => "Inspect the lease",
+        AttentionKind.VerificationFailed => "Review the verification run",
+        _ => "Review the diff",
+    };
+
+    private static string Label(AttentionKind kind) => kind switch
+    {
+        AttentionKind.HumanInput => "human input",
+        AttentionKind.Approval => "approval",
+        AttentionKind.ProviderAuthMissing => "provider auth",
+        AttentionKind.ReservationConflict => "reservation conflict",
+        AttentionKind.HandoffRequested => "handoff",
+        AttentionKind.VerificationFailed => "verification",
+        AttentionKind.ExternalChange => "external change",
+        AttentionKind.DisconnectedWithLease => "disconnected owner",
+        AttentionKind.RecoveryRequired => "recovery",
+        _ => "agent",
+    };
+}

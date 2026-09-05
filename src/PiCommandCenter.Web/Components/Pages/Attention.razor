@@ -1,0 +1,306 @@
+@page "/attention"
+@namespace PiCommandCenter.Web.Components.Pages
+@rendermode InteractiveServer
+@using PiCommandCenter.Application
+@using PiCommandCenter.Application.Completion
+@using PiCommandCenter.Application.Projects
+@using PiCommandCenter.Application.Requests
+@using PiCommandCenter.Application.Reservations
+@using PiCommandCenter.Application.Sessions
+@using PiCommandCenter.Domain
+@using PiCommandCenter.Application.Verification
+@using PiCommandCenter.Domain.Projects
+@using PiCommandCenter.Domain.Requests
+@using PiCommandCenter.Web.Components.Requests
+@implements IAsyncDisposable
+@inject IProjectCatalog Catalog
+@inject IRequestQueue Queue
+@inject IAgentSessionStore SessionStore
+@inject IReservationService ReservationAuthority
+@inject IVerificationRunStore VerificationRuns
+@inject IClock Clock
+
+<PageTitle>Attention &middot; Pi Command Center</PageTitle>
+
+<FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+
+    <header class="page-head">
+        <FluentStack Orientation="Orientation.Horizontal"
+                     VerticalAlignment="VerticalAlignment.Bottom"
+                     HorizontalGap="16"
+                     Width="100%">
+            <FluentStack Orientation="Orientation.Vertical" VerticalGap="4" Width="auto">
+                <h1>Attention</h1>
+                <p class="page-lead">
+                    Every open request in the fleet, scanned for the six things only a human can
+                    answer: input and approval requests, reservation conflicts and handoffs, failed
+                    verification, external repository changes, and disconnected agents still holding
+                    leases. Each item cites the persisted fact it came from.
+                </p>
+            </FluentStack>
+            <FluentSpacer />
+            <FluentButton Appearance="Appearance.Stealth" OnClick="ReloadAsync" Disabled="@_loading">
+                Reload
+            </FluentButton>
+        </FluentStack>
+    </header>
+
+    @if (_loadError is not null)
+    {
+        <FluentMessageBar Intent="MessageIntent.Error"
+                          Title="Could not scan the fleet"
+                          AllowDismiss="false">
+            @_loadError
+        </FluentMessageBar>
+    }
+
+    @if (_partialErrors.Count > 0)
+    {
+        <FluentMessageBar Intent="MessageIntent.Warning"
+                          Title="Some requests could not be scanned"
+                          AllowDismiss="false">
+            <ul class="error-list">
+                @foreach (var error in _partialErrors)
+                {
+                    <li>@error</li>
+                }
+            </ul>
+        </FluentMessageBar>
+    }
+
+    <p class="scan-note" role="status" aria-live="polite">
+        @ScanSummary()
+    </p>
+
+    @if (_loading && _signals.Count == 0)
+    {
+        <div class="state-block" role="status">
+            <FluentProgressRing aria-label="Scanning the fleet for attention items" />
+            <span>Scanning open requests</span>
+        </div>
+    }
+    else if (_signals.Count == 0 && _loadError is null)
+    {
+        <FluentCard>
+            <div class="state-empty">
+                <h2>Nothing needs a human</h2>
+                <p>
+                    @(_scannedRequests == 0
+                        ? "No open request is queued in the fleet, so there is nothing to scan yet."
+                        : $"All {_scannedRequests} open request(s) are running without a recorded conflict, failed verification, external change, or abandoned lease.")
+                </p>
+                <FluentAnchor Href="/" Appearance="Appearance.Outline">Back to fleet</FluentAnchor>
+            </div>
+        </FluentCard>
+    }
+    else
+    {
+        <section class="signal-stack" aria-label="Attention items">
+            @foreach (var signal in _signals)
+            {
+                <AttentionCallout Signal="signal" Now="_snapshot" ShowRequestLink="true" />
+            }
+        </section>
+    }
+</FluentStack>
+
+@code {
+    private const int RefreshSeconds = 5;
+
+    private readonly List<AttentionSignal> _signals = [];
+    private readonly List<string> _partialErrors = [];
+    private CancellationTokenSource? _refreshCts;
+    private DateTimeOffset _snapshot;
+    private string? _loadError;
+    private int _scannedRequests;
+    private bool _loading = true;
+    private bool _busy;
+
+    protected override Task OnInitializedAsync() => LoadAsync(showSpinner: true);
+
+    protected override Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && _refreshCts is null)
+        {
+            _refreshCts = new CancellationTokenSource();
+            _ = RefreshLoopAsync(_refreshCts.Token);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        var cts = _refreshCts;
+        _refreshCts = null;
+        if (cts is not null)
+        {
+            await cts.CancelAsync();
+            cts.Dispose();
+        }
+    }
+
+    private async Task RefreshLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(RefreshSeconds));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                await InvokeAsync(async () =>
+                {
+                    await LoadAsync(showSpinner: false);
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private Task ReloadAsync() => LoadAsync(showSpinner: true);
+
+    /// <summary>
+    /// Scans every project's open requests. A request that cannot be read is reported by id rather
+    /// than dropped, so the page never implies a quiet fleet it did not actually observe.
+    /// </summary>
+    private async Task LoadAsync(bool showSpinner)
+    {
+        if (_busy)
+        {
+            return;
+        }
+
+        _busy = true;
+        if (showSpinner)
+        {
+            _loading = true;
+            StateHasChanged();
+        }
+
+        var found = new List<AttentionSignal>();
+        var errors = new List<string>();
+        var scanned = 0;
+
+        try
+        {
+            var projects = await Catalog.ListAsync(CancellationToken.None);
+            _loadError = null;
+
+            foreach (var project in projects)
+            {
+                IReadOnlyList<WorkRequestDto> requests;
+                IReadOnlyList<ReservationLeaseDto> leases;
+                try
+                {
+                    requests = await Queue.ListAsync(new ProjectId(project.Id), CancellationToken.None);
+                    leases = await ReservationAuthority.ListAsync(project.Id, false, CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"{project.DisplayName}: {ex.Message}");
+                    continue;
+                }
+
+                foreach (var request in requests)
+                {
+                    if (IsSettled(request))
+                    {
+                        continue;
+                    }
+
+                    scanned++;
+                    try
+                    {
+                        await ScanRequestAsync(found, project.DisplayName, request, leases);
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add($"{request.Title} ({request.Id}): {ex.Message}");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _loadError = ex.Message;
+        }
+        finally
+        {
+            found.Sort(Compare);
+            _signals.Clear();
+            _signals.AddRange(found);
+            _partialErrors.Clear();
+            _partialErrors.AddRange(errors);
+            _scannedRequests = scanned;
+            _snapshot = Clock.UtcNow;
+            _loading = false;
+            _busy = false;
+        }
+    }
+
+    private async Task ScanRequestAsync(
+        List<AttentionSignal> into,
+        string projectName,
+        WorkRequestDto request,
+        IReadOnlyList<ReservationLeaseDto> projectLeases)
+    {
+        var requestId = new WorkRequestId(request.Id);
+        var sessions = await SessionStore.ListAsync(requestId, CancellationToken.None);
+        var events = await SessionStore.ListEventsAsync(requestId, CancellationToken.None);
+        var runs = await VerificationRuns.ListAsync(requestId, CancellationToken.None);
+
+        var leases = new List<ReservationLeaseDto>();
+        foreach (var lease in projectLeases)
+        {
+            if (lease.RequestId == request.Id)
+            {
+                leases.Add(lease);
+            }
+        }
+
+        AttentionScanner.Scan(
+            into,
+            request,
+            projectName,
+            sessions,
+            leases,
+            runs,
+            RequestInsightsReader.Read(events),
+            _snapshot == default ? Clock.UtcNow : _snapshot);
+    }
+
+    /// <summary>Errors first, then newest evidence first: the triage order of SPEC §31.6.</summary>
+    private static int Compare(AttentionSignal left, AttentionSignal right)
+    {
+        var bySeverity = left.Severity.CompareTo(right.Severity);
+        return bySeverity != 0 ? bySeverity : right.ObservedAt.CompareTo(left.ObservedAt);
+    }
+
+    private static bool IsSettled(WorkRequestDto request) =>
+        (WorkRequestStatus)request.Status
+            is WorkRequestStatus.Completed
+            or WorkRequestStatus.Cancelled;
+
+    private string ScanSummary()
+    {
+        if (_loadError is not null)
+        {
+            return "fleet scan unavailable";
+        }
+
+        var errors = 0;
+        foreach (var signal in _signals)
+        {
+            if (signal.Severity == AttentionSeverity.Error)
+            {
+                errors++;
+            }
+        }
+
+        return $"{_signals.Count} item{(_signals.Count == 1 ? string.Empty : "s")} \u00b7 "
+            + $"{errors} blocking \u00b7 {_scannedRequests} open request(s) scanned \u00b7 "
+            + $"refreshed every {RefreshSeconds}s, last {TimeText.Relative(_snapshot, Clock.UtcNow)}";
+    }
+}

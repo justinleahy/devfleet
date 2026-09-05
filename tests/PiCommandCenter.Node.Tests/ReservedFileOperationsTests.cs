@@ -61,6 +61,14 @@ public class ReservedFileOperationsTests : IDisposable
                 ?? new MutationAuthorizationResult(true, null);
             return Task.FromResult(decision);
         }
+
+        public Task<IReadOnlyList<ReservationLeaseInfo>> ListAsync(
+            Guid projectId, bool includeReleased, CancellationToken _) =>
+            Task.FromResult<IReadOnlyList<ReservationLeaseInfo>>([]);
+
+        public Task<ReservationOperationResult> MarkRecoveryRequiredAsync(
+            Guid leaseId, string reason, CancellationToken _) =>
+            throw new NotSupportedException();
     }
 
     private (ReservedFileOperations Ops, FakeReservationGateway Gateway) CreateOps()

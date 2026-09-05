@@ -34,6 +34,10 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
     public DbSet<PiCommandCenter.Infrastructure.Reservations.ProjectFencingTokenRow> ProjectFencingTokens => Set<PiCommandCenter.Infrastructure.Reservations.ProjectFencingTokenRow>();
 
     public DbSet<PiCommandCenter.Infrastructure.Reservations.ReservationAuditFactRow> ReservationAuditFacts => Set<PiCommandCenter.Infrastructure.Reservations.ReservationAuditFactRow>();
+    public DbSet<PiCommandCenter.Infrastructure.Verification.VerificationRunRow> VerificationRuns => Set<PiCommandCenter.Infrastructure.Verification.VerificationRunRow>();
+
+    public DbSet<PiCommandCenter.Infrastructure.Completion.RequestResultRow> RequestResults => Set<PiCommandCenter.Infrastructure.Completion.RequestResultRow>();
+
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {

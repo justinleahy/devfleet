@@ -57,8 +57,11 @@
             </div>
             <div class="metric">
                 <dt>Needs attention</dt>
-                <dd>@_attentionSessions</dd>
-                <p class="metric-note">@AttentionNote()</p>
+                <dd><a href="/attention">@_attentionSessions</a></dd>
+                <p class="metric-note">
+                    @AttentionNote()
+                    <a class="metric-link" href="/attention">Open the attention queue</a>
+                </p>
             </div>
         </dl>
     </section>

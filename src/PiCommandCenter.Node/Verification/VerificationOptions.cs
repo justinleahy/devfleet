@@ -1,0 +1,45 @@
+namespace PiCommandCenter.Node.Verification;
+
+/// <summary>
+/// Trusted verification profiles bound from the <c>Verification</c> configuration section.
+/// Agent prompts never supply executables or arguments.
+/// </summary>
+public sealed class VerificationOptions
+{
+    public const string SectionName = "Verification";
+
+    /// <summary>Named shared resource acquired for every verification run (SPEC §20.1).</summary>
+    public const string ProjectBuildResource = "project-build";
+
+    /// <summary>Captured stdout/stderr cap per stream, in bytes.</summary>
+    public int MaxOutputBytes { get; set; } = 64 * 1024;
+
+    /// <summary>Trusted profiles keyed by id. Empty means verification is not configured.</summary>
+    public Dictionary<string, VerificationProfileOptions> Profiles { get; set; } =
+        new(StringComparer.Ordinal);
+}
+
+/// <summary>One named verification profile from trusted configuration.</summary>
+public sealed class VerificationProfileOptions
+{
+    public string Id { get; set; } = string.Empty;
+
+    public List<VerificationCommandOptions> Commands { get; set; } = [];
+}
+
+/// <summary>One configured command. Executable and arguments are trusted configuration only.</summary>
+public sealed class VerificationCommandOptions
+{
+    public string Id { get; set; } = string.Empty;
+
+    public string Executable { get; set; } = string.Empty;
+
+    public string[] Arguments { get; set; } = [];
+
+    /// <summary>Repository-relative working directory. <c>.</c> is the canonical root.</summary>
+    public string WorkingDirectory { get; set; } = ".";
+
+    public int TimeoutSeconds { get; set; } = 900;
+
+    public bool Mandatory { get; set; } = true;
+}

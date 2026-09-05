@@ -1,0 +1,77 @@
+.callout {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    padding: calc(var(--design-unit) * 4px);
+    border-radius: calc(var(--control-corner-radius) * 1px);
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-inline-start: calc(var(--design-unit) * 1px) solid var(--neutral-stroke-strong-rest);
+    background-color: var(--neutral-layer-1);
+}
+
+.callout.is-error {
+    border-inline-start-color: var(--error);
+}
+
+.callout.is-warning {
+    border-inline-start-color: var(--warning);
+}
+
+.callout-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: calc(var(--design-unit) * 2px);
+}
+
+
+.callout-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    inline-size: calc(var(--design-unit) * 6px);
+    block-size: calc(var(--design-unit) * 6px);
+    border-radius: 50%;
+    font-weight: 700;
+    color: var(--neutral-fill-inverse-rest);
+    background-color: var(--warning);
+}
+
+.callout.is-error .callout-mark {
+    background-color: var(--error);
+}
+.callout-head h3 {
+    margin: 0;
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+    font-weight: 600;
+}
+
+.callout-detail {
+    margin: 0;
+    max-width: 76ch;
+}
+
+.callout-evidence {
+    margin: 0;
+    color: var(--neutral-foreground-hint);
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-size: var(--type-ramp-minus-2-font-size);
+    overflow-wrap: anywhere;
+}
+
+.mono {
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}

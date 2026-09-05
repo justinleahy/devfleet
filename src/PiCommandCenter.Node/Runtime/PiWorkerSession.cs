@@ -26,6 +26,7 @@ public sealed class PiWorkerSession : IAsyncDisposable
     private readonly IPiOrchestrationRequestHandler _orchestration;
     private readonly TimeSpan _requestTimeout;
     private readonly TimeProvider _timeProvider;
+    private readonly TimeSpan _heartbeatStaleAfter;
     private readonly ILogger _logger;
 
     private readonly Channel<NormalizedAgentEvent> _events =
@@ -42,6 +43,7 @@ public sealed class PiWorkerSession : IAsyncDisposable
     private long _lastSequenceSeen;
     private long _nextMessageId;
     private DateTimeOffset? _lastHeartbeatAt;
+    private int _disconnectedEmitted;
     private bool _isStreaming;
     private string? _lastEventType;
     private string? _providerSessionId;
@@ -55,7 +57,8 @@ public sealed class PiWorkerSession : IAsyncDisposable
         IPiOrchestrationRequestHandler orchestration,
         TimeSpan requestTimeout,
         TimeProvider timeProvider,
-        ILogger logger)
+        ILogger logger,
+        TimeSpan? heartbeatStaleAfter = null)
     {
         _identity = identity ?? throw new ArgumentNullException(nameof(identity));
         _process = process ?? throw new ArgumentNullException(nameof(process));
@@ -68,6 +71,9 @@ public sealed class PiWorkerSession : IAsyncDisposable
         }
 
         _requestTimeout = requestTimeout;
+        _heartbeatStaleAfter = heartbeatStaleAfter is { } stale && stale > TimeSpan.Zero
+            ? stale
+            : TimeSpan.FromSeconds(30);
     }
 
     public string SessionId => _identity.SessionId;
@@ -134,42 +140,66 @@ public sealed class PiWorkerSession : IAsyncDisposable
     public async Task<AgentRuntimeSnapshot> GetSnapshotAsync(CancellationToken cancellationToken)
     {
         var exited = _process.Exited.IsCompleted;
-        AgentLiveness liveness = exited ? AgentLiveness.Exited : AgentLiveness.Online;
-        var reason = exited ? "worker process exited" : "worker online";
+        var disconnected = !exited && IsHeartbeatStale();
+        AgentLiveness liveness = exited
+            ? AgentLiveness.Exited
+            : disconnected
+                ? AgentLiveness.Disconnected
+                : AgentLiveness.Online;
+        var reason = exited
+            ? "worker process exited"
+            : disconnected
+                ? "Last heartbeat exceeded the disconnect threshold"
+                : "worker online";
 
-        try
+        if (!exited && !disconnected)
         {
-            var response = await RequestAsync("session.snapshot", null, cancellationToken)
-                .ConfigureAwait(false);
-            if (response.Payload is JsonElement body && body.ValueKind == JsonValueKind.Object)
+            try
             {
-                _isStreaming = body.TryGetProperty("isStreaming", out var streaming)
-                    && streaming.ValueKind == JsonValueKind.True;
-                if (body.TryGetProperty("seq", out var seq) && seq.ValueKind == JsonValueKind.Number
-                    && seq.TryGetInt64(out var lastSeq))
+                var response = await RequestAsync("session.snapshot", null, cancellationToken)
+                    .ConfigureAwait(false);
+                if (response.Payload is JsonElement body && body.ValueKind == JsonValueKind.Object)
                 {
-                    UpdateLastSequence(lastSeq);
+                    _isStreaming = body.TryGetProperty("isStreaming", out var streaming)
+                        && streaming.ValueKind == JsonValueKind.True;
+                    if (body.TryGetProperty("seq", out var seq) && seq.ValueKind == JsonValueKind.Number
+                        && seq.TryGetInt64(out var lastSeq))
+                    {
+                        UpdateLastSequence(lastSeq);
+                    }
                 }
             }
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Snapshot request for session {SessionId} failed.", SessionId);
-            if (!exited)
+            catch (OperationCanceledException)
             {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Snapshot request for session {SessionId} failed.", SessionId);
+                liveness = AgentLiveness.Disconnected;
                 reason = "snapshot unavailable: " + ex.Message;
+                await EmitDisconnectedAsync(reason).ConfigureAwait(false);
             }
         }
+        else if (disconnected)
+        {
+            await EmitDisconnectedAsync(reason).ConfigureAwait(false);
+        }
 
-        (var activity, var workState) = _failed
-            ? (AgentActivity.Idle, AgentWorkState.Failed)
+        var activity = _failed
+            ? AgentActivity.Idle
+            : liveness == AgentLiveness.Disconnected
+                ? AgentActivity.Responding
+                : _isStreaming
+                    ? AgentActivity.Responding
+                    : _lastEventType is "turn.completed"
+                        ? AgentActivity.Idle
+                        : AgentActivity.Reasoning;
+        var workState = _failed
+            ? AgentWorkState.Failed
             : _isStreaming
-                ? (AgentActivity.Responding, AgentWorkState.Executing)
-                : (AgentActivity.Idle, AgentWorkState.Starting);
+                ? AgentWorkState.Executing
+                : AgentWorkState.Starting;
 
         return new AgentRuntimeSnapshot(
             SessionId,
@@ -221,8 +251,56 @@ public sealed class PiWorkerSession : IAsyncDisposable
         var stdout = PumpStdoutAsync(_disposeCts.Token);
         var stderr = PumpStderrAsync(_disposeCts.Token);
         var exit = PumpExitAsync();
-        _ = Task.WhenAll(stdout, stderr, exit);
+        var heartbeat = PumpHeartbeatWatchAsync(_disposeCts.Token);
+        _ = Task.WhenAll(stdout, stderr, exit, heartbeat);
         return stdout;
+    }
+
+    private bool IsHeartbeatStale()
+    {
+        var last = _lastHeartbeatAt;
+        if (last is null)
+        {
+            return false;
+        }
+
+        return _timeProvider.GetUtcNow() - last.Value > _heartbeatStaleAfter;
+    }
+
+    private async Task PumpHeartbeatWatchAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1), _timeProvider);
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (_failed || _closedGracefully || _process.Exited.IsCompleted)
+                {
+                    return;
+                }
+
+                if (IsHeartbeatStale())
+                {
+                    await EmitDisconnectedAsync("Last heartbeat exceeded the disconnect threshold")
+                        .ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    private Task EmitDisconnectedAsync(string reason)
+    {
+        if (Interlocked.Exchange(ref _disconnectedEmitted, 1) != 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        return EmitSyntheticAsync(
+            "session.disconnected",
+            new Dictionary<string, object?> { ["reason"] = reason });
     }
 
     private async Task PumpStdoutAsync(CancellationToken cancellationToken)

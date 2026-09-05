@@ -48,6 +48,7 @@ public static class DependencyInjection
         services.AddScoped<INodeEventSink, NodeEventSink>();
         services.AddScoped<IAgentSessionStore, AgentSessionStore>();
         services.AddReservations();
+        services.AddVerificationAndCompletion();
         return services;
     }
 }

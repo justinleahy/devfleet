@@ -3,6 +3,8 @@ using Microsoft.Extensions.Options;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Node;
 using PiCommandCenter.Node.Runtime;
+using PiCommandCenter.Node.Child;
+using PiCommandCenter.Node.Repository;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -78,8 +80,12 @@ public class PiRootSessionSupervisorTests : IDisposable
             new FileLogger<PiRuntimeAdapter>(logPath));
         var supervisor = new PiRootSessionSupervisor(
             Options.Create(new PiWorkerOptions()),
+            Options.Create(new NodeOptions { RequireCleanStart = false }),
             adapter,
             spool,
+            new StubInspector(),
+            new RequestWorkspaceTracker(),
+            new StubCrash(),
             TimeProvider.System,
             new FileLogger<PiRootSessionSupervisor>(logPath));
         return (supervisor, spool, handler);
@@ -116,7 +122,7 @@ public class PiRootSessionSupervisorTests : IDisposable
 
         Assert.StartsWith(PiRuntimeAdapter.RootSessionIdPrefix, sessionId);
 
-        var pending = await SpoolAwaitingAsync(spool, events => events.Count >= 2);
+        var pending = await SpoolAwaitingAsync(spool, events => events.Any(e => e.Type == "turn.started"));
 
         // The spool is the durability boundary: registration first, then every runtime event.
         Assert.Equal("session.registered", pending[0].Type);
@@ -204,5 +210,27 @@ public class PiRootSessionSupervisorTests : IDisposable
             Requests.Add((requestType, context.SessionId));
             return Task.FromResult(PiToolResponse.Success());
         }
+    }
+
+    private sealed class StubInspector : IRepositoryInspector
+    {
+        public Task<RepositoryBaseline> CaptureBaselineAsync(
+            string repositoryRoot, bool requireCleanStart, bool allowUntrackedFiles, CancellationToken cancellationToken)
+            => Task.FromResult(new RepositoryBaseline("main", "abc123", "", true, []));
+
+        public Task<RepositoryDiffInspection> InspectDiffAsync(
+            string repositoryRoot, string baseCommit, IReadOnlyList<ReservationLeaseInfo> leases, CancellationToken cancellationToken)
+            => Task.FromResult(new RepositoryDiffInspection("main", baseCommit, [], []));
+
+        public Task DetectExternalChangesAsync(
+            string repositoryRoot, string baseCommit, IReadOnlyList<ReservationLeaseInfo> leases, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+    }
+
+    private sealed class StubCrash : IRuntimeCrashRecovery
+    {
+        public Task MarkOwnedLeasesRecoveryRequiredAsync(
+            Guid nodeId, Guid projectId, Guid? requestId, string ownerSessionId, string reason, CancellationToken cancellationToken)
+            => Task.CompletedTask;
     }
 }

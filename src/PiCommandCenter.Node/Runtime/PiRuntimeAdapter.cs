@@ -22,6 +22,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
     private readonly IPiWorkerProcessFactory _processFactory;
     private readonly IPiOrchestrationRequestHandler _orchestration;
     private readonly string _nodeId;
+    private readonly TimeSpan _heartbeatStaleAfter;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<PiRuntimeAdapter> _logger;
     private readonly ConcurrentDictionary<string, PiWorkerSession> _sessions = new();
@@ -41,6 +42,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _options = workerOptions.Value;
+        _heartbeatStaleAfter = TimeSpan.FromSeconds(Math.Max(1, nodeOptions.Value.HeartbeatSeconds) * 3);
         _nodeId = nodeOptions.Value.Id.ToString("D");
     }
 
@@ -94,7 +96,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
             _orchestration,
             TimeSpan.FromSeconds(_options.RequestTimeoutSeconds),
             _timeProvider,
-            _logger);
+            _logger,
+            _heartbeatStaleAfter);
 
         // Register before the handshake so custom-tool requests racing the start response can
         // already be persisted; removed again below if the handshake fails.

@@ -1,15 +1,18 @@
 using Microsoft.AspNetCore.SignalR;
+using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Mail;
 using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Requests;
 using PiCommandCenter.Application.Reservations;
 using PiCommandCenter.Domain.Reservations;
 using PiCommandCenter.Application.Transport;
+using PiCommandCenter.Application.Verification;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Mail;
 using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Requests;
+using PiCommandCenter.Domain.Verification;
 
 namespace PiCommandCenter.ControlPlane.Hubs;
 
@@ -27,6 +30,13 @@ public static class NodeTransportLimits
     public const int MaxActiveSessionIds = 200;
     public const int MaxMailPayloadBytes = 64 * 1024;
     public const int MaxMailInboxCount = 200;
+    public const int MaxSessionIdLength = 128;
+    public const int MaxVerificationIdLength = 128;
+    public const int MaxVerificationOutputBytes = 16_384;
+    public const int MaxArtifactPathBytes = 1024;
+    public const int MaxCompletionSummaryBytes = 64 * 1024;
+    public const int MaxChangedFiles = 500;
+    public const int MaxReviewFindings = 200;
 }
 
 /// <summary>
@@ -40,6 +50,8 @@ public sealed class NodeHub(
     IReservationService reservationService,
     IMessageService messageService,
     IRequestClaimService claimService,
+    IVerificationRunStore verificationRuns,
+    ICompletionGateService completionGate,
     TimeProvider timeProvider,
     ILogger<NodeHub> logger) : Hub
 {
@@ -295,6 +307,117 @@ public sealed class NodeHub(
         return leases.Select(ToLeaseMessage).ToArray();
     }
 
+    /// <summary>Records one verification command run. Identifiers are required and bounded.</summary>
+    public async Task<VerificationRunMessage> RecordVerification(VerificationRunMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        RequireCorrelation(message.CorrelationId, message.ProjectId, message.RequestId, message.SessionId);
+        if (string.IsNullOrWhiteSpace(message.ProfileId) || message.ProfileId.Length > NodeTransportLimits.MaxVerificationIdLength)
+        {
+            throw new HubException("Verification profile id is required and bounded.");
+        }
+
+        if (string.IsNullOrWhiteSpace(message.CommandId) || message.CommandId.Length > NodeTransportLimits.MaxVerificationIdLength)
+        {
+            throw new HubException("Verification command id is required and bounded.");
+        }
+
+        if (message.OutputSummary is { Length: > NodeTransportLimits.MaxVerificationOutputBytes })
+        {
+            throw new HubException(
+                $"Verification output exceeds the limit of {NodeTransportLimits.MaxVerificationOutputBytes} bytes.");
+        }
+
+        if (message.OutputArtifactPath is { Length: > NodeTransportLimits.MaxArtifactPathBytes })
+        {
+            throw new HubException(
+                $"Verification artifact path exceeds the limit of {NodeTransportLimits.MaxArtifactPathBytes} bytes.");
+        }
+
+        if (!Enum.IsDefined(typeof(VerificationRunStatus), message.Status))
+        {
+            throw new HubException($"Unknown verification status '{message.Status}'.");
+        }
+
+        try
+        {
+            var recorded = await verificationRuns.RecordAsync(
+                new VerificationRunDto(
+                    message.Id,
+                    message.RequestId,
+                    message.ProfileId.Trim(),
+                    message.CommandId.Trim(),
+                    (VerificationRunStatus)message.Status,
+                    message.ExitCode,
+                    message.StartedAt,
+                    message.CompletedAt,
+                    message.OutputSummary,
+                    message.OutputArtifactPath,
+                    message.Mandatory),
+                Context.ConnectionAborted).ConfigureAwait(false);
+
+            return ToMessage(message.CorrelationId, message.ProjectId, message.SessionId, recorded);
+        }
+        catch (Exception ex) when (ex is not HubException and not OperationCanceledException)
+        {
+            throw new HubException(ex.InnerException?.Message ?? ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Evaluates the objective completion gate. Rejection returns the complete missing-requirement list.
+    /// </summary>
+    public async Task<CompletionGateDecisionMessage> EvaluateCompletion(EvaluateCompletionMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        RequireCorrelation(message.CorrelationId, message.ProjectId, message.RequestId, message.RootSessionId);
+        ArgumentNullException.ThrowIfNull(message.Evidence);
+
+        if (message.Evidence.SummaryMarkdown is { Length: > NodeTransportLimits.MaxCompletionSummaryBytes })
+        {
+            throw new HubException(
+                $"Completion summary exceeds the limit of {NodeTransportLimits.MaxCompletionSummaryBytes} bytes.");
+        }
+
+        if (message.Evidence.ChangedFiles is { Count: > NodeTransportLimits.MaxChangedFiles })
+        {
+            throw new HubException(
+                $"Changed-file list exceeds the limit of {NodeTransportLimits.MaxChangedFiles}.");
+        }
+
+        var findings = message.Evidence.ReviewFindings ?? [];
+        if (findings.Count > NodeTransportLimits.MaxReviewFindings)
+        {
+            throw new HubException(
+                $"Review finding list exceeds the limit of {NodeTransportLimits.MaxReviewFindings}.");
+        }
+
+        try
+        {
+            var decision = await completionGate.EvaluateAsync(
+                new ProjectId(message.ProjectId),
+                new WorkRequestId(message.RequestId),
+                message.RootSessionId.Trim(),
+                new CompletionEvidence(
+                    message.Evidence.SummaryMarkdown,
+                    message.Evidence.ChangedFiles,
+                    findings.Select(f => new ReviewFinding(f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
+                    message.Evidence.VerificationSummary),
+                Context.ConnectionAborted).ConfigureAwait(false);
+
+            return new CompletionGateDecisionMessage(
+                message.CorrelationId,
+                decision.Accepted,
+                decision.MissingRequirements,
+                decision.Result is null ? null : ToResultMessage(decision.Result));
+        }
+        catch (RequestNotFoundException ex)
+        {
+            throw new HubException(ex.Message);
+        }
+    }
+
+
     /// <summary>
     /// Runs one reservation service call and folds typed failures into the transport
     /// result envelope instead of surfacing raw hub exception strings.
@@ -509,6 +632,59 @@ public sealed class NodeHub(
             string.Equals(r.SessionId, recipientSessionId, StringComparison.Ordinal));
         return new MailReceiptMessage(delivered.Id, recipientSessionId, recipient.ReadAtUtc, recipient.AcknowledgedAtUtc);
     }
+
+    private static void RequireCorrelation(Guid correlationId, Guid projectId, Guid requestId, string sessionId)
+    {
+        if (correlationId == Guid.Empty)
+        {
+            throw new HubException("Correlation id is required.");
+        }
+
+        if (projectId == Guid.Empty)
+        {
+            throw new HubException("Project id is required.");
+        }
+
+        if (requestId == Guid.Empty)
+        {
+            throw new HubException("Request id is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionId) || sessionId.Length > NodeTransportLimits.MaxSessionIdLength)
+        {
+            throw new HubException("Session id is required and bounded.");
+        }
+    }
+
+    private static VerificationRunMessage ToMessage(
+        Guid correlationId,
+        Guid projectId,
+        string sessionId,
+        VerificationRunDto run) => new(
+        correlationId,
+        projectId,
+        run.RequestId,
+        sessionId,
+        run.Id,
+        run.ProfileId,
+        run.CommandId,
+        (int)run.Status,
+        run.Status.ToString(),
+        run.ExitCode,
+        run.StartedAt,
+        run.CompletedAt,
+        run.OutputSummary,
+        run.OutputArtifactPath,
+        run.Mandatory);
+
+    private static RequestResultMessage ToResultMessage(RequestResultDto result) => new(
+        result.RequestId,
+        result.SummaryMarkdown,
+        result.ChangedFiles,
+        result.ReviewFindings.Select(f => new ReviewFindingMessage(
+            f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
+        result.VerificationSummary,
+        result.CreatedAt);
 
     private const string SessionGroupsKey = "mail:sessionGroups";
 }

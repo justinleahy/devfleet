@@ -1,0 +1,66 @@
+.page-head {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+}
+
+.page-head h1 {
+    margin: 0;
+    font-size: var(--type-ramp-plus-4-font-size);
+    line-height: var(--type-ramp-plus-4-line-height);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+.page-lead {
+    margin: 0;
+    max-width: 78ch;
+    color: var(--neutral-foreground-hint);
+}
+
+.scan-note {
+    margin: 0;
+    color: var(--neutral-foreground-hint);
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-size: var(--type-ramp-minus-1-font-size);
+}
+
+.state-block {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--design-unit) * 3px);
+    padding: calc(var(--design-unit) * 6px) 0;
+    color: var(--neutral-foreground-hint);
+}
+
+.state-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: calc(var(--design-unit) * 3px);
+    padding: calc(var(--design-unit) * 7px);
+}
+
+.state-empty h2 {
+    margin: 0;
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
+    font-weight: 600;
+}
+
+.state-empty p {
+    margin: 0;
+    max-width: 64ch;
+    color: var(--neutral-foreground-hint);
+}
+
+.signal-stack {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+}
+
+.error-list {
+    margin: 0;
+    padding-inline-start: calc(var(--design-unit) * 5px);
+}

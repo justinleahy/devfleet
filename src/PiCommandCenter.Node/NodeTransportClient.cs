@@ -2,6 +2,9 @@ using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Application.Completion;
+using PiCommandCenter.Application.Verification;
+
 
 namespace PiCommandCenter.Node;
 
@@ -217,6 +220,95 @@ public sealed class NodeTransportClient : IAsyncDisposable
             message,
             cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>Records one verification command run (one-argument hub method).</summary>
+    public async Task<VerificationRunMessage> RecordVerificationAsync(
+        VerificationRunMessage message,
+        CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<VerificationRunMessage>(
+            "RecordVerification",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Maps an application run DTO onto <see cref="RecordVerificationAsync"/>.</summary>
+    public Task<VerificationRunMessage> RecordVerificationRunAsync(
+        VerificationRunDto run,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(run);
+        return RecordVerificationAsync(
+            new VerificationRunMessage(
+                Guid.NewGuid(),
+                Guid.Empty,
+                run.RequestId,
+                "node",
+                run.Id,
+                run.ProfileId,
+                run.CommandId,
+                (int)run.Status,
+                run.Status.ToString(),
+                run.ExitCode,
+                run.StartedAt,
+                run.CompletedAt,
+                run.OutputSummary,
+                run.OutputArtifactPath,
+                run.Mandatory),
+            cancellationToken);
+    }
+
+    /// <summary>Evaluates the objective completion gate (one-argument hub method).</summary>
+    public async Task<CompletionGateDecisionMessage> EvaluateCompletionAsync(
+        EvaluateCompletionMessage message,
+        CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<CompletionGateDecisionMessage>(
+            "EvaluateCompletion",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Maps application evidence onto <see cref="EvaluateCompletionAsync"/>.</summary>
+    public async Task<CompletionGateDecision> EvaluateCompletionAsync(
+        Guid projectId,
+        Guid requestId,
+        string rootSessionId,
+        CompletionEvidence evidence,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(evidence);
+        var decision = await EvaluateCompletionAsync(
+            new EvaluateCompletionMessage(
+                Guid.NewGuid(),
+                projectId,
+                requestId,
+                rootSessionId,
+                new CompletionEvidenceMessage(
+                    evidence.SummaryMarkdown,
+                    evidence.ChangedFiles,
+                    (evidence.ReviewFindings ?? []).Select(f => new ReviewFindingMessage(
+                        f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
+                    evidence.VerificationSummary)),
+            cancellationToken).ConfigureAwait(false);
+
+        return new CompletionGateDecision(
+            decision.Accepted,
+            decision.MissingRequirements,
+            decision.Result is null
+                ? null
+                : new RequestResultDto(
+                    decision.Result.RequestId,
+                    decision.Result.SummaryMarkdown,
+                    decision.Result.ChangedFiles,
+                    decision.Result.ReviewFindings.Select(f => new ReviewFinding(
+                        f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
+                    decision.Result.VerificationSummary,
+                    decision.Result.CreatedAt));
+    }
+
 
     private async Task<ReservationOperationResultMessage> InvokeReservationAsync<TMessage>(
         string methodName,

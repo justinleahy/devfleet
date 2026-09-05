@@ -11,6 +11,11 @@
 @using PiCommandCenter.Domain.Requests
 @using PiCommandCenter.Domain.Reservations
 @using PiCommandCenter.Domain.Sessions
+@using PiCommandCenter.Application.Completion
+@using PiCommandCenter.Application.Verification
+@using PiCommandCenter.Domain.Verification
+@using PiCommandCenter.Domain.Completion
+@using PiCommandCenter.Web.Components.Requests
 @using PiCommandCenter.Web.Components
 @using PiCommandCenter.Web.Components.Coordination
 @using PiCommandCenter.Web.Components.Sessions
@@ -21,6 +26,8 @@
 @inject PiCommandCenter.Application.Mail.IMessageService Mail
 @inject IReservationService ReservationAuthority
 @inject IClock Clock
+@inject IVerificationRunStore VerificationRunStore
+@inject ICompletionGateService CompletionGate
 
 <PageTitle>@(_request?.Title ?? "Request") &middot; Pi Command Center</PageTitle>
 
@@ -92,6 +99,26 @@ else
                               AllowDismiss="false">
                 @_loadError
             </FluentMessageBar>
+        }
+
+        @if (_attention.Count > 0)
+        {
+            <section class="signal-stack" aria-labelledby="attention-heading">
+                <FluentStack Orientation="Orientation.Horizontal"
+                             VerticalAlignment="VerticalAlignment.Center"
+                             HorizontalGap="12"
+                             Width="100%">
+                    <h2 id="attention-heading">Needs attention</h2>
+                    <FluentSpacer />
+                    <FluentAnchor Href="/attention" Appearance="Appearance.Stealth">
+                        Fleet attention queue
+                    </FluentAnchor>
+                </FluentStack>
+                @foreach (var signal in _attention)
+                {
+                    <AttentionCallout Signal="signal" Now="_snapshot" />
+                }
+            </section>
         }
 
         <FluentCard>
@@ -448,25 +475,363 @@ else
             }
         </section>
 
-        <section aria-labelledby="detail-heading">
-            <h2 id="detail-heading">Plan and diff</h2>
-            <p class="panel-lead">
-                These two views are projected from event families that have no read contract yet.
-                Counts below are the persisted events matching each family, so nothing is inferred.
-            </p>
-            <div class="pending-grid">
-                @foreach (var region in DetailRegions())
-                {
-                    <article class="pending">
-                        <h3>@region.Heading</h3>
-                        <p>
-                            <span class="pending-count">@CountEvents(region.Prefix)</span>
-                            events matching <span class="mono">@region.Prefix*</span>
+        <section aria-labelledby="plan-heading">
+            <h2 id="plan-heading">Structured plan</h2>
+            @if (_insights.CurrentPlan is not { } plan)
+            {
+                <p class="panel-empty">
+                    No plan is persisted for this request. The root agent's
+                    <span class="mono">create_plan</span> tool writes a
+                    <span class="mono">request.phase_changed</span> event with phase
+                    <span class="mono">plan</span>; this view renders that event and nothing else.
+                </p>
+            }
+            else
+            {
+                <FluentCard>
+                    <div class="panel">
+                        <p class="panel-lead">
+                            @(plan.IsRevision ? "Revision" : "Initial plan") persisted at
+                            <span class="mono">@plan.OccurredAt.ToString("u")</span>
+                            by @(plan.SessionId is null ? "the request scope" : SessionLabel(plan.SessionId))
+                            &middot; seq @plan.Sequence
+                            @if (_insights.PlanRevisions.Count > 1)
+                            {
+                                <text>&middot; @(_insights.PlanRevisions.Count - 1) earlier version(s)</text>
+                            }
                         </p>
-                        <p>@region.Note</p>
-                    </article>
-                }
-            </div>
+
+                        @if (plan.Reason is { Length: > 0 } reason)
+                        {
+                            <p class="operation">
+                                <span class="operation-label">Reason</span>
+                                <span>@reason</span>
+                            </p>
+                        }
+
+                        @if (plan.Steps.Count == 0)
+                        {
+                            <p class="panel-empty">
+                                The plan event carried no <span class="mono">steps</span> array. Its
+                                payload is shown verbatim rather than summarized.
+                            </p>
+                            <pre class="event-payload">@Payload(plan.PayloadJson)</pre>
+                        }
+                        else
+                        {
+                            <ol class="plan-steps">
+                                @foreach (var step in plan.Steps)
+                                {
+                                    <li>@step.Text</li>
+                                }
+                            </ol>
+                        }
+
+                        @if (_insights.PlanRevisions.Count > 1)
+                        {
+                            <details>
+                                <summary>Revision history</summary>
+                                <ul class="audit-list">
+                                    @foreach (var revision in PlanHistory())
+                                    {
+                                        <li>
+                                            <span class="event-type">
+                                                @(revision.IsRevision ? "plan_revision" : "plan")
+                                            </span>
+                                            <span class="event-origin">
+                                                seq @revision.Sequence &middot;
+                                                @revision.OccurredAt.ToString("u") &middot;
+                                                @revision.Steps.Count step(s)
+                                                @if (revision.Reason is { Length: > 0 } why)
+                                                {
+                                                    <text> &middot; @why</text>
+                                                }
+                                            </span>
+                                        </li>
+                                    }
+                                </ul>
+                            </details>
+                        }
+                    </div>
+                </FluentCard>
+            }
+        </section>
+
+        <section aria-labelledby="diff-heading">
+            <h2 id="diff-heading">Repository diff</h2>
+
+            @foreach (var external in _insights.ExternalChanges)
+            {
+                <FluentMessageBar Intent="MessageIntent.Error"
+                                  Title="External repository change detected"
+                                  AllowDismiss="false">
+                    @(external.Paths.Count == 0
+                        ? "The node recorded a change no lease accounts for and listed no paths."
+                        : $"Changed outside every lease: {string.Join(", ", external.Paths)}.")
+                    @external.Detail
+                    Completion stays blocked until a human attributes or reverts the change; the
+                    Command Center never resets, stashes, or cleans the repository.
+                </FluentMessageBar>
+            }
+
+            @if (_insights.LatestDiff is not { } diff)
+            {
+                <p class="panel-empty">
+                    No diff snapshot is persisted. The node writes
+                    <span class="mono">repository.changed</span> and
+                    <span class="mono">repository.checkpoint_created</span> events as it captures the
+                    working tree; this view renders those events only.
+                </p>
+            }
+            else
+            {
+                <FluentCard>
+                    <div class="panel">
+                        <p class="panel-lead">
+                            <span class="mono">@diff.EventType</span> at
+                            <span class="mono">@diff.OccurredAt.ToString("u")</span>
+                            &middot; seq @diff.Sequence
+                            &middot; @_insights.DiffSnapshots.Count snapshot(s) captured
+                        </p>
+
+                        <dl class="facts">
+                            <dt>Branch</dt>
+                            <dd>@(diff.Branch ?? "not recorded")</dd>
+                            <dt>Base commit</dt>
+                            <dd class="mono">@(diff.BaseCommit ?? "not recorded")</dd>
+                            <dt>Head commit</dt>
+                            <dd class="mono">@(diff.HeadCommit ?? "not recorded")</dd>
+                        </dl>
+
+                        @if (diff.Paths.Count == 0)
+                        {
+                            <p class="panel-empty">
+                                The snapshot recorded no paths. Its payload is shown verbatim.
+                            </p>
+                            <pre class="event-payload">@Payload(diff.PayloadJson)</pre>
+                        }
+                        else
+                        {
+                            <ul class="file-list">
+                                @foreach (var path in diff.Paths)
+                                {
+                                    <li class="@(path.Reserved == false ? "file-unattributed" : null)">
+                                        <span class="mono file-path">@path.Path</span>
+                                        @if (path.ChangeKind is { Length: > 0 } kind)
+                                        {
+                                            <FluentBadge Appearance="Appearance.Neutral">@kind</FluentBadge>
+                                        }
+                                        @if (path.LinesAdded is { } added || path.LinesRemoved is { } removed)
+                                        {
+                                            <span class="file-lines">
+                                                +@(path.LinesAdded?.ToString() ?? "?")
+                                                /
+                                                -@(path.LinesRemoved?.ToString() ?? "?")
+                                            </span>
+                                        }
+                                        <span class="file-owner">
+                                            @(path.OwnerSessionId is null
+                                                ? "ownership not recorded"
+                                                : SessionLabel(path.OwnerSessionId))
+                                        </span>
+                                    </li>
+                                }
+                            </ul>
+                        }
+                    </div>
+                </FluentCard>
+            }
+        </section>
+
+        <section aria-labelledby="verification-heading">
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="12"
+                         Width="100%">
+                <h2 id="verification-heading">Verification</h2>
+                <FluentSpacer />
+                <span class="event-origin" role="status" aria-live="polite">
+                    @VerificationSummary()
+                </span>
+            </FluentStack>
+
+            @if (_verificationError is not null)
+            {
+                <FluentMessageBar Intent="MessageIntent.Error"
+                                  Title="Verification store unavailable"
+                                  AllowDismiss="false">
+                    @_verificationError
+                </FluentMessageBar>
+            }
+            else if (_verificationRuns.Count == 0)
+            {
+                <p class="panel-empty">
+                    No verification command has run for this request. Runs are recorded by the node
+                    when the root agent calls <span class="mono">request_verification</span>; only
+                    profiles from trusted node configuration can execute.
+                </p>
+            }
+            else
+            {
+                <div class="run-grid">
+                    @foreach (var profile in VerificationProfiles())
+                    {
+                        <FluentCard>
+                            <section class="panel" aria-label="@($"Verification profile {profile.Key}")">
+                                <FluentStack Orientation="Orientation.Horizontal"
+                                             VerticalAlignment="VerticalAlignment.Center"
+                                             HorizontalGap="8"
+                                             Width="100%">
+                                    <h3>@profile.Key</h3>
+                                    <FluentSpacer />
+                                    <FluentBadge Appearance="@(ProfileGreen(profile.Value) ? Appearance.Accent : Appearance.Neutral)">
+                                        @(ProfileGreen(profile.Value) ? "all green" : "not green")
+                                    </FluentBadge>
+                                </FluentStack>
+
+                                <ul class="run-list">
+                                    @foreach (var run in profile.Value)
+                                    {
+                                        <li class="run @RunClass(run.Status)">
+                                            <span class="run-command mono">@run.CommandId</span>
+                                            <FluentBadge Appearance="@(run.Status == VerificationRunStatus.Passed ? Appearance.Accent : Appearance.Neutral)">
+                                                @run.Status
+                                            </FluentBadge>
+                                            @if (run.Mandatory)
+                                            {
+                                                <FluentBadge Appearance="Appearance.Neutral">mandatory</FluentBadge>
+                                            }
+                                            <span class="run-facts">
+                                                exit @(run.ExitCode?.ToString() ?? "n/a") &middot;
+                                                @RunDuration(run) &middot;
+                                                @run.StartedAt.ToString("u")
+                                            </span>
+                                            @if (run.OutputSummary is { Length: > 0 } summary)
+                                            {
+                                                <pre class="event-payload">@summary</pre>
+                                            }
+                                            @if (run.OutputArtifactPath is { Length: > 0 } artifact)
+                                            {
+                                                <span class="event-origin">artifact @artifact</span>
+                                            }
+                                        </li>
+                                    }
+                                </ul>
+                            </section>
+                        </FluentCard>
+                    }
+                </div>
+            }
+        </section>
+
+        <section aria-labelledby="result-heading">
+            <h2 id="result-heading">Final result</h2>
+
+            @if (_resultError is not null)
+            {
+                <FluentMessageBar Intent="MessageIntent.Error"
+                                  Title="Completion gate unavailable"
+                                  AllowDismiss="false">
+                    @_resultError
+                </FluentMessageBar>
+            }
+
+            @if (_insights.LatestRejection is { } rejection && _result is null)
+            {
+                <FluentMessageBar Intent="MessageIntent.Warning"
+                                  Title="The completion gate rejected the last attempt"
+                                  AllowDismiss="false">
+                    Recorded @rejection.OccurredAt.ToString("u") as
+                    <span class="mono">@rejection.EventType</span>.
+                </FluentMessageBar>
+
+                <FluentCard>
+                    <div class="panel">
+                        <h3>Missing requirements</h3>
+                        <ul class="requirement-list">
+                            @foreach (var requirement in rejection.MissingRequirements)
+                            {
+                                <li>
+                                    <span class="mono">@requirement</span>
+                                    <span class="hint">@RequirementText(requirement)</span>
+                                </li>
+                            }
+                        </ul>
+                    </div>
+                </FluentCard>
+            }
+
+            @if (_result is { } result)
+            {
+                <FluentCard>
+                    <div class="panel">
+                        <p class="panel-lead">
+                            Accepted by the completion gate at
+                            <span class="mono">@result.CreatedAt.ToString("u")</span>
+                            (@Relative(result.CreatedAt, _snapshot)).
+                        </p>
+
+                        <h3>Summary</h3>
+                        <p class="request-prompt">@result.SummaryMarkdown</p>
+
+                        <h3>Changed files (@result.ChangedFiles.Count)</h3>
+                        @if (result.ChangedFiles.Count == 0)
+                        {
+                            <p class="panel-empty">The accepted result recorded no changed file.</p>
+                        }
+                        else
+                        {
+                            <ul class="file-list">
+                                @foreach (var file in result.ChangedFiles)
+                                {
+                                    <li><span class="mono file-path">@file</span></li>
+                                }
+                            </ul>
+                        }
+
+                        <h3>Review findings (@result.ReviewFindings.Count)</h3>
+                        @if (result.ReviewFindings.Count == 0)
+                        {
+                            <p class="panel-empty">The reviewer recorded no finding.</p>
+                        }
+                        else
+                        {
+                            <ul class="finding-list">
+                                @foreach (var finding in result.ReviewFindings)
+                                {
+                                    <li class="@(finding.Blocking && !finding.Resolved ? "finding-blocking" : null)">
+                                        <span class="mono">@finding.Id</span>
+                                        <span>@finding.Summary</span>
+                                        <span class="badge-row">
+                                            <FluentBadge Appearance="@(finding.Blocking ? Appearance.Accent : Appearance.Neutral)">
+                                                @(finding.Blocking ? "blocking" : "non-blocking")
+                                            </FluentBadge>
+                                            <FluentBadge Appearance="Appearance.Neutral">
+                                                @(finding.Resolved ? "resolved" : "open")
+                                            </FluentBadge>
+                                            @if (finding.UserOverridden)
+                                            {
+                                                <FluentBadge Appearance="Appearance.Neutral">user override</FluentBadge>
+                                            }
+                                        </span>
+                                    </li>
+                                }
+                            </ul>
+                        }
+
+                        <h3>Verification summary</h3>
+                        <p class="request-prompt">@result.VerificationSummary</p>
+                    </div>
+                </FluentCard>
+            }
+            else if (_insights.LatestRejection is null && _resultError is null)
+            {
+                <p class="panel-empty">
+                    No result is persisted. The gate stores one only when it accepts a completion,
+                    and rejections appear here as
+                    <span class="mono">request.completion_rejected</span> events.
+                </p>
+            }
         </section>
     </FluentStack>
 }
@@ -506,6 +871,55 @@ else
     private string? _reservationError;
     private bool _loading = true;
     private bool _busy;
+    private IReadOnlyList<VerificationRunDto> _verificationRuns = Array.Empty<VerificationRunDto>();
+    private IReadOnlyList<AttentionSignal> _attention = Array.Empty<AttentionSignal>();
+    private RequestInsights _insights = RequestInsights.Empty;
+    private RequestResultDto? _result;
+    private string? _verificationError;
+    private string? _resultError;
+
+    /// <summary>
+    /// Reads the two outcome stores and reduces the event stream, then rebuilds the request's
+    /// attention signals from those persisted facts.
+    /// </summary>
+    private async Task LoadOutcomeAsync(WorkRequestId requestId, WorkRequestDto request)
+    {
+        _insights = RequestInsightsReader.Read(_events);
+
+        try
+        {
+            _verificationRuns = await VerificationRunStore.ListAsync(requestId, CancellationToken.None);
+            _verificationError = null;
+        }
+        catch (Exception ex)
+        {
+            _verificationError = ex.Message;
+            _verificationRuns = Array.Empty<VerificationRunDto>();
+        }
+
+        try
+        {
+            _result = await CompletionGate.GetResultAsync(requestId, CancellationToken.None);
+            _resultError = null;
+        }
+        catch (Exception ex)
+        {
+            _resultError = ex.Message;
+            _result = null;
+        }
+
+        var signals = new List<AttentionSignal>();
+        AttentionScanner.Scan(
+            signals,
+            request,
+            _project?.DisplayName ?? request.ProjectId.ToString(),
+            _sessions,
+            _leases,
+            _verificationRuns,
+            _insights,
+            Clock.UtcNow);
+        _attention = signals;
+    }
 
     protected override Task OnParametersSetAsync() => LoadAsync(showSpinner: true);
 
@@ -581,6 +995,7 @@ else
             await LoadSessionsAsync(requestId);
             await LoadMailAsync(_request);
             await LoadReservationsAsync(_request);
+            await LoadOutcomeAsync(requestId, _request);
         }
         catch (RequestNotFoundException)
         {
@@ -891,18 +1306,93 @@ else
             ? $"{session.AgentName} ({sessionId})"
             : sessionId;
 
-    private int CountEvents(string prefix)
+    private IEnumerable<PlanRevision> PlanHistory()
     {
-        var total = 0;
-        foreach (var evt in _events)
+        for (var index = _insights.PlanRevisions.Count - 2; index >= 0; index--)
         {
-            if (evt.Type.StartsWith(prefix, StringComparison.Ordinal))
+            yield return _insights.PlanRevisions[index];
+        }
+    }
+
+    /// <summary>Runs grouped by profile in first-seen order, each profile's runs oldest first.</summary>
+    private IEnumerable<KeyValuePair<string, List<VerificationRunDto>>> VerificationProfiles()
+    {
+        var byProfile = new Dictionary<string, List<VerificationRunDto>>(StringComparer.Ordinal);
+        var order = new List<string>();
+        foreach (var run in _verificationRuns)
+        {
+            if (!byProfile.TryGetValue(run.ProfileId, out var runs))
             {
-                total++;
+                runs = [];
+                byProfile[run.ProfileId] = runs;
+                order.Add(run.ProfileId);
+            }
+
+            runs.Add(run);
+        }
+
+        foreach (var profileId in order)
+        {
+            yield return new KeyValuePair<string, List<VerificationRunDto>>(profileId, byProfile[profileId]);
+        }
+    }
+
+    private static bool ProfileGreen(List<VerificationRunDto> runs)
+    {
+        foreach (var run in runs)
+        {
+            if (run.Status != VerificationRunStatus.Passed)
+            {
+                return false;
             }
         }
 
-        return total;
+        return runs.Count > 0;
+    }
+
+    private static string RunClass(VerificationRunStatus status) => status switch
+    {
+        VerificationRunStatus.Passed => "is-passed",
+        VerificationRunStatus.Running => "is-running",
+        VerificationRunStatus.Cancelled => string.Empty,
+        _ => "is-failed",
+    };
+
+    private static string RunDuration(VerificationRunDto run) =>
+        run.CompletedAt is { } completed
+            ? $"{(completed - run.StartedAt).TotalSeconds:0.0}s"
+            : "still running";
+
+    private string VerificationSummary()
+    {
+        if (_verificationError is not null)
+        {
+            return "verification store unavailable";
+        }
+
+        var green = 0;
+        var red = 0;
+        var mandatoryRed = 0;
+        foreach (var run in _verificationRuns)
+        {
+            if (run.Status == VerificationRunStatus.Passed)
+            {
+                green++;
+                continue;
+            }
+
+            if (run.Status is VerificationRunStatus.Failed or VerificationRunStatus.TimedOut)
+            {
+                red++;
+                if (run.Mandatory)
+                {
+                    mandatoryRed++;
+                }
+            }
+        }
+
+        return $"{_verificationRuns.Count} run(s) \u00b7 {green} green \u00b7 {red} red "
+            + $"({mandatoryRed} mandatory) \u00b7 refreshed {TimeText.Relative(_snapshot, Clock.UtcNow)}";
     }
 
     private string ProjectHref() =>
@@ -967,13 +1457,20 @@ else
         bool IsPrimary,
         IReadOnlyList<AgentMessageDto> Messages);
 
-    private readonly record struct DetailRegion(string Heading, string Prefix, string Note);
-
-    private static DetailRegion[] DetailRegions() =>
-    [
-        new("Structured plan", "plan", "The plan view renders once create_plan and revise_plan expose a read contract."),
-        new("Diff summary", "diff", "Per-request diff summaries render once inspect_project_diff results are projected."),
-    ];
+    private static string RequirementText(string code) => code switch
+    {
+        CompletionRequirements.PlanEvent => "no plan event is persisted for this request",
+        CompletionRequirements.ImplementationChild => "no implementation child agent completed",
+        CompletionRequirements.IndependentReviewer => "no independent reviewer completed",
+        CompletionRequirements.UnresolvedBlockingFinding => "a blocking review finding is unresolved",
+        CompletionRequirements.MandatoryVerification => "a mandatory verification command is not green",
+        CompletionRequirements.ActiveMutation => "a mutation is still in flight",
+        CompletionRequirements.ActiveReservation => "an active reservation is still held",
+        CompletionRequirements.DiffCaptured => "no repository diff was captured",
+        CompletionRequirements.OwnershipKnown => "a changed file has no known owner",
+        CompletionRequirements.ResultSummary => "the result summary is blank",
+        _ => "reported by the completion gate",
+    };
 
     private static string Relative(DateTimeOffset instant, DateTimeOffset now) =>
         TimeText.Relative(instant, now);

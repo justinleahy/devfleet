@@ -26,10 +26,7 @@
             <nav class="shell-nav" aria-label="Command center sections">
                 <FluentNavMenu Width="240" Title="Command center sections">
                     <FluentNavLink Href="/" Match="NavLinkMatch.All">Fleet</FluentNavLink>
-                    <FluentNavLink Disabled="true"
-                                   Tooltip="Attention signals are projected per session; the fleet-wide queue page is not built yet.">
-                        Attention
-                    </FluentNavLink>
+                    <FluentNavLink Href="/attention" Match="NavLinkMatch.Prefix">Attention</FluentNavLink>
                 </FluentNavMenu>
             </nav>
 
@@ -47,7 +44,7 @@
                          Width="100%">
                 <span>Pi Command Center</span>
                 <FluentSpacer />
-                <span>Projects, request queues, node connectivity, and agent session projections are live; the attention queue page is not built yet.</span>
+                <span>Projects, request queues, node connectivity, agent sessions, verification runs, and completion results are read from persisted projections.</span>
             </FluentStack>
         </FluentFooter>
     </FluentLayout>

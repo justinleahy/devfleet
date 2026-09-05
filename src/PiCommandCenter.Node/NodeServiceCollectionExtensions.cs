@@ -27,6 +27,16 @@ public static class NodeServiceCollectionExtensions
             .Services
             .AddSingleton<IValidateOptions<NodeOptions>, NodeOptionsValidator>()
             .AddSingleton<IPostConfigureOptions<NodeOptions>, NodeOptionsPostConfigure>()
+            .AddOptions<Verification.VerificationOptions>()
+            .BindConfiguration(Verification.VerificationOptions.SectionName)
+            .ValidateOnStart()
+            .Services
+            .AddSingleton<IValidateOptions<Verification.VerificationOptions>, Verification.VerificationOptionsValidator>()
+            .AddSingleton<Verification.IVerificationCommandRunner, Verification.VerificationCommandRunner>()
+            .AddSingleton<Repository.IRepositoryInspector, Repository.RepositoryInspector>()
+            .AddSingleton<Repository.RequestWorkspaceTracker>()
+            .AddSingleton<Child.INodeCompletionGateway, Child.NodeTransportCompletionGateway>()
+            .AddSingleton<Repository.IRuntimeCrashRecovery, Repository.RuntimeCrashRecovery>()
             .AddOptions<PiWorkerOptions>()
             .BindConfiguration(PiWorkerOptions.SectionName)
             .ValidateOnStart()

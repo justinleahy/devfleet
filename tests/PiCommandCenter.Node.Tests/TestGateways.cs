@@ -10,6 +10,9 @@ public sealed class FakeReservationGateway : INodeReservationGateway
 {
     public List<(Guid ProjectId, Guid RequestId, string OwnerSessionId, IReadOnlyList<ReservationScopeSpec> Scopes)> Acquires { get; } = [];
     public List<(string Path, string Operation)> Authorizations { get; } = [];
+    public List<Guid> Releases { get; } = [];
+    public List<(Guid LeaseId, string Reason)> Recoveries { get; } = [];
+    public GatewayError? AcquireError { get; set; }
     public (Guid ProjectId, Guid RequestId, string OwnerSessionId, IReadOnlyList<ReservationScopeSpec> Scopes)? LastAcquire { get; private set; }
 
     /// <summary>When set, overrides the authorization decision for matching (path, operation).</summary>
@@ -22,6 +25,8 @@ public sealed class FakeReservationGateway : INodeReservationGateway
         _granted[lease.LeaseId] = lease;
         return lease;
     }
+
+    public void Seed(ReservationLeaseInfo lease) => _granted[lease.LeaseId] = lease;
 
     private readonly Dictionary<Guid, ReservationLeaseInfo> _granted = new();
 
@@ -36,8 +41,13 @@ public sealed class FakeReservationGateway : INodeReservationGateway
         var acquire = (projectId, requestId, ownerSessionId, scopes);
         Acquires.Add(acquire);
         LastAcquire = acquire;
+        if (AcquireError is not null)
+        {
+            return Task.FromResult(new ReservationOperationResult(null, AcquireError));
+        }
+
         var lease = new ReservationLeaseInfo(
-            Guid.NewGuid(), 7, "Active", DateTimeOffset.UtcNow.AddMinutes(2), scopes);
+            Guid.NewGuid(), 7, "Active", DateTimeOffset.UtcNow.AddMinutes(2), scopes, ownerSessionId);
         _granted[lease.LeaseId] = lease;
         return Task.FromResult(new ReservationOperationResult(lease, null));
     }
@@ -66,12 +76,15 @@ public sealed class FakeReservationGateway : INodeReservationGateway
         Guid projectId,
         string sessionId,
         CancellationToken cancellationToken)
-        => Task.FromResult(_granted.Remove(leaseId)
+    {
+        Releases.Add(leaseId);
+        return Task.FromResult(_granted.Remove(leaseId)
             ? new ReservationOperationResult(
                 new ReservationLeaseInfo(leaseId, 0, "Released", DateTimeOffset.UtcNow, []),
                 null)
             : new ReservationOperationResult(
                 null, new GatewayError("not_found", "No such lease.")));
+    }
 
     public Task<ReservationOperationResult> TransferAsync(
         Guid leaseId,
@@ -111,6 +124,29 @@ public sealed class FakeReservationGateway : INodeReservationGateway
         }
 
         return Task.FromResult(new MutationAuthorizationResult(true, null));
+    }
+
+    public Task<IReadOnlyList<ReservationLeaseInfo>> ListAsync(
+        Guid projectId,
+        bool includeReleased,
+        CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<ReservationLeaseInfo>>([.. _granted.Values]);
+
+    public Task<ReservationOperationResult> MarkRecoveryRequiredAsync(
+        Guid leaseId,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        Recoveries.Add((leaseId, reason));
+        if (!_granted.TryGetValue(leaseId, out var lease))
+        {
+            return Task.FromResult(new ReservationOperationResult(
+                null, new GatewayError("not_found", "No such lease.")));
+        }
+
+        var marked = lease with { State = "RecoveryRequired" };
+        _granted[leaseId] = marked;
+        return Task.FromResult(new ReservationOperationResult(marked, null));
     }
 }
 
