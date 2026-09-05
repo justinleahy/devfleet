@@ -213,11 +213,17 @@ h2 {
 
 .node-row {
     display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    padding-block: calc(var(--design-unit) * 3px);
+    border-block-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.node-head {
+    display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
-    padding-block: calc(var(--design-unit) * 2px);
-    border-block-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
 }
 
 .node-name {
@@ -243,6 +249,94 @@ h2 {
 .node-seen-utc {
     font-family: var(--monospace-font-family, ui-monospace, monospace);
     opacity: 0.75;
+}
+
+/* Latest system snapshot: a dense telemetry strip under each node's identity row.
+   The exact figure is always text; the bar is a decorative glance aid. */
+.node-metrics {
+    display: grid;
+    /* Capped tracks keep the strip dense and left-aligned on wide screens instead
+       of stretching five bars across the whole viewport. */
+    grid-template-columns: repeat(auto-fit, minmax(136px, 184px));
+    gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 5px);
+    margin: 0;
+}
+
+.node-metric {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 0.5px);
+    min-width: 0;
+}
+
+.node-metric dt {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.node-metric dd {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    margin: 0;
+    min-width: 0;
+}
+
+.node-metric-value {
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.node-metric-detail {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    font-variant-numeric: tabular-nums;
+}
+
+.node-metric-none {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+}
+
+.node-meter {
+    display: block;
+    height: calc(var(--design-unit) * 1px);
+    border-radius: calc(var(--design-unit) * 1px);
+    background-color: var(--neutral-fill-secondary-rest);
+    overflow: hidden;
+}
+
+/* No minimum width: an idle node draws an empty track rather than a sliver that
+   would read the same as a small real reading. */
+.node-meter-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background-color: var(--accent-fill-rest);
+}
+
+.node-meter.is-high .node-meter-fill {
+    background-color: var(--warning, var(--accent-fill-rest));
+}
+
+.node-meter.is-critical .node-meter-fill {
+    background-color: var(--error, var(--accent-fill-rest));
+}
+
+
+.node-resources-none {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
 }
 
 .node-inline {
@@ -335,5 +429,21 @@ h2 {
         flex-direction: column;
         align-items: flex-start !important;
         row-gap: calc(var(--design-unit) * 3px);
+    }
+
+    /* Phone widths hold two telemetry columns at most, and pushing the heartbeat
+       stamp to the far edge only strands it on a line of its own. */
+    .node-metrics {
+        grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+        gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 3px);
+    }
+
+    .node-head .node-seen {
+        margin-inline-start: 0;
+    }
+
+    .node-metric-value {
+        font-size: var(--type-ramp-base-font-size);
+        line-height: var(--type-ramp-base-line-height);
     }
 }

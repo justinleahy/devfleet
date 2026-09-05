@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
+using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
 
 namespace PiCommandCenter.Node.RuntimeRouting;
@@ -21,7 +22,6 @@ public sealed class NodeRuntimeRoutingStore : INodeRuntimeRoutingStore, IDisposa
     };
     private readonly Guid _nodeId;
     private readonly string[] _allowedRoles;
-    private readonly string[] _allowedProfiles;
     private readonly string _path;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private NodeRuntimeConfigurationMessage _current;
@@ -32,16 +32,24 @@ public sealed class NodeRuntimeRoutingStore : INodeRuntimeRoutingStore, IDisposa
         ArgumentNullException.ThrowIfNull(worker);
         _nodeId = node.Value.Id;
         _allowedRoles = [.. worker.Value.AllowedChildRoles];
-        _allowedProfiles = [.. worker.Value.AllowedRuntimeProfiles];
         _path = Path.Combine(worker.Value.AgentDataDirectory, "role-routes.json");
 
         var initial = ToRoutes(worker.Value.RoleRoutes);
         if (File.Exists(_path))
         {
-            var saved = JsonSerializer.Deserialize<UpdateNodeRuntimeConfigurationMessage>(
-                File.ReadAllText(_path), JsonOptions)
-                ?? throw new InvalidOperationException($"Routing configuration '{_path}' is empty.");
-            initial = Normalize(saved.RoleRoutes);
+            using var document = JsonDocument.Parse(File.ReadAllText(_path));
+            if (ContainsRuntimeProfile(document.RootElement))
+            {
+                // Pre-selector routes named runtime profiles; they cannot be mapped onto
+                // '<runtime>/<model>' selectors, so the configured routes take over.
+                File.Delete(_path);
+            }
+            else
+            {
+                var saved = document.Deserialize<UpdateNodeRuntimeConfigurationMessage>(JsonOptions)
+                    ?? throw new InvalidOperationException($"Routing configuration '{_path}' is empty.");
+                initial = Normalize(saved.RoleRoutes);
+            }
         }
         _current = Build(initial);
     }
@@ -88,7 +96,7 @@ public sealed class NodeRuntimeRoutingStore : INodeRuntimeRoutingStore, IDisposa
     }
 
     private NodeRuntimeConfigurationMessage Build(IReadOnlyList<RuntimeRoleRouteMessage> routes)
-        => new(_nodeId, _allowedRoles, _allowedProfiles, routes);
+        => new(_nodeId, _allowedRoles, routes);
 
     private IReadOnlyList<RuntimeRoleRouteMessage> Normalize(
         IReadOnlyList<RuntimeRoleRouteMessage>? routes)
@@ -130,29 +138,18 @@ public sealed class NodeRuntimeRoutingStore : INodeRuntimeRoutingStore, IDisposa
             var candidates = new List<RuntimeRouteCandidateMessage>(route.Candidates.Count);
             foreach (var candidate in route.Candidates)
             {
-                if (candidate is null || string.IsNullOrWhiteSpace(candidate.RuntimeProfile))
+                if (!AgentModelSelector.TryParse(candidate?.Model, out var selector))
                 {
-                    throw new ArgumentException($"Every candidate for '{role}' must name a runtime profile.", nameof(routes));
+                    throw new ArgumentException(
+                        $"Candidate '{candidate?.Model}' for '{role}' is not a canonical '<runtime>/<model>' selector "
+                        + $"(runtimes: {string.Join(", ", AgentModelSelector.Runtimes)}).",
+                        nameof(routes));
                 }
-                var profile = candidate.RuntimeProfile.Trim();
-                if (!_allowedProfiles.Contains(profile, StringComparer.Ordinal))
+                if (!seen.Add(selector.Value))
                 {
-                    throw new ArgumentException($"Runtime profile '{profile}' is not allowed by this node.", nameof(routes));
+                    throw new ArgumentException($"Role '{role}' contains duplicate candidate '{selector.Value}'.", nameof(routes));
                 }
-                var model = candidate.Model?.Trim();
-                if (candidate.Model is not null && string.IsNullOrEmpty(model))
-                {
-                    throw new ArgumentException($"Models for '{role}' must be null or non-empty.", nameof(routes));
-                }
-                if (model is { Length: > 256 })
-                {
-                    throw new ArgumentException($"A model for '{role}' exceeds 256 characters.", nameof(routes));
-                }
-                if (!seen.Add(profile + "\0" + model))
-                {
-                    throw new ArgumentException($"Role '{role}' contains duplicate candidate '{profile}/{model ?? "<default>"}'.", nameof(routes));
-                }
-                candidates.Add(new RuntimeRouteCandidateMessage(profile, model));
+                candidates.Add(new RuntimeRouteCandidateMessage(selector.Value));
             }
             result.Add(new RuntimeRoleRouteMessage(role, candidates));
         }
@@ -164,7 +161,16 @@ public sealed class NodeRuntimeRoutingStore : INodeRuntimeRoutingStore, IDisposa
         => routes.Select(pair => new RuntimeRoleRouteMessage(
             pair.Key,
             pair.Value.Select(candidate => new RuntimeRouteCandidateMessage(
-                candidate.RuntimeProfile, candidate.Model)).ToArray())).ToArray();
+                AgentModelSelector.Parse(candidate.Model).Value)).ToArray())).ToArray();
+
+    private static bool ContainsRuntimeProfile(JsonElement element) => element.ValueKind switch
+    {
+        JsonValueKind.Object => element.EnumerateObject().Any(property =>
+            string.Equals(property.Name, "runtimeProfile", StringComparison.OrdinalIgnoreCase)
+            || ContainsRuntimeProfile(property.Value)),
+        JsonValueKind.Array => element.EnumerateArray().Any(ContainsRuntimeProfile),
+        _ => false,
+    };
 
     private static void RestrictOwnerOnly(string path)
     {

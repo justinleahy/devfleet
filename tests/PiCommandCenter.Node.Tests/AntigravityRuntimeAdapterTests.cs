@@ -49,13 +49,42 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
     }
 
     [Fact]
-    public async Task Write_capable_profiles_are_rejected()
+    public async Task Write_authorization_is_rejected_before_launch()
     {
-        var adapter = CreateAdapter(_root, Path.Combine(_root, "dump.json"));
+        var dump = Path.Combine(_root, "dump.json");
+        var adapter = CreateAdapter(_root, dump);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            adapter.StartAsync(MakeRequest(_root, "agy-reserved-write"), CancellationToken.None));
-        await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            adapter.StartAsync(MakeRequest(_root, "pi-reserved-write"), CancellationToken.None));
+            adapter.StartAsync(
+                MakeRequest(_root, authorization: new AgentRuntimeAuthorizationContext(Guid.NewGuid(), 7)),
+                CancellationToken.None));
+        Assert.False(File.Exists(dump));
+    }
+
+    [Fact]
+    public async Task Foreign_runtime_selectors_are_rejected_before_launch()
+    {
+        var dump = Path.Combine(_root, "dump.json");
+        var adapter = CreateAdapter(_root, dump);
+        await Assert.ThrowsAsync<NotSupportedException>(() =>
+            adapter.StartAsync(MakeRequest(_root, "codex/default"), CancellationToken.None));
+        await Assert.ThrowsAsync<NotSupportedException>(() =>
+            adapter.StartAsync(MakeRequest(_root, "claude-code/fable-5-1"), CancellationToken.None));
+        Assert.False(File.Exists(dump));
+    }
+
+    [Fact]
+    public void Model_argument_is_the_selector_suffix_or_omitted_for_default()
+    {
+        Assert.Null(AntigravityRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("antigravity/default")));
+        Assert.Equal(
+            "gemini-3-pro",
+            AntigravityRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("antigravity/gemini-3-pro")));
+        Assert.Equal(
+            "vendor/nested-id",
+            AntigravityRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("antigravity/vendor/nested-id")));
+        Assert.Equal(
+            ["--input-format", "stream-json", "--output-format", "stream-json"],
+            AntigravityRuntimeAdapter.BuildLaunchArguments(null).ToArray());
     }
 
     [Fact]
@@ -115,7 +144,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         var dump = Path.Combine(cwd, "launch.json");
         var adapter = CreateAdapter(cwd, dump);
         var handle = await adapter.StartAsync(
-            MakeRequest(cwd, "google-personal", model: "agy-role-model"),
+            MakeRequest(cwd, "antigravity/agy-role-model"),
             CancellationToken.None);
         Assert.Equal("agy-conv-1", handle.ProviderSessionId);
         Assert.Equal(AgentRuntimeKinds.Antigravity, handle.RuntimeKind);
@@ -137,7 +166,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "map")).FullName;
         var dump = Path.Combine(cwd, "init.json");
         var adapter = CreateAdapter(cwd, dump);
-        var handle = await adapter.StartAsync(MakeRequest(cwd, "reviewer"), CancellationToken.None);
+        var handle = await adapter.StartAsync(MakeRequest(cwd), CancellationToken.None);
 
         var events = await CollectUntilAsync(
             adapter,
@@ -167,7 +196,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "serial")).FullName;
         var dump = Path.Combine(cwd, "serial.json");
         var adapter = CreateAdapter(cwd, dump);
-        var handle = await adapter.StartAsync(MakeRequest(cwd, "researcher"), CancellationToken.None);
+        var handle = await adapter.StartAsync(MakeRequest(cwd), CancellationToken.None);
 
         using var watchCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         var seen = new List<Domain.Sessions.NormalizedAgentEvent>();
@@ -204,7 +233,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "unk")).FullName;
         var dump = Path.Combine(cwd, "unknown.json");
         var adapter = CreateAdapter(cwd, dump, mode: "unknown");
-        var handle = await adapter.StartAsync(MakeRequest(cwd, "google-personal"), CancellationToken.None);
+        var handle = await adapter.StartAsync(MakeRequest(cwd), CancellationToken.None);
         var events = await CollectUntilAsync(
             adapter,
             handle.SessionId,
@@ -214,7 +243,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
 
         var malformedAdapter = CreateAdapter(cwd, dump + ".m", mode: "malformed");
         var malformed = await malformedAdapter.StartAsync(
-            MakeRequest(cwd, "google-personal", sessionId: "agy-malformed-1"),
+            MakeRequest(cwd, sessionId: "agy-malformed-1"),
             CancellationToken.None);
         var malformedEvents = await CollectUntilAsync(
             malformedAdapter,
@@ -233,7 +262,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "err")).FullName;
         var dump = Path.Combine(cwd, "err.json");
         var adapter = CreateAdapter(cwd, dump, mode: "error");
-        var handle = await adapter.StartAsync(MakeRequest(cwd, "reviewer"), CancellationToken.None);
+        var handle = await adapter.StartAsync(MakeRequest(cwd), CancellationToken.None);
         var events = await CollectUntilAsync(
             adapter,
             handle.SessionId,
@@ -246,7 +275,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
 
         var crashAdapter = CreateAdapter(cwd, dump + ".c", mode: "crash");
         var crashed = await crashAdapter.StartAsync(
-            MakeRequest(cwd, "researcher", sessionId: "agy-crash-1"),
+            MakeRequest(cwd, sessionId: "agy-crash-1"),
             CancellationToken.None);
         var crashEvents = await CollectUntilAsync(
             crashAdapter,
@@ -263,7 +292,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "auth")).FullName;
         var dump = Path.Combine(cwd, "auth.json");
         var adapter = CreateAdapter(cwd, dump, mode: "auth");
-        var handle = await adapter.StartAsync(MakeRequest(cwd, "reviewer"), CancellationToken.None);
+        var handle = await adapter.StartAsync(MakeRequest(cwd), CancellationToken.None);
         var events = await CollectUntilAsync(
             adapter,
             handle.SessionId,
@@ -289,7 +318,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "hang")).FullName;
         var dump = Path.Combine(cwd, "hang.json");
         var adapter = CreateAdapter(cwd, dump, mode: "hang");
-        var handle = await adapter.StartAsync(MakeRequest(cwd, "google-personal"), CancellationToken.None);
+        var handle = await adapter.StartAsync(MakeRequest(cwd), CancellationToken.None);
         await adapter.CancelAsync(handle.SessionId, CancellationToken.None);
         var events = await CollectUntilAsync(
             adapter,
@@ -322,9 +351,9 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
 
     private static AgentStartRequest MakeRequest(
         string cwd,
-        string profile,
+        string model = "antigravity/default",
         string? sessionId = null,
-        string? model = null)
+        AgentRuntimeAuthorizationContext? authorization = null)
         => new(
             sessionId ?? "agy-session-1",
             new ProjectId(Guid.NewGuid()),
@@ -335,8 +364,8 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
             cwd,
             "Review the change",
             AgentRuntimeMode.Child,
-            profile,
-            model: model);
+            model,
+            authorization);
 
     private static async Task<List<Domain.Sessions.NormalizedAgentEvent>> CollectUntilAsync(
         AntigravityRuntimeAdapter adapter,

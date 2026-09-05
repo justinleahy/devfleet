@@ -55,7 +55,7 @@ public sealed class ClaudeReservationHookTests : IDisposable
         });
 
     private ClaudeHookInstallResult InstallWrite(ClaudeHookSessionContext context)
-        => _installer.Install(ClaudeRuntimeProfiles.ReservedWrite, context);
+        => _installer.Install(allowWrite: true, context);
 
     private static async Task<(int Exit, string Stdout, string Stderr)> RunHookAsync(
         ClaudeHookInstallResult install,
@@ -308,7 +308,7 @@ public sealed class ClaudeReservationHookTests : IDisposable
         Assert.Equal("dontAsk", permissions.GetProperty("defaultMode").GetString());
 
         var readonlyInstall = _installer.Install(
-            ClaudeRuntimeProfiles.ReadOnly,
+            allowWrite: false,
             Context(sessionId: "session-readonly"));
         using var readDoc = JsonDocument.Parse(File.ReadAllText(readonlyInstall.SettingsPath));
         var readAllow = readDoc.RootElement.GetProperty("permissions").GetProperty("allow")

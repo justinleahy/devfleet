@@ -15,8 +15,8 @@ public class AgentSessionTests
         parentSessionId: null,
         agentName: "root",
         role: "root",
-        runtime: "pi",
-        runtimeProfile: "default",
+        runtime: "codex",
+        model: "codex/gpt-6-astra",
         startedAt: StartedAt);
 
     private static NormalizedAgentEvent Event(
@@ -61,10 +61,24 @@ public class AgentSessionTests
     {
         Assert.Throws<ArgumentException>(() => AgentSession.Start(
             " ", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), null,
-            "root", "root", "pi", "default", StartedAt));
+            "root", "root", "codex", "codex/gpt-6-astra", StartedAt));
         Assert.Throws<ArgumentException>(() => AgentSession.Start(
             "session-root", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), null,
-            "", "root", "pi", "default", StartedAt));
+            "", "root", "codex", "codex/gpt-6-astra", StartedAt));
+        Assert.Throws<ArgumentException>(() => AgentSession.Start(
+            "session-root", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), null,
+            "root", "root", "codex", " ", StartedAt));
+    }
+
+    [Fact]
+    public void Start_trims_runtime_and_model()
+    {
+        var session = AgentSession.Start(
+            "session-root", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), null,
+            "root", "root", " codex ", " codex/gpt-6-astra ", StartedAt);
+
+        Assert.Equal("codex", session.Runtime);
+        Assert.Equal("codex/gpt-6-astra", session.Model);
     }
 
     [Fact]
@@ -221,8 +235,8 @@ public class AgentSessionTests
             parentSessionId: null,
             agentName: "root",
             role: "root",
-            runtime: "pi",
-            runtimeProfile: "default",
+            runtime: "codex",
+            model: "codex/gpt-6-astra",
             providerSessionId: "prov-9",
             liveness: AgentLiveness.Exited,
             activity: AgentActivity.Idle,
@@ -248,11 +262,11 @@ public class AgentSessionTests
     {
         Assert.Throws<ArgumentException>(() => AgentSession.Rehydrate(
             "s", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), null, "root", "root",
-            "pi", "default", null, AgentLiveness.Exited, AgentActivity.Idle, AgentAttention.None,
+            "codex", "codex/gpt-6-astra", null, AgentLiveness.Exited, AgentActivity.Idle, AgentAttention.None,
             AgentWorkState.Completed, "done", null, null, StartedAt, null, StartedAt.AddSeconds(-1), 1, 1));
         Assert.Throws<ArgumentException>(() => AgentSession.Rehydrate(
             "s", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), null, "root", "root",
-            "pi", "default", null, AgentLiveness.Online, AgentActivity.Idle, AgentAttention.None,
+            "codex", "codex/gpt-6-astra", null, AgentLiveness.Online, AgentActivity.Idle, AgentAttention.None,
             AgentWorkState.Executing, "busy", null, null, StartedAt, StartedAt.AddSeconds(-1), null, 1, 1));
     }
 

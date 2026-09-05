@@ -63,7 +63,7 @@ public class SqliteNodeEventSpoolTests : IDisposable
     public async Task Peek_returns_events_in_insertion_order_without_deleting_them()
     {
         await using var spool = CreateSpool();
-        foreach (var sequence in (long[]) [3, 1, 2])
+        foreach (var sequence in (long[])[3, 1, 2])
         {
             await spool.AppendAsync(MakeEvent("evt-" + sequence, sequence), CancellationToken.None);
         }
@@ -93,7 +93,7 @@ public class SqliteNodeEventSpoolTests : IDisposable
     public async Task Delete_removes_exactly_the_acknowledged_ids()
     {
         await using var spool = CreateSpool();
-        foreach (var sequence in (long[]) [1, 2, 3])
+        foreach (var sequence in (long[])[1, 2, 3])
         {
             await spool.AppendAsync(MakeEvent("evt-" + sequence, sequence), CancellationToken.None);
         }

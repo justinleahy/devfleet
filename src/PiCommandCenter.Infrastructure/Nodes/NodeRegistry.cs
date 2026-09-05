@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Nodes;
@@ -16,6 +17,8 @@ public sealed class NodeRegistry(
     ControlPlaneDbContext db,
     IProjectionNotifier notifier) : INodeRegistry
 {
+    private static readonly JsonSerializerOptions ResourceSnapshotJsonOptions = new(JsonSerializerDefaults.Web);
+
     public async Task<IReadOnlyList<NodeDto>> ListAsync(CancellationToken cancellationToken = default)
     {
         var nodes = await db.FleetNodes
@@ -73,14 +76,16 @@ public sealed class NodeRegistry(
         DateTimeOffset at,
         CancellationToken cancellationToken = default)
     {
+        var resourceSnapshotJson = SerializeResources(command.Resources);
+
         var node = await db.FleetNodes
             .SingleOrDefaultAsync(n => n.Id == command.Id, cancellationToken)
             ?? throw new NodeNotFoundException(command.Id);
 
-        node.Heartbeat(node.AgentVersion, node.CapabilitiesJson, at);
+        node.Heartbeat(node.AgentVersion, node.CapabilitiesJson, at, resourceSnapshotJson);
         await SaveWithConcurrencyRetryAsync(
             node,
-            now => node.Heartbeat(node.AgentVersion, node.CapabilitiesJson, now),
+            now => node.Heartbeat(node.AgentVersion, node.CapabilitiesJson, now, resourceSnapshotJson),
             cancellationToken);
         notifier.Publish(ProjectionChange.Fleet());
         return ToDto(node);
@@ -138,5 +143,71 @@ public sealed class NodeRegistry(
         node.LastHeartbeatAt,
         node.Status,
         node.CapabilitiesJson,
-        node.Version);
+        node.Version,
+        DeserializeResources(node.ResourceSnapshotJson));
+
+    private static string? SerializeResources(NodeResourceSnapshotDto? resources)
+    {
+        if (resources is null)
+        {
+            return null;
+        }
+
+        ValidateResources(resources);
+        return JsonSerializer.Serialize(resources, ResourceSnapshotJsonOptions);
+    }
+
+    private static NodeResourceSnapshotDto? DeserializeResources(string? resourceSnapshotJson)
+    {
+        if (resourceSnapshotJson is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var resources = JsonSerializer.Deserialize<NodeResourceSnapshotDto>(
+                resourceSnapshotJson,
+                ResourceSnapshotJsonOptions);
+            return resources is not null && ResourcesAreValid(resources) ? resources : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static void ValidateResources(NodeResourceSnapshotDto resources)
+    {
+        if (!ResourcesAreValid(resources))
+        {
+            throw new ArgumentException("Resource snapshot values are invalid.", nameof(resources));
+        }
+    }
+
+    private static bool ResourcesAreValid(NodeResourceSnapshotDto resources) =>
+        resources.ObservedAt.Offset == TimeSpan.Zero
+        && IsValidPercentage(resources.CpuUsagePercent)
+        && IsValidNonNegative(resources.LoadAverageOneMinute)
+        && IsValidNonNegative(resources.UptimeSeconds)
+        && IsValidBytePair(resources.MemoryUsedBytes, resources.MemoryTotalBytes)
+        && IsValidBytePair(resources.DiskUsedBytes, resources.DiskTotalBytes);
+
+    private static bool IsValidPercentage(double? value) =>
+        value is not { } number || (double.IsFinite(number) && number is >= 0 and <= 100);
+
+    private static bool IsValidNonNegative(double? value) =>
+        value is not { } number || (double.IsFinite(number) && number >= 0);
+
+    private static bool IsValidBytePair(long? used, long? total)
+    {
+        if (used is < 0 || total is <= 0)
+        {
+            return false;
+        }
+
+        return used is not { } usedBytes
+            || total is not { } totalBytes
+            || usedBytes <= totalBytes;
+    }
 }

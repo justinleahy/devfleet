@@ -16,7 +16,8 @@ namespace PiCommandCenter.Node.Runtime.Antigravity;
 /// <summary>
 /// Official <c>agy</c> adapter (SPEC §27): persistent stream-json process, one outstanding
 /// prompt, init/conversation capture, normalized step/result events, unknown-event tolerance,
-/// graceful stdin close, SIGINT cancel. Read-only reviewer/researcher profiles only.
+/// graceful stdin close, SIGINT cancel. Always read-only: the process runs inside
+/// <see cref="AntigravityReadOnlySandbox"/> and any write authorization is rejected up front.
 /// </summary>
 public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
 {
@@ -35,16 +36,20 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
         return arguments;
     }
 
-    private static readonly HashSet<string> ReadOnlyProfiles = new(StringComparer.OrdinalIgnoreCase)
+    /// <summary>
+    /// <c>--model</c> value for a selector: the provider-native id, or null when the selector asks
+    /// for the provider default so <c>agy</c> picks its own. Rejects non-antigravity runtimes.
+    /// </summary>
+    internal static string? ResolveModelArgument(AgentModelSelector selector)
     {
-        "google-personal",
-        "antigravity-readonly",
-        "antigravity-read-only",
-        "reviewer",
-        "researcher",
-        "read-only",
-        "readonly",
-    };
+        if (selector.Runtime != AgentModelSelector.Antigravity)
+        {
+            throw new NotSupportedException(
+                $"Antigravity runtime only accepts '{AgentModelSelector.Antigravity}/<model>' selectors; got '{selector}'.");
+        }
+
+        return selector.IsProviderDefault ? null : selector.ModelId;
+    }
 
     private readonly AntigravityOptions _options;
     private readonly IAntigravityProcessFactory _processFactory;
@@ -86,11 +91,12 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        RejectWriteCapable(request);
+        RejectWriteAuthorization(request);
+        var model = ResolveModelArgument(request.Model);
 
         var process = _processFactory.Start(new AntigravityProcessStartInfo(
             _options.Executable,
-            BuildLaunchArguments(request.Model),
+            BuildLaunchArguments(model),
             request.WorkingDirectory));
 
         var session = new AntigravitySession(
@@ -153,14 +159,17 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
     public int? GetProcessId(string sessionId)
         => _sessions.TryGetValue(sessionId, out var session) ? session.ProcessId : null;
 
-    internal static void RejectWriteCapable(AgentStartRequest request)
+    /// <summary>
+    /// Antigravity never writes: a reservation grant would imply write intent the sandbox cannot
+    /// honour, so the start fails closed instead of silently running read-only.
+    /// </summary>
+    internal static void RejectWriteAuthorization(AgentStartRequest request)
     {
-        var profile = request.RuntimeProfile.Trim();
-        if (profile.Contains("write", StringComparison.OrdinalIgnoreCase)
-            || !ReadOnlyProfiles.Contains(profile))
+        if (request.Authorization is not null)
         {
             throw new InvalidOperationException(
-                $"Antigravity PoC is read-only reviewer/researcher; profile '{profile}' is not allowed.");
+                "Antigravity is read-only; a write authorization cannot be honoured "
+                + $"(lease {request.Authorization.LeaseId:D}).");
         }
     }
 

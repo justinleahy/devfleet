@@ -14,7 +14,7 @@ public sealed record AgentSessionDto(
     string AgentName,
     string Role,
     string Runtime,
-    string RuntimeProfile,
+    string Model,
     string? ProviderSessionId,
     AgentLiveness Liveness,
     AgentActivity Activity,

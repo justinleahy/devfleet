@@ -36,7 +36,7 @@ public static class ChildAgentStatus
 /// <c>agent.await</c>, <c>agent.cancel</c>), the Agent Mail tools, the reservation lifecycle
 /// tools, and the reservation-authorized filesystem tools. Spawn enforces the root→child
 /// hierarchy (only root sessions may spawn), the maximum running children per request, the
-/// role and runtime-profile allowlists, and unique agent names per request; every child gets a
+/// role allowlist and node-owned model routes, and unique agent names per request; every child gets a
 /// parent link, <c>child.requested</c>/<c>child.started</c> events on the parent's durable
 /// event stream, and a terminal <c>child.completed</c>/<c>child.failed</c>/
 /// <c>child.cancelled</c> event. Child worker events are appended to the node spool directly.
@@ -597,13 +597,12 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
             var code = error.GetValueOrDefault("code") as string;
             var message = error.GetValueOrDefault("message") as string ?? "candidate failed";
-            if (code is not ("child_start_failed" or "reservation_required"))
+            if (code is not ("child_start_failed" or "reservation_required" or "runtime_read_only"))
             {
                 return result;
             }
 
-            failures.Add(
-                $"{candidate.RuntimeProfile}/{candidate.Model ?? "<default>"}: {message}");
+            failures.Add($"{candidate.Model}: {message}");
         }
 
         return SpawnFailure(
@@ -619,23 +618,30 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         RuntimeRouteCandidateMessage candidate,
         CancellationToken cancellationToken)
     {
-        var runtimeProfile = candidate.RuntimeProfile;
-
-        if (!_routing.Current.AllowedRuntimeProfiles.Contains(runtimeProfile, StringComparer.Ordinal))
-        {
-            return SpawnFailure(
-                "runtime_profile_not_allowed",
-                $"Runtime profile '{runtimeProfile}' is not in the profile allowlist.");
-        }
-
+        AgentModelSelector selector;
         IAgentRuntimeAdapter adapter;
         try
         {
-            adapter = _runtimes.Value.Resolve(runtimeProfile);
+            selector = AgentModelSelector.Parse(candidate.Model);
+            adapter = _runtimes.Value.Resolve(selector);
         }
         catch (Exception ex)
         {
-            return SpawnFailure("runtime_profile_not_allowed", ex.Message);
+            return SpawnFailure("model_not_allowed", ex.Message);
+        }
+
+        var model = selector.Value;
+        var requestedScopes = spec.RequestedWriteScopes
+            .Select(s => new ReservationScopeSpec(s.Kind, s.Path))
+            .ToArray();
+
+        // Antigravity is OS-sandboxed read-only and never receives a lease; a write request
+        // cannot be honored by this candidate, so fail it before allocating anything.
+        if (requestedScopes.Length > 0 && adapter.RuntimeKind == AgentRuntimeKinds.Antigravity)
+        {
+            return SpawnFailure(
+                "runtime_read_only",
+                $"'{model}' is read-only and cannot take requested write scopes.");
         }
 
         var sessionId = $"pi-child-{context.RequestId:N}-{Guid.NewGuid():N}";
@@ -654,8 +660,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             sessionId,
             agentName,
             spec.Role,
-            runtimeProfile,
-            candidate.Model,
+            model,
             adapter.RuntimeKind,
             context.SessionId,
             context.RequestId,
@@ -678,10 +683,6 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             return SpawnFailure("duplicate_agent_name", "Child session id collision; retry the spawn.");
         }
 
-        var requestedScopes = spec.RequestedWriteScopes
-            .Select(s => new ReservationScopeSpec(s.Kind, s.Path))
-            .ToArray();
-
         await EmitOnParentAsync(
             context,
             "child.requested",
@@ -690,15 +691,15 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 ["childSessionId"] = sessionId,
                 ["agentName"] = agentName,
                 ["role"] = spec.Role,
-                ["runtimeProfile"] = runtimeProfile,
-                ["model"] = candidate.Model,
+                ["model"] = model,
                 ["parentSessionId"] = context.SessionId,
                 ["requestedWriteScopes"] = spec.RequestedWriteScopes,
             },
             cancellationToken).ConfigureAwait(false);
 
-        // Reserve the requested write scopes for the child before it starts; a denial is
-        // surfaced to the caller but does not block a read-only child.
+        // Reserve the requested write scopes for the child before it starts. Pi children fall
+        // back to read-only tools on denial (the error is surfaced to the caller); Claude's
+        // write permissions come only from a granted lease, so a denied Claude write fails.
         ReservationOperationResult? leaseResult = null;
         if (requestedScopes.Length > 0)
         {
@@ -724,8 +725,8 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 cancellationToken).ConfigureAwait(false);
         }
 
-
-        if (runtimeProfile == AgentRuntimeProfiles.ClaudeReservedWrite
+        if (requestedScopes.Length > 0
+            && adapter.RuntimeKind == AgentRuntimeKinds.ClaudeCode
             && leaseResult?.Lease is null)
         {
             children.TryRemove(agentName, out _);
@@ -739,12 +740,12 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                     ["agentName"] = agentName,
                     ["parentSessionId"] = context.SessionId,
                     ["status"] = ChildAgentStatus.Failed,
-                    ["reason"] = "Claude reserved-write requires an acquired reservation lease.",
+                    ["reason"] = "Claude write access requires an acquired reservation lease.",
                 },
                 CancellationToken.None).ConfigureAwait(false);
             return SpawnFailure(
                 "reservation_required",
-                "Claude reserved-write start requires an acquired lease and fencing token.");
+                "Claude write access requires an acquired lease and fencing token.");
         }
 
         AgentRuntimeAuthorizationContext? authorization = null;
@@ -766,9 +767,8 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 context.RepositoryRoot!,
                 spec.Prompt,
                 AgentRuntimeMode.Child,
-                runtimeProfile,
-                authorization,
-                model: candidate.Model);
+                model,
+                authorization);
             handle = await adapter.StartAsync(start, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -818,8 +818,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 ["providerSessionId"] = handle.ProviderSessionId,
                 ["agentName"] = agentName,
                 ["role"] = spec.Role,
-                ["runtimeProfile"] = runtimeProfile,
-                ["model"] = candidate.Model,
+                ["model"] = model,
                 ["runtime"] = adapter.RuntimeKind,
                 ["parentSessionId"] = context.SessionId,
                 ["leaseId"] = leaseResult?.Lease?.LeaseId,
@@ -834,8 +833,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             ["childSessionId"] = sessionId,
             ["parentSessionId"] = context.SessionId,
             ["role"] = spec.Role,
-            ["runtimeProfile"] = runtimeProfile,
-            ["model"] = candidate.Model,
+            ["model"] = model,
             ["runtime"] = adapter.RuntimeKind,
             ["leaseId"] = leaseResult?.Lease?.LeaseId,
             ["fencingToken"] = leaseResult?.Lease?.FencingToken,
@@ -1572,7 +1570,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             {
                 ["agentName"] = child.AgentName,
                 ["role"] = child.Role,
-                ["runtimeProfile"] = child.RuntimeProfile,
+                ["model"] = child.Model,
                 ["parentSessionId"] = child.ParentSessionId,
                 ["status"] = status,
                 ["reason"] = reason,
@@ -1682,7 +1680,6 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             ["parentSessionId"] = child.ParentSessionId,
             ["agentName"] = child.AgentName,
             ["role"] = child.Role,
-            ["runtimeProfile"] = child.RuntimeProfile,
             ["model"] = child.Model,
         };
         var message = new NodeEventMessage(
@@ -1745,7 +1742,6 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         ["agentName"] = child.AgentName,
         ["childSessionId"] = child.SessionId,
         ["role"] = child.Role,
-        ["runtimeProfile"] = child.RuntimeProfile,
         ["model"] = child.Model,
         ["parentSessionId"] = child.ParentSessionId,
         ["status"] = child.Status,

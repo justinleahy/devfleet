@@ -107,31 +107,52 @@ export async function createRestrictedResourceLoader(
   return { resourceLoader, settingsManager };
 }
 
+/** Model id that selects the first authenticated model of the named provider. */
+const PROVIDER_DEFAULT_MODEL_ID = "default";
+
+/** The slice of `ModelRuntime` the resolver needs; kept narrow so tests can fake it. */
+export type ModelCatalog = Pick<ModelRuntime, "getModel" | "getAvailable">;
+
 /**
- * Production factory. Each call creates one SDK AgentSession: one worker
- * process per session, persisted under `config.agentDir`. Root and child
- * sessions get custom `read`/`grep`/`find`/`ls` tools that round-trip
- * through the node (no unrestricted SDK builtins) plus orchestration or
- * reservation-enforced tools (SPEC.md sections 18.1, 25.2, 25.3).
+ * Resolve a `provider/model` override to a model authenticated on this node.
+ * `provider/default` picks the first authenticated model of exactly that
+ * provider; an explicit id must exist in the catalog and be authenticated.
+ * The SDK's own initial-model fallback (any authenticated provider) is never
+ * consulted, so a `codex` selector can only ever land on `openai-codex`.
  */
-async function resolveConfiguredModel(modelRuntime: ModelRuntime, value: string) {
+export async function resolveConfiguredModel(modelRuntime: ModelCatalog, value: string) {
   const separator = value.indexOf("/");
   if (separator <= 0 || separator === value.length - 1) {
     throw new Error(`Pi model '${value}' must use provider/model format`);
   }
   const provider = value.slice(0, separator);
   const id = value.slice(separator + 1);
+  const available = await modelRuntime.getAvailable(provider);
+  if (id === PROVIDER_DEFAULT_MODEL_ID) {
+    const model = available[0];
+    if (model === undefined) {
+      throw new Error(`Pi provider '${provider}' has no authenticated models on this node`);
+    }
+    return model;
+  }
   const model = modelRuntime.getModel(provider, id);
   if (model === undefined) {
     throw new Error(`Pi model '${value}' is not present in the node catalog`);
   }
-  const available = await modelRuntime.getAvailable(provider);
   if (!available.some((candidate) => candidate.id === id)) {
     throw new Error(`Pi model '${value}' has no configured authentication on this node`);
   }
   return model;
 }
 
+/**
+ * Production factory. Each call creates one SDK AgentSession: one worker
+ * process per session, persisted under `config.agentDir`. Root and child
+ * sessions get custom `read`/`grep`/`find`/`ls` tools that round-trip
+ * through the node (no unrestricted SDK builtins) plus orchestration or
+ * reservation-enforced tools (SPEC.md sections 18.1, 25.2, 25.3). The
+ * model is resolved before the session exists so the SDK never picks one.
+ */
 export function createSdkSessionFactory(nodeRequest: NodeRequest): PiSessionFactory {
   return {
     async create(config: RootSessionConfig): Promise<PiSessionLike> {
@@ -143,7 +164,11 @@ export function createSdkSessionFactory(nodeRequest: NodeRequest): PiSessionFact
       const tools = buildTools(async (type, payload) =>
         nodeRequest(config.sessionId, type, payload),
       );
+      if (config.model === undefined) {
+        throw new Error("Pi session.start requires a provider/model override");
+      }
       const modelRuntime = await ModelRuntime.create();
+      const model = await resolveConfiguredModel(modelRuntime, config.model);
       const { resourceLoader, settingsManager } = await createRestrictedResourceLoader(
         config.cwd,
         config.agentDir,
@@ -153,15 +178,13 @@ export function createSdkSessionFactory(nodeRequest: NodeRequest): PiSessionFact
         cwd: config.cwd,
         agentDir: config.agentDir,
         modelRuntime,
+        model,
         tools: [...builtins, ...customNames],
         customTools: tools.map(adaptTool),
         resourceLoader,
         sessionManager: SessionManager.create(config.cwd),
         settingsManager,
       });
-      if (config.model !== undefined) {
-        await session.setModel(await resolveConfiguredModel(modelRuntime, config.model));
-      }
       return session as unknown as PiSessionLike;
     },
   };

@@ -5,9 +5,10 @@ namespace PiCommandCenter.Node.Runtime.Antigravity;
 /// <summary>
 /// Trusted OS boundary that makes the complete host filesystem read-only for Antigravity.
 /// The repository overlay is explicit for auditability; escaping workspace symlinks still land
-/// on the read-only root mount. Cross-provider credential stores (the Pi OAuth mount and the
-/// Claude home) are masked with private empty tmpfs mounts so a model-driven process can neither
-/// read nor exfiltrate them. Antigravity's own <c>~/.gemini</c> file store stays readable.
+/// on the read-only root mount. Cross-provider credential stores (the current and legacy Pi
+/// OAuth mounts, the Claude home, and the Muse config directory) are masked with private empty
+/// tmpfs mounts so a model-driven process can neither read nor exfiltrate them. Antigravity's
+/// own <c>~/.gemini</c> file store stays readable.
 /// </summary>
 public static class AntigravityReadOnlySandbox
 {
@@ -22,7 +23,7 @@ public static class AntigravityReadOnlySandbox
     /// the masks are the last mounts in the bwrap argv so no earlier bind is re-exposed.
     /// </summary>
     public static readonly IReadOnlyList<string> MaskedSecretLocations =
-        ["/provider-auth", "/home/node/.claude"];
+        ["/provider-auth", "/home/node/.pi/agent", "/home/node/.claude", "/home/node/.config/muse"];
 
     public static string? FindBwrap()
     {

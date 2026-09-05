@@ -26,7 +26,6 @@ public sealed class SubscriptionUsageGatewayTests : IClassFixture<ControlPlaneFi
             [
                 new ProviderSubscriptionUsageMessage(
                     "claude",
-                    ["claude-code"],
                     SubscriptionUsageStatuses.Available,
                     true,
                     "Pro",
@@ -43,7 +42,6 @@ public sealed class SubscriptionUsageGatewayTests : IClassFixture<ControlPlaneFi
                     null),
                 new ProviderSubscriptionUsageMessage(
                     "codex",
-                    ["codex"],
                     SubscriptionUsageStatuses.Unavailable,
                     null,
                     null,

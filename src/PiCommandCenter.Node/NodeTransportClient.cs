@@ -133,12 +133,16 @@ public sealed class NodeTransportClient : INodeHubOps
             cancellationToken);
     }
 
-    public async Task HeartbeatAsync(IReadOnlyList<string> activeSessionIds, CancellationToken cancellationToken)
+    public async Task HeartbeatAsync(
+        IReadOnlyList<string> activeSessionIds,
+        NodeResourceSnapshotMessage resources,
+        CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(resources);
         var connection = RequireConnection();
         await connection.InvokeAsync(
             "Heartbeat",
-            new NodeHeartbeatMessage(_options.Id, activeSessionIds),
+            new NodeHeartbeatMessage(_options.Id, activeSessionIds, resources),
             cancellationToken).ConfigureAwait(false);
     }
 

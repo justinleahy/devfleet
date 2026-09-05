@@ -75,15 +75,16 @@ public class AgentSessionStoreTests : IDisposable
         {
             ["agentName"] = "root",
             ["role"] = "root",
-            ["runtimeProfile"] = "root-readonly",
+            ["model"] = "codex/root-readonly",
             ["providerSessionId"] = "prov-1",
         }));
 
+        Assert.Equal(1, await db.AgentSessions.AsNoTracking().CountAsync());
         var session = await store.GetAsync("session-root");
         Assert.NotNull(session);
         Assert.Equal("root", session.AgentName);
         Assert.Equal("root", session.Role);
-        Assert.Equal("root-readonly", session.RuntimeProfile);
+        Assert.Equal("codex/root-readonly", session.Model);
         Assert.Equal("pi", session.Runtime);
         Assert.Equal(AgentLiveness.Online, session.Liveness);
         Assert.Equal("prov-1", session.ProviderSessionId);
@@ -215,8 +216,8 @@ public class AgentSessionStoreTests : IDisposable
 
         await store.ApplyAsync(Event("tool.started", 1, sessionId: "session-ghost"));
 
-        var session = await store.GetAsync("session-ghost");
-        Assert.Null(session);
+        Assert.Null(await store.GetAsync("session-ghost"));
+        Assert.Equal(0, await db.AgentSessions.AsNoTracking().CountAsync());
         var events = await store.ListEventsAsync(new WorkRequestId(_requestId));
         Assert.Single(events);
     }

@@ -4,6 +4,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Node.SystemResources;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -23,6 +24,8 @@ internal sealed class FakeNodeHub : INodeHubOps
     public int ClaimCalls { get; private set; }
     public int HeartbeatCalls { get; private set; }
     public IReadOnlyList<string> LastHeartbeatSessionIds { get; private set; } = [];
+    public NodeResourceSnapshotMessage? LastHeartbeatResources { get; private set; }
+    public List<NodeResourceSnapshotMessage?> HeartbeatResources { get; } = [];
 
     public void EnqueueClaim(RequestClaimMessage claim) => _claimsToReturn.Enqueue(claim);
 
@@ -46,10 +49,15 @@ internal sealed class FakeNodeHub : INodeHubOps
         return Task.CompletedTask;
     }
 
-    public Task HeartbeatAsync(IReadOnlyList<string> activeSessionIds, CancellationToken cancellationToken)
+    public Task HeartbeatAsync(
+        IReadOnlyList<string> activeSessionIds,
+        NodeResourceSnapshotMessage resources,
+        CancellationToken cancellationToken)
     {
         HeartbeatCalls++;
         LastHeartbeatSessionIds = activeSessionIds;
+        LastHeartbeatResources = resources;
+        HeartbeatResources.Add(resources);
         return Task.CompletedTask;
     }
 
@@ -158,6 +166,26 @@ internal sealed class FakeRootSessionSupervisor : IRootSessionSupervisor
         => _requestIdsBySession.TryGetValue(sessionId, out var requestId) ? requestId : null;
 }
 
+internal sealed class FakeNodeSystemResourceMonitor : INodeSystemResourceMonitor
+{
+    public int CaptureCalls { get; private set; }
+    public NodeResourceSnapshotMessage Snapshot { get; set; } = new(
+        NodeWorkerTestHarness.StartTime,
+        CpuUsagePercent: 12.5,
+        MemoryUsedBytes: 100,
+        MemoryTotalBytes: 200,
+        DiskUsedBytes: 10,
+        DiskTotalBytes: 20,
+        LoadAverageOneMinute: 0.5,
+        UptimeSeconds: 9);
+
+    public NodeResourceSnapshotMessage Capture()
+    {
+        CaptureCalls++;
+        return Snapshot;
+    }
+}
+
 internal static class NodeWorkerTestHarness
 {
     public static readonly DateTimeOffset StartTime = new(2026, 9, 4, 12, 0, 0, TimeSpan.Zero);
@@ -176,18 +204,21 @@ internal static class NodeWorkerTestHarness
         NodeOptions? options = null,
         FakeSpool? spool = null,
         FakeSessionCanceller? canceller = null,
-        FakeRootSessionSupervisor? roots = null)
+        FakeRootSessionSupervisor? roots = null,
+        FakeNodeSystemResourceMonitor? resources = null)
     {
         var hub = new FakeNodeHub();
         var effectiveSpool = spool ?? new FakeSpool();
         var effectiveCanceller = canceller ?? new FakeSessionCanceller();
         var effectiveRoots = roots ?? new FakeRootSessionSupervisor();
         var clock = new MutableTimeProvider(StartTime);
+        var effectiveResources = resources ?? new FakeNodeSystemResourceMonitor();
         var worker = new NodeWorker(
             Options.Create(options ?? CreateOptions()),
             hub,
             effectiveSpool,
             clock,
+            effectiveResources,
             effectiveCanceller,
             effectiveRoots,
             NullLogger<NodeWorker>.Instance);
@@ -440,6 +471,32 @@ public class NodeWorkerReconnectTests
         Assert.Contains(hub.PublishedBatches, batch => batch.Contains(nodeEvent));
         Assert.Equal(["root-1", "child-1"], hub.LastHeartbeatSessionIds);
         Assert.Empty(spool.Pending);
+    }
+}
+
+public class NodeWorkerHeartbeatResourceTests
+{
+    [Fact]
+    public async Task Due_heartbeat_captures_and_sends_exactly_one_snapshot()
+    {
+        var resources = new FakeNodeSystemResourceMonitor();
+        var (worker, hub, _, clock) = NodeWorkerTestHarness.Create(resources: resources);
+
+        await worker.RunTickAsync(clock.Now, CancellationToken.None);
+
+        Assert.Equal(1, resources.CaptureCalls);
+        Assert.Equal(1, hub.HeartbeatCalls);
+        Assert.Same(resources.Snapshot, hub.LastHeartbeatResources);
+
+        await worker.RunTickAsync(clock.Now.AddSeconds(1), CancellationToken.None);
+        Assert.Equal(1, resources.CaptureCalls);
+        Assert.Equal(1, hub.HeartbeatCalls);
+
+        await worker.RunTickAsync(clock.Now.AddSeconds(10), CancellationToken.None);
+        Assert.Equal(2, resources.CaptureCalls);
+        Assert.Equal(2, hub.HeartbeatCalls);
+        Assert.Equal(2, hub.HeartbeatResources.Count);
+        Assert.All(hub.HeartbeatResources, snapshot => Assert.Same(resources.Snapshot, snapshot));
     }
 }
 

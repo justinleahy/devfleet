@@ -298,7 +298,7 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
             AgentName = role + "-" + id,
             Role = role,
             Runtime = "pi",
-            RuntimeProfile = "default",
+            Model = "codex/default",
             Liveness = nameof(AgentLiveness.Exited),
             Activity = nameof(AgentActivity.Idle),
             Attention = "None",

@@ -29,7 +29,7 @@ public sealed class CanonicalPrivatePathTests : IDisposable
         using var server = new ClaudeReservationHookServer(evaluator);
         var installer = new ClaudeHookSettingsInstaller(server, _data);
         var install = installer.Install(
-            ClaudeRuntimeProfiles.ReadOnly,
+            allowWrite: false,
             new ClaudeHookSessionContext("sess-1", Guid.NewGuid(), 1, _repo));
 
         Assert.True(CanonicalPrivatePath.IsOutsideRepository(install.RootDirectory, _repo));

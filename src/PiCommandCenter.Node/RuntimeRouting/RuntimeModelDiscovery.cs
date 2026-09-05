@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Node.Runtime.Muse;
 
 namespace PiCommandCenter.Node.RuntimeRouting;
 
@@ -146,121 +147,174 @@ public sealed class RuntimeModelCommandRunner : IRuntimeModelCommandRunner
     }
 }
 
-/// <summary>Queries each allowed runtime through its node-owned discovery mechanism.</summary>
+/// <summary>
+/// Queries each <see cref="AgentModelSelector"/> runtime through its node-owned discovery
+/// mechanism. Every reported <see cref="RuntimeModelMessage.Id"/> is a canonical selector under
+/// the catalog's <see cref="RuntimeModelCatalogMessage.Runtime"/>, so it can be saved as-is.
+/// </summary>
 public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    // Claude Code cannot export the authenticated /model picker. Keep these stable aliases in
+    // sync with https://code.claude.com/docs/en/model-config when Anthropic adds an option.
+    private static readonly RuntimeModelMessage[] ClaudeCodeModels =
+    [
+        new("claude-code/default", "Default (account setting)", AgentModelSelector.ClaudeCode),
+        new("claude-code/fable", "Fable (latest)", AgentModelSelector.ClaudeCode),
+        new("claude-code/sonnet", "Sonnet (latest)", AgentModelSelector.ClaudeCode),
+        new("claude-code/opus", "Opus (latest)", AgentModelSelector.ClaudeCode),
+        new("claude-code/haiku", "Haiku (latest)", AgentModelSelector.ClaudeCode),
+    ];
     private readonly PiWorkerOptions _pi;
     private readonly AntigravityOptions _antigravity;
     private readonly INodeRuntimeRoutingStore _routes;
     private readonly IRuntimeModelCommandRunner _runner;
+    private readonly IMuseModelCatalogReader _muse;
 
     public RuntimeModelDiscovery(
         IOptions<PiWorkerOptions> pi,
         IOptions<AntigravityOptions> antigravity,
         INodeRuntimeRoutingStore routes,
-        IRuntimeModelCommandRunner runner)
+        IRuntimeModelCommandRunner runner,
+        IMuseModelCatalogReader muse)
     {
         _pi = pi.Value;
         _antigravity = antigravity.Value;
         _routes = routes;
         _runner = runner;
+        _muse = muse;
     }
 
     public async Task<IReadOnlyList<RuntimeModelCatalogMessage>> DiscoverAsync(
         CancellationToken cancellationToken = default)
     {
-        var profiles = _routes.Current.AllowedRuntimeProfiles;
-        var tasks = profiles.Select(profile => DiscoverProfileAsync(profile, cancellationToken));
-        return await Task.WhenAll(tasks).ConfigureAwait(false);
+        var codex = DiscoverCodexAsync(cancellationToken);
+        var antigravity = DiscoverAntigravityAsync(cancellationToken);
+        var muse = DiscoverMuseAsync(cancellationToken);
+        await Task.WhenAll(codex, antigravity, muse).ConfigureAwait(false);
+        return [codex.Result, ClaudeCatalog(), antigravity.Result, muse.Result];
     }
 
-    private Task<RuntimeModelCatalogMessage> DiscoverProfileAsync(
-        string profile,
-        CancellationToken cancellationToken)
-        => profile switch
-        {
-            AgentRuntimeProfiles.LocalPi => DiscoverPiAsync(profile, cancellationToken),
-            AgentRuntimeProfiles.AntigravityReadOnly => DiscoverAntigravityAsync(profile, cancellationToken),
-            AgentRuntimeProfiles.ClaudeReadOnly or AgentRuntimeProfiles.ClaudeReservedWrite =>
-                Task.FromResult(ClaudeCatalog(profile)),
-            _ => Task.FromResult(new RuntimeModelCatalogMessage(
-                profile, [], "This runtime profile has no model discovery implementation.")),
-        };
-
-    private async Task<RuntimeModelCatalogMessage> DiscoverPiAsync(
-        string profile,
-        CancellationToken cancellationToken)
+    /// <summary>
+    /// Runs the worker's catalog script, which reports Pi's <c>openai-codex</c> models already
+    /// rewritten as <c>codex/&lt;id&gt;</c>.
+    /// </summary>
+    private async Task<RuntimeModelCatalogMessage> DiscoverCodexAsync(CancellationToken cancellationToken)
     {
         var script = Path.Combine(Path.GetDirectoryName(_pi.WorkerPath)!, "modelCatalog.ts");
         var result = await _runner.RunAsync(
             _pi.NodeExecutable, [script], _pi.AgentDataDirectory, cancellationToken).ConfigureAwait(false);
         if (result.TimedOut)
         {
-            return Error(profile, "Pi model discovery timed out.");
+            return Error(AgentModelSelector.Codex, "Pi model discovery timed out.");
         }
         if (result.ExitCode != 0 || result.Truncated)
         {
-            return Error(profile, Failure("Pi model discovery failed", result));
+            return Error(AgentModelSelector.Codex, Failure("Pi model discovery failed", result));
         }
         try
         {
             var models = JsonSerializer.Deserialize<List<RuntimeModelMessage>>(
                 result.StandardOutput, JsonOptions) ?? [];
-            return new RuntimeModelCatalogMessage(profile, Deduplicate(models), null);
+            return Catalog(AgentModelSelector.Codex, models);
         }
         catch (JsonException ex)
         {
-            return Error(profile, $"Pi model discovery returned invalid JSON: {ex.Message}");
+            return Error(AgentModelSelector.Codex, $"Pi model discovery returned invalid JSON: {ex.Message}");
         }
     }
 
-    private async Task<RuntimeModelCatalogMessage> DiscoverAntigravityAsync(
-        string profile,
-        CancellationToken cancellationToken)
+    /// <summary>Lists <c>agy models</c> slugs as <c>antigravity/&lt;slug&gt;</c>.</summary>
+    private async Task<RuntimeModelCatalogMessage> DiscoverAntigravityAsync(CancellationToken cancellationToken)
     {
         var result = await _runner.RunAsync(
             _antigravity.Executable, ["models"], _pi.AgentDataDirectory, cancellationToken).ConfigureAwait(false);
         if (result.TimedOut)
         {
-            return Error(profile, "Antigravity model discovery timed out.");
+            return Error(AgentModelSelector.Antigravity, "Antigravity model discovery timed out.");
         }
         if (result.ExitCode != 0 || result.Truncated)
         {
-            return Error(profile, Failure("Antigravity model discovery failed", result));
+            return Error(AgentModelSelector.Antigravity, Failure("Antigravity model discovery failed", result));
         }
         var models = result.StandardOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(line => line.Split('\t', 2))
-            .Where(parts => parts.Length > 0 && !string.IsNullOrWhiteSpace(parts[0]))
+            .Select(line => line.Split('\t', 2, StringSplitOptions.TrimEntries))
+            .Where(parts => parts[0].Length > 0)
             .Select(parts => new RuntimeModelMessage(
-                parts[0].Trim(),
-                parts.Length == 2 ? parts[1].Trim() : parts[0].Trim(),
-                "antigravity"));
-        return new RuntimeModelCatalogMessage(profile, Deduplicate(models), null);
+                AgentModelSelector.Antigravity + "/" + parts[0],
+                parts.Length == 2 ? parts[1] : parts[0],
+                AgentModelSelector.Antigravity));
+        return Catalog(AgentModelSelector.Antigravity, models);
     }
 
-    private RuntimeModelCatalogMessage ClaudeCatalog(string profile)
+    /// <summary>
+    /// Reads the local Muse host's model list, which the reader already reports as canonical
+    /// <c>muse/&lt;id&gt;</c> selectors. Fails closed: a reader error is surfaced as-is, and a
+    /// read that yields no usable non-default selector is an error rather than an empty catalog.
+    /// </summary>
+    private async Task<RuntimeModelCatalogMessage> DiscoverMuseAsync(CancellationToken cancellationToken)
+    {
+        var result = await _muse.ReadAsync(cancellationToken).ConfigureAwait(false);
+        if (result.Error is not null)
+        {
+            return Error(AgentModelSelector.Muse, result.Error);
+        }
+        var models = new List<RuntimeModelMessage>(result.Models.Count);
+        foreach (var id in result.Models)
+        {
+            if (AgentModelSelector.TryParse(id, out var selector) && !selector.IsProviderDefault)
+            {
+                models.Add(new RuntimeModelMessage(selector.Value, selector.Value, AgentModelSelector.Muse));
+            }
+        }
+        var catalog = Catalog(AgentModelSelector.Muse, models);
+        return catalog.Models.Count == 0
+            ? Error(AgentModelSelector.Muse, "Muse model discovery returned no models.")
+            : catalog;
+    }
+
+    /// <summary>
+    /// Returns DevFleet's maintained Claude Code aliases plus any full selectors already present
+    /// in the role routes. Claude Code has no supported way to export its authenticated picker.
+    /// </summary>
+    private RuntimeModelCatalogMessage ClaudeCatalog()
     {
         var configured = _routes.Current.RoleRoutes
             .SelectMany(route => route.Candidates)
-            .Where(candidate => string.Equals(candidate.RuntimeProfile, profile, StringComparison.Ordinal)
-                && candidate.Model is not null)
-            .Select(candidate => new RuntimeModelMessage(candidate.Model!, candidate.Model!, "claude"));
-        return new RuntimeModelCatalogMessage(
-            profile,
-            Deduplicate(configured),
-            "Claude Code does not expose an authenticated model-list command; enter a documented model ID or use its default.");
+            .Where(candidate => AgentModelSelector.TryParse(candidate.Model, out var selector)
+                && selector.Runtime == AgentModelSelector.ClaudeCode)
+            .Select(candidate => new RuntimeModelMessage(
+                candidate.Model, candidate.Model, AgentModelSelector.ClaudeCode));
+        return Catalog(
+            AgentModelSelector.ClaudeCode,
+            ClaudeCodeModels.Concat(configured));
     }
 
-    private static IReadOnlyList<RuntimeModelMessage> Deduplicate(IEnumerable<RuntimeModelMessage> models)
-        => models
-            .Where(model => !string.IsNullOrWhiteSpace(model.Id))
-            .DistinctBy(model => model.Id, StringComparer.Ordinal)
-            .OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+    /// <summary>
+    /// Keeps only ids that parse as canonical selectors under <paramref name="runtime"/>, so a
+    /// catalog can never offer a selector the registry would refuse.
+    /// </summary>
+    private static RuntimeModelCatalogMessage Catalog(
+        string runtime,
+        IEnumerable<RuntimeModelMessage> models,
+        string? error = null)
+    {
+        var canonical = new Dictionary<string, RuntimeModelMessage>(StringComparer.Ordinal);
+        foreach (var model in models)
+        {
+            if (AgentModelSelector.TryParse(model.Id, out var selector) && selector.Runtime == runtime)
+            {
+                canonical.TryAdd(selector.Value, model with { Id = selector.Value });
+            }
+        }
+        return new RuntimeModelCatalogMessage(
+            runtime,
+            canonical.Values.OrderBy(model => model.DisplayName, StringComparer.OrdinalIgnoreCase).ToArray(),
+            error);
+    }
 
-    private static RuntimeModelCatalogMessage Error(string profile, string message)
-        => new(profile, [], message);
+    private static RuntimeModelCatalogMessage Error(string runtime, string message)
+        => new(runtime, [], message);
 
     private static string Failure(string prefix, ModelCommandResult result)
     {

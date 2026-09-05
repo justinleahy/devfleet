@@ -26,7 +26,6 @@ public sealed record SubscriptionUsageWindowMessage(
 /// </summary>
 public sealed record ProviderSubscriptionUsageMessage(
     string Provider,
-    IReadOnlyList<string> RuntimeProfiles,
     string Status,
     bool? Authenticated,
     string? PlanLabel,

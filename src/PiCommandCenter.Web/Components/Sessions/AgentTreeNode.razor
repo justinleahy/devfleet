@@ -34,7 +34,17 @@
 
         <div class="agent-meta">
             <span>@Session.Liveness</span>
-            <span>@Session.Runtime / @Session.RuntimeProfile</span>
+            @if (ModelText.RuntimeAside(Session.Runtime, Session.Model) is { } runtime)
+            {
+                <span>
+                    <span class="visually-hidden">Runtime</span>
+                    @runtime
+                </span>
+            }
+            <span class="agent-model">
+                <span class="visually-hidden">Model</span>
+                @Session.Model
+            </span>
             <span class="agent-id">@Session.Id</span>
             <span>
                 <span class="visually-hidden">Last heartbeat</span>

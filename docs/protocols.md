@@ -1,6 +1,6 @@
 # Protocols
 
-Two versioned transports: Pi worker stdio (protocol v1) and Control Plane SignalR `/nodeHub`.
+Three versioned transports: Pi worker stdio (protocol v1), Muse Code host stdio (MSP v1), and Control Plane SignalR `/nodeHub`.
 
 ## Pi worker protocol v1
 
@@ -47,6 +47,31 @@ Each `event` carries a strictly increasing per-session `seq` and a unique `messa
 
 Provider login missing: emit `session.snapshot` or `session.failed`-equivalent with blocked + input-required dimensions (see [security.md](security.md)).
 
+## Muse Code host protocol (MSP v1)
+
+Process: the node launches the official `muse` executable (`Muse:Executable`) as `muse serve --disable-write --disable-shell --no-session-log`, one host per `muse/<model-id>` session, with the project repository as the working directory. Argv is explicit (`ArgumentList`, no shell) and never carries `--yolo`, `--disable-sandbox`, `--api-key-stdin`, a login/logout/auth subcommand, or a credential.
+
+- Stdin/stdout: newline-delimited JSON-RPC 2.0 (LF). Stderr is retained as a bounded tail (`Muse:MaxStderrLines`, default 200) for diagnostics only.
+- Envelope schema version: `1` (`MuseProtocol.SchemaVersion`). A host reporting another version fails the start closed; a stable-surface fingerprint other than the verified Muse Code 1.0.3 one is logged as a warning and the session continues on the v1 envelope.
+- Maximum frame size: `Muse:MaxLineBytes` (default **1 048 576 bytes**, excluding the newline). An oversize or malformed frame, or a response carrying neither `result` nor `error`, is a protocol fault: pending requests are faulted and the host is terminated.
+- Unsolicited server → client requests are answered with JSON-RPC `-32601` (`methodNotFound`); the host is never given an approval or input channel.
+- Every mutating request carries a UUIDv7 `commandId` as an idempotency handle.
+
+### Methods the node speaks (and nothing else)
+
+| Method | Direction | Purpose |
+|---|---|---|
+| `initialize` → `initialized` | request, then notification | Handshake with `clientInfo.name` `devfleet`; verifies the envelope schema version and reads the fingerprint. |
+| `session/start` | request | `workspaceRoot`, `approvalMode: denyUnmatched`, optional `modelId` (omitted for `muse/default`). Result `session.sessionId` becomes `ProviderSessionId`; `modelId`/`providerId` are echoed into the `session.registered` event. |
+| `turn/start` | request | `input: [{type: "text", text}]`. The first call carries the spawn prompt; every later `SendAsync` is another `turn/start`, queued by the host behind a running turn. Result `turnId`/`disposition` are emitted as `turn.submitted`. |
+| `turn/cancel` | request | Cancels the foreground turn for `sessionId`/`turnId`. If the host does not settle within `Muse:CancelGraceSeconds` (default 5) it is terminated. |
+| `view/unsubscribe` | request, best effort | Sent on close. MSP has **no session close method**: close is `view/unsubscribe` followed by SIGTERM and a process-tree kill within the grace period. |
+| `model/list` | request | Discovery only (`IMuseModelCatalogReader`): a separate host is started, handshaken, asked `model/list {}`, and terminated. The reader unions that live list with the four supported IDs `muse-spark-1.3`, `muse-spark-1.3-contributor`, `muse-spark-1.2`, and `muse-spark-1.2-contributor` (Muse's bundled catalog can be incomplete), prefixes them as `muse/<model-id>`, and deduplicates deterministically while keeping extra valid live IDs. `muse/default` is never added to this catalog. Never starts a session. |
+
+Timeouts: `Muse:StartTimeoutSeconds` (default 30) bounds handshake + `session/start` + first `turn/start`; `Muse:RequestTimeoutSeconds` (default 30) bounds any later acknowledgement.
+
+Turn notifications from the host are normalized into the shared event contract (`session.registered`, `turn.submitted`, `session.snapshot`, `session.failed`, `session.cancelled`, …). A host exit whose stderr tail matches the Muse/Meta login phrasing becomes a blocked + input-required snapshot with the fixed reason `Complete Muse Code login locally (muse login)`; event reasons are fixed sentences, and the bounded stderr tail appears only as the `stderrTail` field of a non-auth `session.failed`. There is no usage, quota, or auth-plan method on this surface, and the node never asks the host for one.
+
 ## SignalR node hub (`/nodeHub`)
 
 Outbound from the node (`Node:ControlPlaneUrl` + `/nodeHub`, default `http://127.0.0.1:5057/nodeHub`). Authenticated with the application-generated node credential (never logged or returned). Reconnect: exponential backoff capped at 30 seconds; re-`Register` on every connection.
@@ -56,7 +81,7 @@ Hub methods (one-argument DTOs in `PiCommandCenter.Contracts.NodeTransport`):
 | Hub method | Request DTO | Result |
 |---|---|---|
 | `Register` | `NodeRegistrationMessage` (`NodeId`, `DisplayName`, `AgentVersion`, `CapabilitiesJson`) | `NodeDto` |
-| `Heartbeat` | `NodeHeartbeatMessage` | `NodeDto` |
+| `Heartbeat` | `NodeHeartbeatMessage` (`NodeId`, `ActiveSessionIds`, optional `Resources`) | `NodeDto` (`Resources` echoed from latest stored snapshot) |
 | `ClaimNext` | `ClaimRequestMessage` | `RequestClaimMessage?` |
 | `RenewClaim` | `ClaimRenewalMessage` | `DateTimeOffset` |
 | `PublishEvents` | `NodeEventBatchMessage` | `NodeEventAcknowledgementMessage` |
@@ -74,15 +99,27 @@ Hub methods (one-argument DTOs in `PiCommandCenter.Contracts.NodeTransport`):
 | `EvaluateCompletion` | `EvaluateCompletionMessage` | `CompletionGateDecisionMessage` |
 
 
-Hub methods are **node → control plane**. Subscription usage is the reverse: the hub **invokes a client callback** on the connected node (no hub method of the same name).
+`Heartbeat` is not session-ids-only. `NodeHeartbeatMessage.Resources` is a `NodeResourceSnapshotMessage`: required UTC `ObservedAt`; nullable `CpuUsagePercent`, `MemoryUsedBytes`, `MemoryTotalBytes`, `DiskUsedBytes`, `DiskTotalBytes`, `LoadAverageOneMinute`, `UptimeSeconds`. The node fills it from `INodeSystemResourceMonitor.Capture()` on the existing `Node:HeartbeatSeconds` tick (no extra poll). First CPU sample is `null`. Hub maps the snapshot onto `NodeResourceSnapshotDto`; `NodeRegistry` validates (`ObservedAt` offset zero; CPU finite in `[0, 100]` or null; load/uptime finite ≥ 0 or null; byte used ≥ 0, total > 0, and `used ≤ total` when both set) and stores **latest JSON only** on `FleetNode.ResourceSnapshotJson`. Invalid snapshots fail the heartbeat; omitted `Resources` persists null. Application `NodeDto.Resources` is the same shape. Sampling semantics: [research/node-system-resource-monitoring.md](research/node-system-resource-monitoring.md).
+
+
+Hub methods are **node → control plane**. Subscription usage and role routing are the reverse: the hub **invokes client callbacks** on the connected node (no hub methods of the same names).
 
 | Client callback | Arguments | Result |
 |---|---|---|
 | `GetSubscriptionUsage` | none | `NodeSubscriptionUsageMessage` (`NodeId`, `Providers`) |
+| `GetRuntimeConfiguration` | none | `NodeRuntimeConfigurationMessage` (`NodeId`, `AllowedRoles`, `RoleRoutes[]{Role, Candidates[]{Model}}`) |
+| `DiscoverRuntimeModels` | none | `RuntimeModelCatalogMessage[]` (`Runtime`, `Models[]{Id, DisplayName, Provider}`, `Error`) |
+| `UpdateRuntimeConfiguration` | `UpdateNodeRuntimeConfigurationMessage` (`RoleRoutes`) | `NodeRuntimeConfigurationMessage` |
 
-`NodeSubscriptionUsageGateway` uses `IHubContext<NodeHub>.Clients.Client(connectionId).InvokeCoreAsync<NodeSubscriptionUsageMessage>("GetSubscriptionUsage", [])` with a 35 s timeout. The node handler is `IRuntimeSubscriptionUsageProbe.GetAsync`. The callback is only issued for a manual Refresh on `/usage`; nothing polls it.
+`Model` is always a canonical `<runtime>/<model>` selector whose prefix is one of `codex`, `claude-code`, `antigravity`, `muse` (e.g. `codex/default`, `claude-code/default`, `antigravity/default`, `muse/default`). There are no runtime profiles on the wire; the prefix alone selects the adapter, and the `muse` and `antigravity` adapters are read-only regardless of route position. The node rejects an update naming a role outside `AllowedRoles`, a non-canonical or duplicate candidate, or more than 16 candidates for one role, and answers with the persisted normalized routes on success.
 
-`ProviderSubscriptionUsageMessage.Status`: `available` (at least one validated remaining-quota window; `Windows` nonempty), `unavailable` (no credential / `signed_out` per `claude auth status` / missing or unconfigured CLI), `error` (HTTP failure, timeout, oversized or malformed response, schema drift, credential commit failure, CLI timeout, non-zero exit, truncated or malformed output). `Windows` cross the hub already normalized (`Name`, `PercentUsed`, `PercentRemaining`, `ResetsAt`) on the 0–100 scale (Claude's upstream `utilization` already arrives in 0–100 percentage points and maps directly to `PercentUsed`; nothing is rescaled on the node), and at most **8** per provider; a longer list is rejected as schema drift by the node and again by the `/usage` page. The node never forwards provider response bodies, tokens, account/user IDs, or raw CLI output. `Source` and `Diagnostic` are stable, secret-free identifiers. Node-side sources — Pi via the private `chatgpt.com/backend-api/wham/usage`, Claude via the private `api.anthropic.com/api/oauth/usage`, Antigravity via `agy -p /usage --print-timeout 8s` text — and their fail-closed rules are in [architecture.md](architecture.md#subscription-usage-usage) and [research/subscription-usage.md](research/subscription-usage.md). Version/auth/plan fields are not remaining quota.
+`DiscoverRuntimeModels` answers one `RuntimeModelCatalogMessage` per trusted prefix. The Claude Code catalog is a DevFleet-maintained set of stable aliases (`default`, `fable`, `sonnet`, `opus`, `haiku`) plus canonical Claude selectors already configured in role routes; Claude Code cannot export its authenticated picker. The `muse` catalog comes from `IMuseModelCatalogReader` (`model/list` on a fresh read-only host, unioned with the four concrete IDs `muse-spark-1.3`, `muse-spark-1.3-contributor`, `muse-spark-1.2`, and `muse-spark-1.2-contributor` because Muse's bundled MSP catalog can be incomplete, then canonicalized as `muse/<model-id>` and deduplicated while preserving additional valid live IDs; `muse/default` is the provider-selected default elsewhere, not a catalog entry); a reader error, or a read that yields no canonical `muse/` selector, is reported in `Error` with an empty `Models` list rather than as an empty success.
+
+`NodeSubscriptionUsageGateway` uses `IHubContext<NodeHub>.Clients.Client(connectionId).InvokeCoreAsync<NodeSubscriptionUsageMessage>("GetSubscriptionUsage", [])` with a 35 s timeout. The callback is issued only for a manual Refresh on `/usage`; nothing polls it. Pi remains the production orchestrator. The node handler starts the Pi sidecar and the ordered `ISupplementalSubscriptionUsageSource` readers concurrently with one `ObservedAt`. Sidecar order is preserved; a non-null supplement replaces the same exact provider id or appends in registration order. One supplemental failure is omitted without suppressing sidecar or sibling results.
+
+The sidecar JSON allowlist remains `openai-codex`, `anthropic`, `kimi-code`, `zai`, `xai-oauth`, and `opencode-go`; it does **not** accept `google-antigravity`. Registered provider-native supplements are Anthropic (`SubscriptionUsage:ClaudeCredentialPath` → exact Anthropic OAuth usage/token origins) followed by Google Antigravity (official `agy --version`; `agy -p /usage --print-timeout 8s`). Their final DTO ids are `anthropic` and `google-antigravity`.
+
+`ProviderSubscriptionUsageMessage.Status`: `available` requires at least one validated remaining-quota window; closed sources have empty `Windows` and stable diagnostics. `Diagnostic` must match `^[a-z0-9_]{1,40}$`. `Windows` cross the hub already normalized (`Name`, `PercentUsed`, `PercentRemaining`, `ResetsAt`) on the 0–100 scale, and at most **8** per provider. The node never forwards credential contents, provider response bodies, tokens, account/user IDs, PII, or raw CLI output. `Source` and `Diagnostic` are stable, secret-free labels. Full source and fail-closed rules are in [architecture.md](architecture.md#subscription-usage-usage) and [research/subscription-usage.md](research/subscription-usage.md). Version/auth/plan fields are not remaining quota. Cursor and Muse Code have no provider row.
 
 ### Server-enforced bounds (`NodeTransportLimits`)
 
@@ -92,6 +129,7 @@ Hub methods are **node → control plane**. Subscription usage is the reverse: t
 | Event batch count | 500 |
 | Event payload bytes | 256 KiB |
 | Active session ids on heartbeat | 200 |
+| Resource snapshot numeric fields | finite; CPU 0–100; bytes non-negative with `used ≤ total`; `ObservedAt` UTC |
 | Mail payload | 64 KiB |
 | Inbox count | 200 |
 | Session / verification id length | 128 |

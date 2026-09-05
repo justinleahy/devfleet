@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Node.Child;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Node.SystemResources;
 
 namespace PiCommandCenter.Node;
 
@@ -26,7 +27,10 @@ public interface INodeHubOps : IAsyncDisposable
 
     Task StopAsync(CancellationToken cancellationToken);
 
-    Task HeartbeatAsync(IReadOnlyList<string> activeSessionIds, CancellationToken cancellationToken);
+    Task HeartbeatAsync(
+        IReadOnlyList<string> activeSessionIds,
+        NodeResourceSnapshotMessage resources,
+        CancellationToken cancellationToken);
 
     Task<RequestClaimMessage?> ClaimNextAsync(int leaseSeconds, CancellationToken cancellationToken);
 
@@ -80,6 +84,7 @@ public sealed class NodeWorker : BackgroundService
     private readonly ISessionCanceller _sessionCanceller;
     private readonly IRootSessionSupervisor _rootSessions;
     private readonly TimeProvider _timeProvider;
+    private readonly INodeSystemResourceMonitor _resourceMonitor;
     private readonly ILogger<NodeWorker> _logger;
     private readonly object _claimsLock = new();
     private readonly Dictionary<Guid, RequestClaimMessage> _activeClaims = new();
@@ -91,6 +96,7 @@ public sealed class NodeWorker : BackgroundService
         INodeHubOps transport,
         INodeEventSpool spool,
         TimeProvider timeProvider,
+        INodeSystemResourceMonitor resourceMonitor,
         ISessionCanceller sessionCanceller,
         IRootSessionSupervisor rootSessions,
         ILogger<NodeWorker> logger)
@@ -99,6 +105,7 @@ public sealed class NodeWorker : BackgroundService
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(spool);
         ArgumentNullException.ThrowIfNull(timeProvider);
+        ArgumentNullException.ThrowIfNull(resourceMonitor);
         ArgumentNullException.ThrowIfNull(sessionCanceller);
         ArgumentNullException.ThrowIfNull(rootSessions);
         ArgumentNullException.ThrowIfNull(logger);
@@ -106,6 +113,7 @@ public sealed class NodeWorker : BackgroundService
         _transport = transport;
         _spool = spool;
         _timeProvider = timeProvider;
+        _resourceMonitor = resourceMonitor;
         _sessionCanceller = sessionCanceller;
         _rootSessions = rootSessions;
         _logger = logger;
@@ -207,7 +215,9 @@ public sealed class NodeWorker : BackgroundService
 
         if (now - _lastHeartbeat >= TimeSpan.FromSeconds(_options.HeartbeatSeconds))
         {
-            await _transport.HeartbeatAsync(_sessionCanceller.ActiveSessionIds, cancellationToken)
+            var resources = _resourceMonitor.Capture();
+            await _transport
+                .HeartbeatAsync(_sessionCanceller.ActiveSessionIds, resources, cancellationToken)
                 .ConfigureAwait(false);
             _lastHeartbeat = now;
         }

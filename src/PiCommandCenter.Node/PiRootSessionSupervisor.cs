@@ -100,6 +100,7 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
         }
 
         var sessionId = $"pi-root-{claim.RequestId:N}-{Guid.NewGuid():N}";
+        var model = AgentModelSelector.Parse(_options.Model);
         var startRequest = new AgentStartRequest(
             sessionId,
             new Domain.ProjectId(claim.ProjectId),
@@ -110,7 +111,7 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
             workingDirectory: claim.RepositoryPath,
             prompt: BuildPrompt(claim),
             AgentRuntimeMode.Root,
-            runtimeProfile: "local-pi",
+            model.Value,
             createRequestCommit: claim.CreateRequestCommit);
 
         // Supervisor-owned request branch, created exactly once before the worker starts so the
@@ -155,7 +156,7 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
                 ["agentName"] = "root",
                 ["role"] = "root",
                 ["mode"] = AgentRuntimeMode.Root.ToString(),
-                ["runtimeProfile"] = "local-pi",
+                ["model"] = model.Value,
                 ["repositoryPath"] = claim.RepositoryPath,
                 ["defaultBranch"] = claim.DefaultBranch,
                 ["requestTitle"] = claim.Title,

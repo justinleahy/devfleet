@@ -167,6 +167,166 @@ public class NodeRegistryTests : IDisposable
         var nodes = await registry.ListAsync();
         Assert.Equal(["alpha", "zeta"], nodes.Select(n => n.DisplayName).ToList());
     }
+
+    [Fact]
+    public async Task Heartbeat_persists_the_latest_resource_snapshot_and_reloads_it()
+    {
+        await using var db = CreateContext();
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var nodeId = TestNodes.NewNodeId();
+        await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), _clock.GetUtcNow());
+        var first = SampleResources(_clock.GetUtcNow(), cpu: 8d);
+        var second = SampleResources(_clock.GetUtcNow().AddMinutes(1), cpu: 33.5);
+
+        await registry.HeartbeatAsync(new NodeHeartbeatCommand(nodeId, [], first), _clock.GetUtcNow());
+        await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(nodeId, [], second),
+            _clock.GetUtcNow().AddMinutes(1));
+
+        db.ChangeTracker.Clear();
+        await using var reload = CreateContext();
+        var reloaded = new NodeRegistry(_clock, reload, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var dto = await reloaded.GetAsync(nodeId);
+
+        Assert.NotNull(dto);
+        AssertEqualResources(second, dto.Resources);
+    }
+
+    [Theory]
+    [InlineData(1024L, null, 4096L, null)]
+    [InlineData(null, 2048L, null, 8192L)]
+    public async Task Heartbeat_persists_and_projects_partial_byte_observations(
+        long? memoryUsedBytes,
+        long? memoryTotalBytes,
+        long? diskUsedBytes,
+        long? diskTotalBytes)
+    {
+        await using var db = CreateContext();
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var nodeId = TestNodes.NewNodeId();
+        await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), _clock.GetUtcNow());
+        var partial = SampleResources(_clock.GetUtcNow()) with
+        {
+            MemoryUsedBytes = memoryUsedBytes,
+            MemoryTotalBytes = memoryTotalBytes,
+            DiskUsedBytes = diskUsedBytes,
+            DiskTotalBytes = diskTotalBytes,
+        };
+
+        var projected = await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(nodeId, [], partial),
+            _clock.GetUtcNow());
+        AssertEqualResources(partial, projected.Resources);
+
+        db.ChangeTracker.Clear();
+        await using var reload = CreateContext();
+        var reloaded = new NodeRegistry(_clock, reload, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var persisted = await reloaded.GetAsync(nodeId);
+
+        Assert.NotNull(persisted);
+        AssertEqualResources(partial, persisted.Resources);
+    }
+
+    [Fact]
+    public async Task Heartbeat_clears_a_persisted_resource_snapshot_when_resources_are_omitted()
+    {
+        await using var db = CreateContext();
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var nodeId = TestNodes.NewNodeId();
+        await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), _clock.GetUtcNow());
+        await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(nodeId, [], SampleResources(_clock.GetUtcNow())),
+            _clock.GetUtcNow());
+
+        await registry.HeartbeatAsync(new NodeHeartbeatCommand(nodeId, [], Resources: null), _clock.GetUtcNow().AddMinutes(1));
+
+        db.ChangeTracker.Clear();
+        var dto = await registry.GetAsync(nodeId);
+        Assert.NotNull(dto);
+        Assert.Null(dto.Resources);
+    }
+
+    [Fact]
+    public async Task Heartbeat_rejects_an_invalid_resource_snapshot_without_persisting_it()
+    {
+        await using var db = CreateContext();
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var nodeId = TestNodes.NewNodeId();
+        await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), _clock.GetUtcNow());
+        var invalid = SampleResources(_clock.GetUtcNow()) with { CpuUsagePercent = 150d };
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            registry.HeartbeatAsync(new NodeHeartbeatCommand(nodeId, [], invalid), _clock.GetUtcNow()));
+
+        db.ChangeTracker.Clear();
+        var dto = await registry.GetAsync(nodeId);
+        Assert.NotNull(dto);
+        Assert.Null(dto.Resources);
+        Assert.Equal(NodeStatus.Offline, dto.Status);
+        Assert.Equal(1, dto.Version);
+    }
+
+    [Theory]
+    [InlineData(-1L, null, 4096L, 8192L)]
+    [InlineData(null, -1L, 4096L, 8192L)]
+    [InlineData(null, 0L, 4096L, 8192L)]
+    [InlineData(2049L, 2048L, 4096L, 8192L)]
+    [InlineData(1024L, 2048L, -1L, null)]
+    [InlineData(1024L, 2048L, null, -1L)]
+    [InlineData(1024L, 2048L, null, 0L)]
+    [InlineData(1024L, 2048L, 8193L, 8192L)]
+    public async Task Heartbeat_rejects_invalid_byte_observations_before_mutating_the_node(
+        long? memoryUsedBytes,
+        long? memoryTotalBytes,
+        long? diskUsedBytes,
+        long? diskTotalBytes)
+    {
+        await using var db = CreateContext();
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var nodeId = TestNodes.NewNodeId();
+        await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), _clock.GetUtcNow());
+        var invalid = SampleResources(_clock.GetUtcNow()) with
+        {
+            MemoryUsedBytes = memoryUsedBytes,
+            MemoryTotalBytes = memoryTotalBytes,
+            DiskUsedBytes = diskUsedBytes,
+            DiskTotalBytes = diskTotalBytes,
+        };
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            registry.HeartbeatAsync(new NodeHeartbeatCommand(nodeId, [], invalid), _clock.GetUtcNow()));
+
+        db.ChangeTracker.Clear();
+        var dto = await registry.GetAsync(nodeId);
+        Assert.NotNull(dto);
+        Assert.Null(dto.Resources);
+        Assert.Equal(NodeStatus.Offline, dto.Status);
+        Assert.Equal(1, dto.Version);
+    }
+
+    private static NodeResourceSnapshotDto SampleResources(DateTimeOffset observedAt, double cpu = 12.5) =>
+        new(
+            observedAt,
+            cpu,
+            MemoryUsedBytes: 1024L,
+            MemoryTotalBytes: 2048L,
+            DiskUsedBytes: 4096L,
+            DiskTotalBytes: 8192L,
+            LoadAverageOneMinute: 0.25,
+            UptimeSeconds: 90d);
+
+    private static void AssertEqualResources(NodeResourceSnapshotDto expected, NodeResourceSnapshotDto? actual)
+    {
+        Assert.NotNull(actual);
+        Assert.Equal(expected.ObservedAt, actual.ObservedAt);
+        Assert.Equal(expected.CpuUsagePercent, actual.CpuUsagePercent);
+        Assert.Equal(expected.MemoryUsedBytes, actual.MemoryUsedBytes);
+        Assert.Equal(expected.MemoryTotalBytes, actual.MemoryTotalBytes);
+        Assert.Equal(expected.DiskUsedBytes, actual.DiskUsedBytes);
+        Assert.Equal(expected.DiskTotalBytes, actual.DiskTotalBytes);
+        Assert.Equal(expected.LoadAverageOneMinute, actual.LoadAverageOneMinute);
+        Assert.Equal(expected.UptimeSeconds, actual.UptimeSeconds);
+    }
     private async Task SeedRegistered(ControlPlaneDbContext db, NodeId nodeId)
     {
         db.FleetNodes.Add(FleetNode.Register(nodeId, "pi-01", "1.2.3", "{}", _clock.GetUtcNow()));

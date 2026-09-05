@@ -81,7 +81,20 @@ public sealed class NodeHub(
             .ToArray();
         await SyncSessionGroupsAsync(sessionIds).ConfigureAwait(false);
         return await registry.HeartbeatAsync(
-            new NodeHeartbeatCommand(new NodeId(message.NodeId), sessionIds),
+            new NodeHeartbeatCommand(
+                new NodeId(message.NodeId),
+                sessionIds,
+                message.Resources is null
+                    ? null
+                    : new NodeResourceSnapshotDto(
+                        message.Resources.ObservedAt,
+                        message.Resources.CpuUsagePercent,
+                        message.Resources.MemoryUsedBytes,
+                        message.Resources.MemoryTotalBytes,
+                        message.Resources.DiskUsedBytes,
+                        message.Resources.DiskTotalBytes,
+                        message.Resources.LoadAverageOneMinute,
+                        message.Resources.UptimeSeconds)),
             timeProvider.GetUtcNow(),
             Context.ConnectionAborted).ConfigureAwait(false);
     }

@@ -208,8 +208,14 @@ else
                     <dl class="facts">
                         <dt>Root session</dt>
                         <dd class="mono">@root.Id</dd>
-                        <dt>Runtime</dt>
-                        <dd>@root.Runtime <span class="hint">/ @root.RuntimeProfile</span></dd>
+                        <dt>Model</dt>
+                        <dd>
+                            <span class="mono">@root.Model</span>
+                            @if (ModelText.RuntimeAside(root.Runtime, root.Model) is { } runtime)
+                            {
+                                <span class="hint">on @runtime</span>
+                            }
+                        </dd>
                         <dt>Provider session</dt>
                         <dd class="mono">@(root.ProviderSessionId ?? "not reported")</dd>
                         <dt>Process</dt>

@@ -174,7 +174,7 @@ public sealed class AgentSessionStore(
         row.AgentName,
         row.Role,
         row.Runtime,
-        row.RuntimeProfile,
+        row.Model,
         row.ProviderSessionId,
         ParseEnum<PiCommandCenter.Domain.Sessions.AgentLiveness>(row.Liveness),
         ParseEnum<PiCommandCenter.Domain.Sessions.AgentActivity>(row.Activity),

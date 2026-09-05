@@ -31,7 +31,8 @@ public static class ProviderAuthClassifier
                || Contains(text, "invalid api key")
                || Contains(text, "missing api key")
                || Contains(text, "api key not found")
-               || Contains(text, "oauth") && Contains(text, "login");
+               || Contains(text, "oauth") && Contains(text, "login")
+               || IsMuseAuthMissing(text);
     }
 
     public static string NativeLoginReason(string runtimeKind)
@@ -44,6 +45,11 @@ public static class ProviderAuthClassifier
         if (string.Equals(runtimeKind, AgentRuntimeKinds.Antigravity, StringComparison.Ordinal))
         {
             return "Complete Antigravity login locally (agy login). The Command Center does not collect provider credentials.";
+        }
+
+        if (string.Equals(runtimeKind, AgentRuntimeKinds.Muse, StringComparison.Ordinal))
+        {
+            return "Complete Muse Code login locally (muse login). The Command Center does not collect provider credentials.";
         }
 
         return "Complete provider-native login locally. The Command Center does not collect provider credentials.";
@@ -63,6 +69,33 @@ public static class ProviderAuthClassifier
             ["auth"] = "provider_native_login_required",
             ["diagnostic"] = DiagnosticSanitizer.Sanitize(diagnostic, 512),
         };
+    }
+
+    /// <summary>
+    /// Muse Code / Meta phrasing. Each branch requires an explicit auth-failure cue next to the
+    /// provider name so ordinary Meta or Muse prose ("Meta released a model", "Muse session
+    /// started") is never classified as an auth failure.
+    /// </summary>
+    private static bool IsMuseAuthMissing(string text)
+    {
+        if (Contains(text, "muse login"))
+        {
+            return true;
+        }
+
+        if (Contains(text, "muse")
+            && (Contains(text, "signed out") || Contains(text, "not signed in") || Contains(text, "sign in to muse")))
+        {
+            return true;
+        }
+
+        var mentionsMetaKey = Contains(text, "meta api key") || Contains(text, "meta_api_key");
+        return mentionsMetaKey
+               && (Contains(text, "missing")
+                   || Contains(text, "invalid")
+                   || Contains(text, "not set")
+                   || Contains(text, "not found")
+                   || Contains(text, "expired"));
     }
 
     private static bool Contains(string haystack, string needle)

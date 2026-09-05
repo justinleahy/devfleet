@@ -12,4 +12,5 @@ public sealed record NodeDto(
     DateTimeOffset LastHeartbeatAt,
     NodeStatus Status,
     string CapabilitiesJson,
-    long Version);
+    long Version,
+    NodeResourceSnapshotDto? Resources = null);

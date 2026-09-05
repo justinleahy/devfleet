@@ -11,16 +11,18 @@
 @inject INodeRuntimeConfigurationGateway Gateway
 @inject IClock Clock
 
-<PageTitle>Runtime routing &middot; DevFleet</PageTitle>
+<PageTitle>Model routing &middot; DevFleet</PageTitle>
 
 <FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
 
     <header class="page-head">
-        <h1>Runtime routing</h1>
+        <h1>Model routing</h1>
         <p class="page-lead">
-            Each role starts on the first runtime in its list that can run; the next candidate is
-            tried only when the one before it fails. Runtimes, models, and the commands behind them
-            live on the node, so this page only reorders what the node reports it can do.
+            Each role starts on the first model selector in its list that can run; the next
+            candidate is tried only when the one before it fails. A selector is
+            <code>&lt;runtime&gt;/&lt;model&gt;</code>, so it names the adapter and the model at
+            once. The models and the commands behind them live on the node, so this page only
+            reorders what the node reports it can do.
         </p>
     </header>
 
@@ -108,13 +110,12 @@
     }
     else if (_configuration is not null)
     {
-        var configuration = _configuration;
-
         <section aria-labelledby="models-heading">
             <h2 id="models-heading">Model catalogs</h2>
             <p class="panel-lead">
-                Model lists are produced by the node when you refresh them. A runtime that cannot
-                list models is reported here; type its model id by hand instead.
+                Pi, Antigravity, and Muse model lists are queried from the node. Claude Code uses
+                a curated list of stable aliases maintained by DevFleet. You can still type any
+                canonical selector by hand.
             </p>
 
             @if (_discoveryError is not null)
@@ -130,17 +131,17 @@
             {
                 <p class="panel-empty">
                     No catalog has been fetched yet. Refresh models to ask this node what each
-                    runtime can serve; until then every model field stays free text.
+                    runtime can serve; until then every selector stays free text.
                 </p>
             }
             else
             {
                 <ul class="catalog-list">
-                    @foreach (var profile in configuration.AllowedRuntimeProfiles)
+                    @foreach (var runtime in AgentModelSelector.Runtimes)
                     {
-                        var catalog = Catalog(profile);
+                        var catalog = Catalog(runtime);
                         <li class="catalog-row">
-                            <span class="node-name">@profile</span>
+                            <span class="node-name">@runtime</span>
                             @if (catalog is null)
                             {
                                 <span class="node-missing">Not reported</span>
@@ -195,44 +196,46 @@
                             {
                                 var position = index;
                                 var candidate = role.Candidates[position];
-                                var models = ModelsFor(candidate.RuntimeProfile);
+                                var label = $"Model for {role.Role}, choice {position + 1}";
+                                var invalid = SelectorError(candidate);
                                 @* Keyed on the editor instance so moving a row moves its
                                    controls instead of re-labelling the ones already there. *@
                                 <li class="candidate-row" @key="candidate">
                                     <span class="candidate-rank" aria-hidden="true">@(position + 1)</span>
                                     <div class="candidate-fields">
-                                        <FluentSelect TOption="string"
-                                                      Label="@($"Runtime for {role.Role}, choice {position + 1}")"
-                                                      Items="@RuntimeOptions(candidate.RuntimeProfile)"
-                                                      OptionText="@(profile => profile)"
-                                                      OptionValue="@(profile => profile)"
-                                                      @bind-Value="candidate.RuntimeProfile"
-                                                      @bind-Value:after="MarkEdited"
-                                                      Disabled="@Busy"
-                                                      Class="field" />
-
-                                        <FluentTextField @bind-Value="candidate.Model"
-                                                         @bind-Value:after="MarkEdited"
-                                                         Label="@($"Model for {role.Role}, choice {position + 1}")"
-                                                         Placeholder="Node default"
-                                                         Disabled="@Busy"
-                                                         Class="field" />
-
-                                        @if (models.Count > 0)
+                                        @if (_selectors.Count > 0)
                                         {
-                                            <FluentSelect TOption="RuntimeModelMessage"
-                                                          Label="@($"Discovered models for {candidate.RuntimeProfile}, choice {position + 1}")"
-                                                          Items="@models"
-                                                          OptionText="@(model => ModelLabel(model))"
-                                                          OptionValue="@(model => model.Id)"
-                                                          @bind-Value="candidate.Pick"
-                                                          @bind-Value:after="@(() => ApplyPick(candidate))"
-                                                          Disabled="@Busy"
-                                                          Class="field" />
+                                            @* One editor for the whole route step: the list offers
+                                               every selector this node discovered, and anything
+                                               typed stays as entered. *@
+                                            <FluentCombobox TOption="string"
+                                                            Label="@label"
+                                                            Items="@_selectors"
+                                                            OptionText="@(selector => selector)"
+                                                            OptionValue="@(selector => selector)"
+                                                            Autocomplete="ComboboxAutocomplete.Both"
+                                                            @bind-Value="candidate.Selector"
+                                                            @bind-Value:after="MarkEdited"
+                                                            Disabled="@Busy"
+                                                            Class="field" />
                                         }
                                         else
                                         {
-                                            <p class="candidate-note">@ModelNote(candidate.RuntimeProfile)</p>
+                                            <FluentTextField @bind-Value="candidate.Selector"
+                                                             @bind-Value:after="MarkEdited"
+                                                             Label="@label"
+                                                             Placeholder="codex/default"
+                                                             Disabled="@Busy"
+                                                             Class="field" />
+                                        }
+
+                                        @if (invalid is not null)
+                                        {
+                                            <p class="candidate-error" role="alert">@invalid</p>
+                                        }
+                                        else
+                                        {
+                                            <p class="candidate-note">@SelectorNote(candidate)</p>
                                         }
                                     </div>
                                     <div class="candidate-actions">
@@ -263,7 +266,7 @@
                     <FluentStack Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
                         <FluentButton Appearance="Appearance.Outline"
                                       OnClick="@(() => Add(role))"
-                                      Disabled="@(Busy || _runtimeProfiles.Count == 0)"
+                                      Disabled="@Busy"
                                       aria-label="@($"Add a candidate to {role.Role}")">
                             Add candidate
                         </FluentButton>
@@ -312,13 +315,20 @@
 </FluentStack>
 
 @code {
+    private const string FallbackSelector = $"{AgentModelSelector.Codex}/{AgentModelSelector.DefaultModelId}";
+
     private readonly Dictionary<string, RuntimeModelCatalogMessage> _catalogs =
         new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Canonical selectors offered by the node, grouped in runtime catalog order.</summary>
+    private readonly List<string> _selectors = [];
+
+    /// <summary>Discovered model behind each canonical selector, for the echo under a field.</summary>
+    private readonly Dictionary<string, RuntimeModelMessage> _discovered = new(StringComparer.Ordinal);
 
     private readonly List<RoleEditor> _roles = [];
 
     private IReadOnlyList<NodeDto> _onlineNodes = Array.Empty<NodeDto>();
-    private IReadOnlyList<string> _runtimeProfiles = Array.Empty<string>();
     private NodeRuntimeConfigurationMessage? _configuration;
     private string? _selectedNodeId;
     private string? _nodeError;
@@ -334,9 +344,12 @@
     private bool _saving;
 
     private bool Busy => _loadingNodes || _loadingConfig || _discovering || _saving;
+
+    // The node refuses anything that is not a canonical selector, so the same rule gates the
+    // button here rather than letting the operator discover it through a failed save.
     private bool HasCompleteRoutes => _roles.Count > 0
         && _roles.All(role => role.Candidates.Count > 0
-            && role.Candidates.All(candidate => !string.IsNullOrWhiteSpace(candidate.RuntimeProfile)));
+            && role.Candidates.All(candidate => AgentModelSelector.TryParse(candidate.Selector, out _)));
 
     protected override async Task OnInitializedAsync()
     {
@@ -426,18 +439,10 @@
             _catalogs.Clear();
             foreach (var catalog in catalogs)
             {
-                _catalogs[catalog.RuntimeProfile] = catalog;
+                _catalogs[catalog.Runtime] = catalog;
             }
 
-            // A model the node no longer lists must stay in the field: it may be a hand-written id.
-            foreach (var role in _roles)
-            {
-                foreach (var candidate in role.Candidates)
-                {
-                    candidate.SyncPick(ModelsFor(candidate.RuntimeProfile));
-                }
-            }
-
+            IndexCatalogs();
             _discoveredAt = Clock.UtcNow;
         }
         catch (Exception ex)
@@ -493,7 +498,6 @@
     private void Apply(NodeRuntimeConfigurationMessage configuration)
     {
         _configuration = configuration;
-        _runtimeProfiles = configuration.AllowedRuntimeProfiles;
         _roles.Clear();
 
         foreach (var role in configuration.AllowedRoles)
@@ -505,13 +509,7 @@
             {
                 foreach (var candidate in route.Candidates)
                 {
-                    var editable = new CandidateEditor
-                    {
-                        RuntimeProfile = candidate.RuntimeProfile,
-                        Model = candidate.Model,
-                    };
-                    editable.SyncPick(ModelsFor(candidate.RuntimeProfile));
-                    editor.Candidates.Add(editable);
+                    editor.Candidates.Add(new CandidateEditor { Selector = candidate.Model });
                 }
             }
 
@@ -522,14 +520,36 @@
     private void ClearConfiguration()
     {
         _configuration = null;
-        _runtimeProfiles = Array.Empty<string>();
         _roles.Clear();
         _catalogs.Clear();
+        _selectors.Clear();
+        _discovered.Clear();
         _discoveryError = null;
         _discoveredAt = null;
         _loadedAt = null;
         _saveError = null;
         _saved = null;
+    }
+
+    private void IndexCatalogs()
+    {
+        _selectors.Clear();
+        _discovered.Clear();
+        foreach (var runtime in AgentModelSelector.Runtimes)
+        {
+            if (Catalog(runtime) is not { Error: null } catalog)
+            {
+                continue;
+            }
+
+            foreach (var model in catalog.Models)
+            {
+                if (_discovered.TryAdd(model.Id, model))
+                {
+                    _selectors.Add(model.Id);
+                }
+            }
+        }
     }
 
     private bool TryNodeId(out Guid nodeId) => Guid.TryParse(_selectedNodeId, out nodeId);
@@ -540,20 +560,12 @@
         _saveError = null;
     }
 
-    private void ApplyPick(CandidateEditor candidate)
-    {
-        candidate.AdoptPick();
-        MarkEdited();
-    }
-
     private void Add(RoleEditor role)
     {
-        if (_runtimeProfiles.Count == 0)
+        role.Candidates.Add(new CandidateEditor
         {
-            return;
-        }
-
-        role.Candidates.Add(new CandidateEditor { RuntimeProfile = _runtimeProfiles[0] });
+            Selector = _selectors.Count > 0 ? _selectors[0] : FallbackSelector,
+        });
         MarkEdited();
     }
 
@@ -586,41 +598,53 @@
         }
     }
 
-    private RuntimeModelCatalogMessage? Catalog(string profile) =>
-        _catalogs.TryGetValue(profile, out var catalog) ? catalog : null;
+    private RuntimeModelCatalogMessage? Catalog(string runtime) =>
+        _catalogs.TryGetValue(runtime, out var catalog) ? catalog : null;
 
-    private IReadOnlyList<RuntimeModelMessage> ModelsFor(string profile) =>
-        Catalog(profile) is { Error: null } catalog ? catalog.Models : Array.Empty<RuntimeModelMessage>();
-
-    private IReadOnlyList<string> RuntimeOptions(string current)
+    private static string? SelectorError(CandidateEditor candidate)
     {
-        // A node may report a candidate on a profile it no longer allows; keep it selectable so
-        // opening this page never silently rewrites the stored route.
-        if (string.IsNullOrEmpty(current)
-            || _runtimeProfiles.Contains(current, StringComparer.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(candidate.Selector))
         {
-            return _runtimeProfiles;
+            return $"Enter a selector, for example {FallbackSelector}.";
         }
 
-        var options = new List<string>(_runtimeProfiles.Count + 1);
-        options.AddRange(_runtimeProfiles);
-        options.Add(current);
-        return options;
+        return AgentModelSelector.TryParse(candidate.Selector, out _)
+            ? null
+            : "Use '<runtime>/<model>' with one of: "
+                + string.Join(", ", AgentModelSelector.Runtimes)
+                + $". Example: {FallbackSelector}.";
     }
 
-    private string ModelNote(string profile)
+    /// <summary>
+    /// Confirms what a valid selector resolves to: the discovered model when the node listed it,
+    /// otherwise that it is being sent as typed.
+    /// </summary>
+    private string SelectorNote(CandidateEditor candidate)
     {
-        var catalog = Catalog(profile);
+        var selector = AgentModelSelector.Parse(candidate.Selector);
+        if (_discovered.TryGetValue(selector.Value, out var model))
+        {
+            return model.Provider is null
+                ? model.DisplayName
+                : $"{model.DisplayName} \u00b7 {model.Provider}";
+        }
+
+        if (selector.IsProviderDefault)
+        {
+            return $"{selector.Runtime} on its own default model.";
+        }
+
+        var catalog = Catalog(selector.Runtime);
         if (catalog is null)
         {
             return _discoveredAt is null
-                ? "Refresh models to see what this node offers, or type a model id."
-                : "This node reported no catalog for this runtime; type a model id.";
+                ? "Not checked against a catalog yet; refresh models to confirm it."
+                : "This node reported no catalog for this runtime; sent as typed.";
         }
 
         return catalog.Error is not null
-            ? $"Discovery unavailable: {catalog.Error} Type a model id instead."
-            : "This node listed no models for this runtime; type a model id.";
+            ? $"Discovery unavailable: {catalog.Error} Sent as typed."
+            : "Not in this node's catalog; sent as typed.";
     }
 
     private string StatusLine()
@@ -637,7 +661,7 @@
             : $"models fetched {_discoveredAt.Value.ToString("u")}";
 
         return $"Loaded {_loadedAt?.ToString("u") ?? "just now"} \u00b7 {_roles.Count} role(s) \u00b7 "
-            + $"{_runtimeProfiles.Count} runtime profile(s) \u00b7 {models}";
+            + $"{_selectors.Count} selector(s) \u00b7 {models}";
     }
 
     private static string CandidateSummary(RoleEditor role) => role.Candidates.Count switch
@@ -647,13 +671,8 @@
         _ => $"{role.Candidates.Count} candidates in order",
     };
 
-    private static string ModelLabel(RuntimeModelMessage model) =>
-        model.Provider is null ? model.DisplayName : $"{model.DisplayName} ({model.Provider})";
-
     private static string Describe(CandidateEditor candidate) =>
-        string.IsNullOrWhiteSpace(candidate.Model)
-            ? $"{candidate.RuntimeProfile} on its default model"
-            : $"{candidate.RuntimeProfile} on {candidate.Model}";
+        string.IsNullOrWhiteSpace(candidate.Selector) ? "the empty candidate" : candidate.Selector.Trim();
 
     private static string SampleModels(RuntimeModelCatalogMessage catalog)
     {
@@ -686,35 +705,14 @@
         public List<CandidateEditor> Candidates { get; } = [];
     }
 
+    /// <summary>
+    /// One route step. The single canonical <c>&lt;runtime&gt;/&lt;model&gt;</c> selector picks both
+    /// the adapter and the model, so there is nothing else to edit.
+    /// </summary>
     private sealed class CandidateEditor
     {
-        public string RuntimeProfile { get; set; } = string.Empty;
+        public string Selector { get; set; } = string.Empty;
 
-        public string? Model { get; set; }
-
-        /// <summary>
-        /// Selection in the discovered-model picker. Held apart from <see cref="Model"/> so a
-        /// hand-written id that no runtime lists is never cleared by the picker.
-        /// </summary>
-        public string? Pick { get; set; }
-
-        public void AdoptPick()
-        {
-            if (!string.IsNullOrEmpty(Pick))
-            {
-                Model = Pick;
-            }
-        }
-
-        public void SyncPick(IReadOnlyList<RuntimeModelMessage> models)
-        {
-            Pick = models.Any(model => string.Equals(model.Id, Model, StringComparison.Ordinal))
-                ? Model
-                : null;
-        }
-
-        public RuntimeRouteCandidateMessage ToMessage() => new(
-            RuntimeProfile.Trim(),
-            string.IsNullOrWhiteSpace(Model) ? null : Model.Trim());
+        public RuntimeRouteCandidateMessage ToMessage() => new(Selector.Trim());
     }
 }

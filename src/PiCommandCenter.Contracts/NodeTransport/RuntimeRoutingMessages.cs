@@ -1,7 +1,7 @@
 namespace PiCommandCenter.Contracts.NodeTransport;
 
 /// <summary>One runtime/model choice in an ordered role route.</summary>
-public sealed record RuntimeRouteCandidateMessage(string RuntimeProfile, string? Model);
+public sealed record RuntimeRouteCandidateMessage(string Model);
 
 /// <summary>The ordered runtime candidates assigned to one agent role.</summary>
 public sealed record RuntimeRoleRouteMessage(
@@ -11,9 +11,9 @@ public sealed record RuntimeRoleRouteMessage(
 /// <summary>One model reported as callable by a node runtime.</summary>
 public sealed record RuntimeModelMessage(string Id, string DisplayName, string? Provider);
 
-/// <summary>Models discovered for one runtime profile, or its discovery error.</summary>
+/// <summary>Models discovered for one runtime, or its discovery error.</summary>
 public sealed record RuntimeModelCatalogMessage(
-    string RuntimeProfile,
+    string Runtime,
     IReadOnlyList<RuntimeModelMessage> Models,
     string? Error);
 
@@ -21,7 +21,6 @@ public sealed record RuntimeModelCatalogMessage(
 public sealed record NodeRuntimeConfigurationMessage(
     Guid NodeId,
     IReadOnlyList<string> AllowedRoles,
-    IReadOnlyList<string> AllowedRuntimeProfiles,
     IReadOnlyList<RuntimeRoleRouteMessage> RoleRoutes);
 
 /// <summary>Complete replacement for a node's ordered role routes.</summary>

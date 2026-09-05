@@ -70,7 +70,7 @@ public class AgentMailServiceTests : IDisposable
             AgentName = sessionId + "-name",
             Role = "implementer",
             Runtime = "pi",
-            RuntimeProfile = "coder",
+            Model = "codex/default",
             Liveness = "Alive",
             Activity = "Working",
             Attention = "None",

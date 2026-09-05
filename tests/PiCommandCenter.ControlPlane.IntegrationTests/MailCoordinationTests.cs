@@ -228,13 +228,29 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
         // A recipient list containing an unknown session fails before persistence, so the
         // connected recipient must not receive anything for it.
         var rejected = await _client.PostAsJsonAsync($"/api/requests/{_requestId}/messages",
-            new { projectId = _projectId, senderSessionId = _rootSession, recipients = new[] { _childSession, NewSession() },
-                subject = "Never persisted", bodyMarkdown = "Should not route.", importance = "normal", ackRequired = false });
+            new
+            {
+                projectId = _projectId,
+                senderSessionId = _rootSession,
+                recipients = new[] { _childSession, NewSession() },
+                subject = "Never persisted",
+                bodyMarkdown = "Should not route.",
+                importance = "normal",
+                ackRequired = false
+            });
         Assert.Equal(HttpStatusCode.NotFound, rejected.StatusCode);
 
         var sent = await PostAsync<AgentMessageDto>($"/api/requests/{_requestId}/messages",
-            new { projectId = _projectId, senderSessionId = _rootSession, recipients = new[] { _childSession },
-                subject = "Live from browser", bodyMarkdown = "Delivered in real time.", importance = "high", ackRequired = false });
+            new
+            {
+                projectId = _projectId,
+                senderSessionId = _rootSession,
+                recipients = new[] { _childSession },
+                subject = "Live from browser",
+                bodyMarkdown = "Delivered in real time.",
+                importance = "high",
+                ackRequired = false
+            });
 
         var live = await firstPush.Task.WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(sent.Id, live.MessageId);
@@ -258,8 +274,16 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
         await SeedSessionAsync(sender, parentSessionId: _rootSession);
 
         var sent = await PostAsync<AgentMessageDto>($"/api/requests/{_requestId}/messages",
-            new { projectId = _projectId, senderSessionId = sender, recipients = new[] { _childSession },
-                subject = "From browser", bodyMarkdown = "Direct note.", importance = "normal", ackRequired = true });
+            new
+            {
+                projectId = _projectId,
+                senderSessionId = sender,
+                recipients = new[] { _childSession },
+                subject = "From browser",
+                bodyMarkdown = "Direct note.",
+                importance = "normal",
+                ackRequired = true
+            });
 
         var sessionMessage = await PostAsync<AgentMessageDto>($"/api/sessions/{_childSession}/message",
             new { projectId = _projectId, requestId = _requestId, subject = "Human", bodyMarkdown = "From the human." });

@@ -24,6 +24,7 @@ The system must allow a user to:
    - Pi with local or API-backed models.
    - The official, unmodified Claude Code CLI for Anthropic subscription usage.
    - The official Antigravity CLI for Google subscription usage.
+   - The official Muse Code CLI (`muse serve`) for Muse subscription usage, read-only.
 6. Display every root and child session in a live agent tree.
 7. Show whether each request and session is active, idle, blocked, completed, failed, cancelled, or disconnected.
 8. Let multiple agents work concurrently in one shared project repository without Git worktrees.
@@ -53,10 +54,10 @@ Web Command Center
                  ▼
         Root Pi Orchestrator
                  │
-        ┌────────┼──────────┐
-        ▼        ▼          ▼
-     Pi child  Claude Code  Antigravity
-     agent     child agent  child agent
+        ┌────────┼──────────┬───────────┐
+        ▼        ▼          ▼           ▼
+     Pi child  Claude Code  Antigravity  Muse Code
+     agent     child agent  child agent  child agent
 ```
 
 The root Pi session coordinates work. It does not directly implement changes. It plans, delegates, monitors, resolves coordination issues, requests verification, and submits completion evidence.
@@ -96,6 +97,8 @@ The root Pi session must not directly modify project files or run arbitrary deve
 Subscription-backed Anthropic work must launch the official, unmodified Claude Code binary using credentials managed by Claude Code.
 
 Subscription-backed Google work must launch the official Antigravity CLI using credentials managed by Antigravity.
+
+Subscription-backed Muse work must launch the official `muse serve` host using credentials managed by `muse login`.
 
 The Command Center must never read, copy, store, relay, or transform provider subscription credentials.
 
@@ -172,6 +175,7 @@ The PoC is successful only when all criteria below are demonstrated.
 - A Pi child can be launched and monitored.
 - An official Claude Code child can be launched and monitored.
 - An official Antigravity child can be launched and monitored in read-only reviewer mode.
+- An official Muse Code child can be launched and monitored in read-only mode.
 - Runtime-specific events are converted into one normalized event contract.
 - Provider authentication remains managed by the official CLI.
 
@@ -209,6 +213,13 @@ The PoC is successful only when all criteria below are demonstrated.
 - The node reconnects after a control-plane restart.
 - Events created while disconnected are replayed without duplication.
 
+
+### 5.8 Node resources
+
+- The Fleet dashboard shows the node's current CPU percent, memory used/total, disk used/total, one-minute load, uptime, and how fresh that observation is.
+- Those values come from the latest snapshot attached to the existing node heartbeat, not from a separate poller or a time series.
+- Any field that is unavailable, including CPU on the first sample after the node starts, is shown as unavailable. The UI must not invent, reuse, or hide a missing reading.
+
 ---
 
 ## 6. PoC Scope
@@ -227,12 +238,15 @@ The PoC is successful only when all criteria below are demonstrated.
 - Pi root and Pi child sessions.
 - Claude Code adapter.
 - Antigravity adapter in read-only mode.
+- Muse Code adapter in read-only mode.
 - Internal mail-like coordination service.
 - Strict reservation service.
 - Shared canonical project repository.
 - Request-level branch and commit support controlled by the supervisor.
 - Basic verification command profiles.
 - Cancellation and human guidance.
+- Latest nullable node resource snapshot carried on the existing heartbeat.
+
 
 ### 6.2 Explicitly deferred
 
@@ -254,6 +268,10 @@ The PoC is successful only when all criteria below are demonstrated.
 - Full container or micro-VM sandboxing.
 - Mobile native applications.
 - Production-grade high availability.
+- Historical node resource telemetry or graphs.
+- Resource alerting or thresholds.
+- Extra resource polling besides the existing heartbeat.
+
 
 ---
 
@@ -267,7 +285,7 @@ The PoC is successful only when all criteria below are demonstrated.
 | Project Runner | Logical node component that owns one project's queue, workspace state, and execution policy. |
 | Work Request | User-submitted unit of development work. |
 | Root Session | Pi session that plans and orchestrates one request. |
-| Child Session | Delegated agent session running through Pi, Claude Code, Antigravity, or another runtime. |
+| Child Session | Delegated agent session running through Pi, Claude Code, Antigravity, Muse Code, or another runtime. |
 | Runtime Adapter | Component that starts, observes, controls, and normalizes one agent harness. |
 | Agent Identity | Project-scoped human-readable identity used for messages and ownership. |
 | Reservation | Time-limited exclusive lease over a file, directory prefix, or shared resource. |
@@ -296,7 +314,7 @@ The PoC is successful only when all criteria below are demonstrated.
 │ Project registry          Request scheduler                │
 │ Session registry          Event reducer                    │
 │ Message service           Reservation authority            │
-│ Runtime profiles          Completion gates                 │
+│ Role model routes         Completion gates                 │
 │ EF Core / SQLite          SignalR publisher                │
 └───────────────────────────┬────────────────────────────────┘
                             │ Authenticated node stream
@@ -317,7 +335,8 @@ The PoC is successful only when all criteria below are demonstrated.
 │                       │   │                               │
 │ Root orchestrator     │   │ Claude Code                  │
 │ Pi child              │   │ Antigravity                  │
-│ Reservation tools     │   │ Future adapters              │
+│ Reservation tools     │   │ Muse Code                    │
+│                       │   │ Future adapters              │
 └───────────┬───────────┘   └──────────────┬────────────────┘
             │                              │
             └──────────────┬───────────────┘
@@ -348,6 +367,7 @@ The PoC uses these operating-system processes:
 4. Provider-specific child processes
    - `claude`
    - `agy`
+   - `muse`
 
 The browser never launches or communicates directly with agent processes.
 
@@ -369,6 +389,8 @@ The browser never launches or communicates directly with agent processes.
 | Git branch/index/commit | Node repository manager |
 | Browser presentation | Blazor UI |
 | Provider credentials | Official provider harness or Pi model runtime |
+| Latest node resource snapshot | Node samples on heartbeat; Control Plane persists latest only |
+
 
 No component may silently replace another component's authority.
 
@@ -482,7 +504,7 @@ A blocked request retains its last active phase separately so it can resume corr
 - A project may have only one active `development` request.
 - A project may run up to the configured number of read-only requests.
 - Different projects may run concurrently.
-- Child-agent concurrency is limited by project and runtime profile.
+- Child-agent concurrency is limited per project and per request (`Pi:MaxChildAgentsPerRequest`); a role's candidates are tried in route order.
 - Queue ordering is priority first, then creation time.
 - A blocked development request continues to own the active write-request slot unless explicitly suspended or cancelled.
 
@@ -653,69 +675,52 @@ The root may revise a rejected plan.
 
 ---
 
-## 15. Role and Runtime Routing
+## 15. Role and Model Routing
 
-Pi requests logical roles. The supervisor resolves runtime profiles.
+Pi requests logical roles. The supervisor resolves each role to an ordered list of canonical model selectors.
 
-Example configuration:
+A model selector is `<runtime>/<model>`. The runtime prefix (everything before the first `/`) must be one of the trusted adapter keys `codex`, `claude-code`, `antigravity`, or `muse`; it alone selects the host-owned adapter. The model id after the first `/` is handed to that provider verbatim and may itself contain slashes. The reserved model id `default` asks the provider for its default model. There are no runtime profiles: a selector names an adapter and a model, and every other property of the session (write policy, sandboxing, tool surface) is fixed by that adapter.
 
-```yaml
-roles:
-  architect:
-    runtimeOrder:
-      - claude-personal
-      - google-personal
-      - local-pi
-    permissionProfile: read-only
-
-  implementer:
-    runtimeOrder:
-      - local-pi
-      - claude-personal
-    permissionProfile: reserved-write
-
-  reviewer:
-    runtimeOrder:
-      - google-personal
-      - claude-personal
-      - local-pi
-    permissionProfile: read-only
-
-  security-reviewer:
-    runtimeOrder:
-      - claude-personal
-      - google-personal
-    permissionProfile: read-only
-
-  tester:
-    runtimeOrder:
-      - local-pi
-    permissionProfile: verification
-```
-
-### 15.1 Runtime profiles
+Example configuration (`Pi:RoleRoutes`):
 
 ```yaml
-runtimeProfiles:
-  local-pi:
-    adapter: pi
-    modelProfile: local-qwen
-    maxConcurrency: 4
-
-  claude-personal:
-    adapter: claude-code
-    executable: claude
-    authentication: provider-managed
-    maxConcurrency: 2
-
-  google-personal:
-    adapter: antigravity
-    executable: agy
-    authentication: provider-managed
-    maxConcurrency: 2
+Pi:
+  Model: codex/default
+  AllowedChildRoles: [root, architect, implementer, reviewer, verifier]
+  RoleRoutes:
+    root:
+      - Model: codex/default
+    architect:
+      - Model: claude-code/default
+      - Model: antigravity/default
+      - Model: muse/default
+      - Model: codex/default
+    implementer:
+      - Model: codex/default
+      - Model: claude-code/default
+    reviewer:
+      - Model: antigravity/default
+      - Model: claude-code/default
+      - Model: muse/default
+      - Model: codex/default
+    verifier:
+      - Model: codex/default
+      - Model: claude-code/default
 ```
 
-Agent-generated content must never be allowed to select an arbitrary executable, credential path, Unix user, or unregistered runtime profile.
+The node tries candidates in order. A candidate that fails to start, needs a reservation it cannot obtain, or is read-only while the spawn requested write scopes is skipped and the next candidate is tried; when every candidate fails the spawn fails with `runtime_route_exhausted`. Routes are node-owned: a spawn request names only a role and may never override, reorder, or extend the route. The operator edits routes through the control plane's routing page; the node validates every update (allowed roles only, at least one and at most sixteen canonical candidates per role, no duplicates) and persists it owner-only under `Pi:AgentDataDirectory/role-routes.json`.
+
+`muse/default` is a default candidate only on the read-oriented `architect` and `reviewer` routes, placed after the Claude Code and Antigravity candidates and before the Codex fallback. It is never a default for `implementer` or `verifier`.
+
+### 15.1 Write permissions
+
+There is no per-candidate permission profile. Write capability is derived, never configured on the route:
+
+- The supervisor grants a child write scopes only through reservation leases it acquires on the child's behalf (§17).
+- The runtime adapter's own policy bounds what a lease can enable: Pi and Claude Code children may edit only under an active lease; Antigravity and Muse Code are read-only, and a candidate for either is skipped whenever the spawn requests write scopes. The Muse adapter additionally refuses to start when handed a write authorization rather than silently running read-only.
+- Verification runs under a separate verification profile (§20), which is unrelated to model routing.
+
+Agent-generated content must never be allowed to select an arbitrary executable, credential path, Unix user, or a runtime prefix outside the trusted allowlist. Model ids are opaque to the supervisor and never interpreted as paths or commands.
 
 ---
 
@@ -1021,11 +1026,13 @@ At minimum:
 
 For the PoC, do not grant unrestricted Bash to a write-capable Claude Code child. Project verification runs through typed supervisor operations.
 
-### 18.3 Antigravity enforcement
+### 18.3 Antigravity and Muse Code enforcement
 
 The PoC Antigravity adapter is read-only reviewer mode. It must not receive write permissions.
 
 Write-capable Antigravity support is deferred until its exact hook and permission behavior is contract-tested against the pinned version.
+
+The Muse Code adapter is read-only by construction: the host is always launched as `muse serve --disable-write --disable-shell --no-session-log` with `denyUnmatched` approvals, so the model holds no write or shell tool and no approval prompt to escalate through. The boundary is the host's own model-facing tool policy, not a Command Center hook. A `muse/` candidate is skipped whenever a spawn requests write scopes, and the adapter refuses a start request that carries a write authorization. Write-capable Muse support is not planned for the PoC.
 
 ### 18.4 Shell escape prevention
 
@@ -1372,6 +1379,9 @@ The contract must support:
 - Commands from Control Plane to node.
 - Reconnect and replay.
 
+Heartbeat carries the node's latest resource snapshot when one was taken on that tick. The snapshot is current observation only: observed time, CPU percent, memory used/total, disk used/total, one-minute load, and uptime. Fields other than observed time may be null. The node samples on the existing heartbeat only (cgroup v2 when that is the node's environment). The first CPU sample after start is null. The Control Plane stores the latest snapshot, not a history.
+
+
 ### 23.1 Local event spool
 
 The node stores unacknowledged events in local SQLite.
@@ -1469,7 +1479,7 @@ Root mode configuration:
 
 ### 25.3 Child mode
 
-Child mode configuration depends on permission profile.
+Child mode tool configuration is derived from whether the supervisor acquired a write lease for the child (§15.1); there is no configured permission profile.
 
 Read-only child:
 
@@ -1612,6 +1622,42 @@ Write-capable Antigravity sessions are deferred until the implementation validat
 
 ---
 
+## 27a. Muse Code Runtime Adapter
+
+### 27a.1 Provider boundary
+
+Launch the official `muse` executable (`Muse:Executable`) as `muse serve` and use the login state it manages itself under `~/.config/muse`.
+
+The adapter must not:
+
+- Pass `--yolo`, `--disable-sandbox`, `--api-key-stdin`, or any login/logout/auth subcommand.
+- Read, copy, relay, or transform Muse or Meta credentials, or place them on argv, stdin, or the environment.
+- Present Muse login inside the Command Center.
+
+The user authenticates with host-native `muse login` before managed use. A start or exit whose diagnostics match the Muse/Meta login phrasing is surfaced as blocked + input-required with the reason "Complete Muse Code login locally (muse login)"; raw provider output never enters the reason.
+
+### 27a.2 Protocol and lifecycle
+
+The adapter speaks only the stable MSP v1 surface over the host's stdio as newline-delimited JSON-RPC 2.0, one host per `muse/<model-id>` session, with the project repository as `workspaceRoot`:
+
+1. `initialize` (client name `devfleet`) then the `initialized` notification. An envelope schema version other than `1` fails the start closed; an unexpected stable-surface fingerprint is a warning only.
+2. `session/start` with `approvalMode: denyUnmatched` and `modelId` = the selector's model id, omitted for `muse/default` so the host picks its own default. The returned provider session id is the `ProviderSessionId`.
+3. `turn/start` submits the prompt; every later input is another `turn/start`, queued by the host behind a running turn.
+4. `turn/cancel` cancels the foreground turn; if the host does not settle within the cancel grace period the host is terminated so cancellation always lands.
+5. MSP has no session close method. Close is a best-effort `view/unsubscribe` followed by bounded host termination (SIGTERM, then process-tree kill); the process boundary is the close.
+
+`session/start`, `turn/start`, and `turn/cancel` carry a UUIDv7 `commandId` idempotency handle. Unsolicited server requests are declined with `methodNotFound`. A malformed or oversize stdout frame, or a response with neither result nor error, faults pending requests and terminates the host. Capabilities: streaming events, send input, cancel, snapshot; no child spawn, no plan tools.
+
+### 27a.3 Model discovery
+
+`model/list` is called only by the node-owned catalog reader, on a fresh read-only host that is handshaken, queried once, and terminated. Every id is prefixed to the canonical `muse/<model-id>` selector. A reader error, or a read that yields no canonical selector, is reported as a catalog error rather than an empty success. Discovery never starts a session and never reads credentials.
+
+### 27a.4 No subscription-usage surface
+
+Muse exposes no safe remaining-quota or auth-plan query, and MSP v1 has no usage method. Muse is therefore absent from the `/usage` subscription dashboard: no provider row, status, window, or diagnostic is synthesized for it, and nothing about its quota is estimated from session behaviour. Muse is a runtime-only, read-only selector.
+
+---
+
 ## 28. Runtime Adapter Interface
 
 Implement a runtime-neutral contract in C#.
@@ -1652,6 +1698,7 @@ PoC implementations:
 PiRuntimeAdapter
 ClaudeCodeRuntimeAdapter
 AntigravityRuntimeAdapter
+MuseCodeRuntimeAdapter
 FakeRuntimeAdapter
 ```
 
@@ -1673,6 +1720,8 @@ Use EF Core with SQLite.
 - LastHeartbeatAt
 - Status
 - CapabilitiesJson
+- Latest resource snapshot (nullable fields; replaced in place, not appended)
+
 
 #### Project
 
@@ -1714,8 +1763,8 @@ Use EF Core with SQLite.
 - ParentSessionId
 - AgentName
 - Role
-- Runtime
-- RuntimeProfile
+- Runtime (trusted adapter key: `codex`, `claude-code`, `antigravity`, `muse`)
+- Model (canonical `<runtime>/<model>` selector; its prefix always equals Runtime)
 - ProviderSessionId
 - Liveness
 - Activity
@@ -1904,6 +1953,8 @@ Display:
 - Queued requests.
 - Project cards.
 - Global attention items.
+- Current node CPU, memory, disk, one-minute load, and uptime, including honest unavailable states.
+
 
 Example:
 
@@ -1919,6 +1970,8 @@ PROJECTS
 Agent Command Center   1 active · 1 blocked · 2 queued
 Project-It             idle · 2 queued
 Jolera MCP             1 active · 3 agents
+Node workstation   online · CPU — · mem 2.0 / 8.0 GiB · disk 10 / 100 GiB · load 0.61 · up 1d
+
 ```
 
 ### 31.2 Project page
@@ -2108,7 +2161,7 @@ Treat project files, instructions, tool output, and messages as untrusted conten
 They must not be able to:
 
 - Change runtime executable paths.
-- Select privileged runtime profiles.
+- Select a runtime outside the trusted prefix allowlist, or override a role's model route.
 - Disable reservation hooks.
 - Grant broader permissions.
 - Alter project roots.
@@ -2165,21 +2218,28 @@ projects:
     createRequestCommit: true
     autoMerge: false
 
-runtimeProfiles:
-  local-pi:
-    adapter: pi
-    modelProfile: local-qwen
-    maxConcurrency: 4
-
-  claude-personal:
-    adapter: claude-code
-    executable: claude
-    maxConcurrency: 2
-
-  google-personal:
-    adapter: antigravity
-    executable: agy
-    maxConcurrency: 2
+pi:
+  model: codex/default
+  allowedChildRoles: [root, architect, implementer, reviewer, verifier]
+  roleRoutes:
+    root:
+      - model: codex/default
+    architect:
+      - model: claude-code/default
+      - model: antigravity/default
+      - model: muse/default
+      - model: codex/default
+    implementer:
+      - model: codex/default
+      - model: claude-code/default
+    reviewer:
+      - model: antigravity/default
+      - model: claude-code/default
+      - model: muse/default
+      - model: codex/default
+    verifier:
+      - model: codex/default
+      - model: claude-code/default
 ```
 
 Use strongly typed options with startup validation.
@@ -2279,6 +2339,8 @@ Implementation must proceed in vertical slices and keep builds passing.
 - Implement registration, heartbeat, claim, and event batch transport.
 - Implement local event spool and replay.
 - Show node online/offline in UI.
+- Show current node CPU, memory, disk, load, and uptime; render unavailable fields as unavailable.
+
 
 **Exit condition:** Node claims a request and survives Control Plane restart.
 
@@ -2340,6 +2402,15 @@ Implementation must proceed in vertical slices and keep builds passing.
 
 **Exit condition:** Root Pi delegates an independent review to Antigravity and receives a compact result.
 
+### Milestone 8a — Muse Code adapter
+
+- Implement official `muse serve --disable-write --disable-shell --no-session-log` process launch.
+- Implement the MSP v1 JSON-RPC client: `initialize`/`initialized`, `session/start`, `turn/start`, `turn/cancel`, `view/unsubscribe`, `model/list`.
+- Normalize turn notifications, host exit, and login-missing diagnostics into the shared event contract.
+- Reject write authorizations and surface Muse only on read-oriented routes.
+
+**Exit condition:** Root Pi delegates an independent read-only review to a `muse/<model-id>` child and receives a compact result; no write or shell tool is ever available to the model.
+
 ### Milestone 9 — Verification and completion gate
 
 - Implement trusted verification profiles.
@@ -2398,6 +2469,7 @@ Environment flags:
 RUN_REAL_PI_TESTS=1
 RUN_REAL_CLAUDE_TESTS=1
 RUN_REAL_ANTIGRAVITY_TESTS=1
+RUN_REAL_MUSE_TESTS=1
 ```
 
 Contract tests must record the detected CLI version and fail with an actionable compatibility message.
@@ -2409,7 +2481,7 @@ Contract tests must record the detected CLI version and fail with an actionable 
 1. Submit “Add a health endpoint and tests.”
 2. Root Pi plans.
 3. Pi child implements.
-4. Claude or Antigravity reviews.
+4. Claude, Antigravity, or Muse Code reviews.
 5. Verification passes.
 6. Request completes.
 
@@ -2508,7 +2580,7 @@ OMP should produce:
 10. Child session tree.
 11. Mail coordination.
 12. Strict file reservations.
-13. Pi, Claude Code, and Antigravity adapters at the PoC capability levels.
+13. Pi, Claude Code, Antigravity, and Muse Code adapters at the PoC capability levels.
 14. Blazor dashboard, project page, and request page.
 15. Automated tests and demonstration script.
 16. Fedora systemd user-service files for Control Plane and Node.
@@ -2580,10 +2652,11 @@ After PoC acceptance, likely next capabilities are:
 - Browser notifications.
 - Passkey authentication.
 - Container or micro-VM worker isolation.
-- Write-capable Antigravity adapter.
+- Write-capable Antigravity or Muse Code adapter.
 - Native interactive terminal attachment.
 - Request continuation and dependency chains.
 - Pull-request creation and controlled integration.
+- Historical node resource telemetry and resource alerting.
 
 These are not part of the PoC.
 
@@ -2622,6 +2695,10 @@ Claude Code must remain unmodified. The user authenticates through Anthropic's f
 
 Use `agy` as the Google consumer-subscription harness. Its adapter must be capability-driven and version-tested.
 
+### Muse Code
+
+Use `muse serve` over stdio as the Muse subscription harness, on the stable MSP v1 envelope only: the handshake fails closed on any other envelope schema version and warns when the stable-surface fingerprint differs from the verified Muse Code 1.0.3 one. The adapter is read-only and host-authenticated through `muse login`; the operator's `~/.config/muse` state is mounted into the node container for the host alone and masked from sibling model-driven processes (the Antigravity sandbox mounts an empty `tmpfs` over `/home/node/.config/muse`).
+
 ### MCP Agent Mail reference behavior
 
 - Project:  
@@ -2637,7 +2714,7 @@ The PoC is done when:
 
 - The first demonstration succeeds entirely through the web interface.
 - Pi orchestrates by default and never directly edits the repository.
-- Pi, Claude Code, and Antigravity sessions appear in one normalized agent tree.
+- Pi, Claude Code, Antigravity, and Muse Code sessions appear in one normalized agent tree.
 - Agents coordinate through the internal mail system.
 - Disjoint writers operate concurrently in one shared repository.
 - Conflicting writes are technically prevented through strict reservations.

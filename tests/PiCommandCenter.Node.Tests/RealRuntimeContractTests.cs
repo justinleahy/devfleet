@@ -13,6 +13,8 @@ public sealed class RealRuntimeContractTests
 
     public static bool AgyOptIn => IsEnabled("RUN_REAL_ANTIGRAVITY_TESTS");
 
+    public static bool MuseOptIn => IsEnabled("RUN_REAL_MUSE_TESTS");
+
     [Fact]
     public void Claude_cli_version_is_recorded_when_opted_in()
     {
@@ -43,6 +45,20 @@ public sealed class RealRuntimeContractTests
             version);
     }
 
+    [Fact]
+    public void Muse_cli_version_is_recorded_when_opted_in()
+    {
+        if (!MuseOptIn)
+        {
+            return; // opt-in only: RUN_REAL_MUSE_TESTS=1
+        }
+
+        var version = CaptureVersion("muse", "--version");
+        Assert.False(string.IsNullOrWhiteSpace(version));
+        File.WriteAllText(
+            Path.Combine(Path.GetTempPath(), "pi-cc-muse-cli-version.txt"),
+            version);
+    }
 
     private static bool IsEnabled(string name)
     {

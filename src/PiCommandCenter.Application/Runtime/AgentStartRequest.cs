@@ -5,7 +5,8 @@ namespace PiCommandCenter.Application.Runtime;
 
 /// <summary>
 /// Everything a runtime adapter needs to start one agent session. Validated at construction;
-/// throws <see cref="ArgumentException"/> when an identifier or label is empty.
+/// throws <see cref="ArgumentException"/> when an identifier or label is empty or the model
+/// selector is not canonical.
 /// </summary>
 public sealed record AgentStartRequest
 {
@@ -19,10 +20,9 @@ public sealed record AgentStartRequest
         string workingDirectory,
         string prompt,
         AgentRuntimeMode mode,
-        string runtimeProfile,
+        string model,
         AgentRuntimeAuthorizationContext? authorization = null,
-        bool createRequestCommit = false,
-        string? model = null)
+        bool createRequestCommit = false)
     {
         SessionId = Require(sessionId, nameof(sessionId));
         ProjectId = projectId;
@@ -33,10 +33,9 @@ public sealed record AgentStartRequest
         WorkingDirectory = Require(workingDirectory, nameof(workingDirectory));
         Prompt = Require(prompt, nameof(prompt));
         Mode = mode;
-        RuntimeProfile = Require(runtimeProfile, nameof(runtimeProfile));
+        Model = AgentModelSelector.Parse(model);
         Authorization = authorization;
         CreateRequestCommit = createRequestCommit;
-        Model = Optional(model, nameof(model));
     }
 
     /// <summary>Orchestrator-assigned session id (the projection identity).</summary>
@@ -66,11 +65,8 @@ public sealed record AgentStartRequest
     /// <summary>Root or child position in the tree.</summary>
     public AgentRuntimeMode Mode { get; }
 
-    /// <summary>Runtime profile per SPEC §15.1.</summary>
-    public string RuntimeProfile { get; }
-    /// <summary>Optional provider-native model selected by the trusted node route.</summary>
-    public string? Model { get; }
-
+    /// <summary>Canonical <c>runtime/model</c> selector chosen by the trusted node route.</summary>
+    public AgentModelSelector Model { get; }
 
     /// <summary>
     /// Successful reservation grant for reserved-write Claude. Null for read-only starts.

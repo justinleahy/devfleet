@@ -20,8 +20,8 @@ public class StatusPrecedenceTests
         parentSessionId: null,
         agentName: "root",
         role: "root",
-        runtime: "pi",
-        runtimeProfile: "default",
+        runtime: "codex",
+        model: "codex/gpt-6-astra",
         startedAt: StartedAt);
 
     private static NormalizedAgentEvent Event(

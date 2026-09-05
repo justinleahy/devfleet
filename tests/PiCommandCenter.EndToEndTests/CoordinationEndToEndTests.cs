@@ -138,19 +138,40 @@ public sealed class CoordinationEndToEndTests : IClassFixture<EndToEndFixture>, 
         db.FleetNodes.Add(FleetNode.Register(new NodeId(_nodeId), "e2e-node-" + _scope, "1.0.0", "{}", now));
         db.AgentSessions.Add(new AgentSessionRow
         {
-            Id = RootSession, ProjectId = _projectId, RequestId = _requestId,
-            AgentName = "root-" + _scope, Role = "root", Runtime = "pi", RuntimeProfile = "root-readonly",
-            Liveness = "Active", Activity = "Idle", Attention = "None", WorkState = "Working",
-            StatusReason = "Orchestrating", StartedAtUtcTicks = now.UtcTicks, Version = 1,
+            Id = RootSession,
+            ProjectId = _projectId,
+            RequestId = _requestId,
+            AgentName = "root-" + _scope,
+            Role = "root",
+            Runtime = "pi",
+            Model = "codex/default",
+            Liveness = "Active",
+            Activity = "Idle",
+            Attention = "None",
+            WorkState = "Working",
+            StatusReason = "Orchestrating",
+            StartedAtUtcTicks = now.UtcTicks,
+            Version = 1,
         });
         foreach (var (id, name) in new[] { (ChildSession, "child-" + _scope), (SessionA, "writer-a"), (SessionB, "writer-b") })
         {
             db.AgentSessions.Add(new AgentSessionRow
             {
-                Id = id, ProjectId = _projectId, RequestId = _requestId, ParentSessionId = RootSession,
-                AgentName = name, Role = "implementer", Runtime = "pi", RuntimeProfile = "coder",
-                Liveness = "Active", Activity = "Idle", Attention = "None", WorkState = "Working",
-                StatusReason = "Implementing", StartedAtUtcTicks = now.UtcTicks, Version = 1,
+                Id = id,
+                ProjectId = _projectId,
+                RequestId = _requestId,
+                ParentSessionId = RootSession,
+                AgentName = name,
+                Role = "implementer",
+                Runtime = "pi",
+                Model = "codex/default",
+                Liveness = "Active",
+                Activity = "Idle",
+                Attention = "None",
+                WorkState = "Working",
+                StatusReason = "Implementing",
+                StartedAtUtcTicks = now.UtcTicks,
+                Version = 1,
             });
         }
 
@@ -218,7 +239,7 @@ public sealed class CoordinationEndToEndTests : IClassFixture<EndToEndFixture>, 
                     ["parentSessionId"] = RootSession,
                     ["agentName"] = "child-" + _scope,
                     ["role"] = "implementer",
-                    ["runtimeProfile"] = "coder",
+                    ["model"] = "codex/default",
                 })),
             new NodeEventMessage(
                 EventId: $"evt-{_scope}-completed",

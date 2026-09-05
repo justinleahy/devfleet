@@ -1,3 +1,6 @@
+using Microsoft.AspNetCore.SignalR.Client;
+using PiCommandCenter.Application.Nodes;
+using PiCommandCenter.Contracts.NodeTransport;
 using System.Net.Http.Json;
 using System.Text.Json;
 
@@ -77,6 +80,46 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
 
         Assert.Contains("Fleet dashboard", html);
         Assert.Contains("No projects registered", html);
+    }
+
+    [Fact]
+    public async Task Dashboard_renders_fleet_resource_labels_and_values_from_the_latest_heartbeat()
+    {
+        var nodeId = Guid.NewGuid();
+        await using var connection = _fixture.CreateNodeHubConnection();
+        await connection.StartAsync();
+        await connection.InvokeAsync<NodeDto>(
+            "Register", new NodeRegistrationMessage(nodeId, "pi-resource-ui", "1.0.0", "{}"));
+        var observedAt = new DateTimeOffset(2026, 9, 5, 12, 0, 0, TimeSpan.Zero);
+        await connection.InvokeAsync<NodeDto>(
+            "Heartbeat",
+            new NodeHeartbeatMessage(
+                nodeId,
+                [],
+                new NodeResourceSnapshotMessage(
+                    observedAt,
+                    CpuUsagePercent: 12.5,
+                    MemoryUsedBytes: 1024L * 1024L,
+                    MemoryTotalBytes: 2L * 1024L * 1024L,
+                    DiskUsedBytes: 3L * 1024L * 1024L,
+                    DiskTotalBytes: 4L * 1024L * 1024L,
+                    LoadAverageOneMinute: 0.5,
+                    UptimeSeconds: 3661d)));
+
+        var html = await GetHtmlAsync(_fixture.CreateClient(), "/");
+
+        Assert.Contains("pi-resource-ui", html);
+        Assert.Contains(">CPU<", html);
+        Assert.Contains("12.5%", html);
+        Assert.Contains(">Memory<", html);
+        Assert.Contains("1.0 MiB of 2.0 MiB", html);
+        Assert.Contains(">Disk<", html);
+        Assert.Contains("3.0 MiB of 4.0 MiB", html);
+        Assert.Contains("Load, 1 minute", html);
+        Assert.Contains("0.50", html);
+        Assert.Contains(">Uptime<", html);
+        Assert.Contains("1h 1m", html);
+        Assert.DoesNotContain(observedAt.ToString("u"), html);
     }
 
     [Fact]

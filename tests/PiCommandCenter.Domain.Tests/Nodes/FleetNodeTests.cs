@@ -1,3 +1,4 @@
+using System.Text.Json;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
 
@@ -164,5 +165,70 @@ public class FleetNodeTests
         Assert.Equal(createdAt, node.CreatedAt);
         Assert.Equal(updatedAt, node.UpdatedAt);
         Assert.Equal(42, node.Version);
+    }
+
+    [Fact]
+    public void Heartbeat_overwrites_the_latest_resource_snapshot()
+    {
+        var node = RegisterNode();
+        var firstAt = Now.AddMinutes(1);
+        var secondAt = Now.AddMinutes(2);
+
+        node.Heartbeat("1.2.3", "{}", firstAt, SnapshotJson(firstAt, cpu: 10d));
+        node.Heartbeat("1.2.3", "{}", secondAt, SnapshotJson(secondAt, cpu: 42.5));
+
+        AssertSnapshot(node.ResourceSnapshotJson, secondAt, cpu: 42.5);
+    }
+
+    [Fact]
+    public void Heartbeat_clears_the_resource_snapshot_when_resources_are_omitted()
+    {
+        var node = RegisterNode();
+        node.Heartbeat("1.2.3", "{}", Now.AddMinutes(1), SnapshotJson(Now.AddMinutes(1)));
+
+        node.Heartbeat("1.2.3", "{}", Now.AddMinutes(2), resourceSnapshotJson: null);
+
+        Assert.Null(node.ResourceSnapshotJson);
+    }
+
+    [Fact]
+    public void RefreshRegistration_preserves_the_latest_resource_snapshot()
+    {
+        var node = RegisterNode();
+        var observedAt = Now.AddMinutes(1);
+        node.Heartbeat("1.2.3", "{}", observedAt, SnapshotJson(observedAt));
+
+        node.RefreshRegistration("pi-01-renamed", "2.0.0", "{}", Now.AddMinutes(2));
+
+        AssertSnapshot(node.ResourceSnapshotJson, observedAt, cpu: 12.5);
+        Assert.Equal("pi-01-renamed", node.DisplayName);
+    }
+
+    private static string SnapshotJson(DateTimeOffset observedAt, double cpu = 12.5) =>
+        JsonSerializer.Serialize(new
+        {
+            observedAt,
+            cpuUsagePercent = cpu,
+            memoryUsedBytes = 1024L,
+            memoryTotalBytes = 2048L,
+            diskUsedBytes = 4096L,
+            diskTotalBytes = 8192L,
+            loadAverageOneMinute = 0.25,
+            uptimeSeconds = 90d,
+        });
+
+    private static void AssertSnapshot(string? json, DateTimeOffset observedAt, double cpu)
+    {
+        Assert.False(string.IsNullOrWhiteSpace(json));
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        Assert.Equal(observedAt, root.GetProperty("observedAt").GetDateTimeOffset());
+        Assert.Equal(cpu, root.GetProperty("cpuUsagePercent").GetDouble());
+        Assert.Equal(1024L, root.GetProperty("memoryUsedBytes").GetInt64());
+        Assert.Equal(2048L, root.GetProperty("memoryTotalBytes").GetInt64());
+        Assert.Equal(4096L, root.GetProperty("diskUsedBytes").GetInt64());
+        Assert.Equal(8192L, root.GetProperty("diskTotalBytes").GetInt64());
+        Assert.Equal(0.25, root.GetProperty("loadAverageOneMinute").GetDouble());
+        Assert.Equal(90d, root.GetProperty("uptimeSeconds").GetDouble());
     }
 }

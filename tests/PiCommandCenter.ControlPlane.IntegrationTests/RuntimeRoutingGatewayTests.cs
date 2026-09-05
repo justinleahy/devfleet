@@ -23,13 +23,12 @@ public sealed class RuntimeRoutingGatewayTests : IClassFixture<ControlPlaneFixtu
         var configuration = new NodeRuntimeConfigurationMessage(
             nodeId,
             ["reviewer"],
-            ["local-pi"],
-            [new RuntimeRoleRouteMessage("reviewer", [new RuntimeRouteCandidateMessage("local-pi", null)])]);
+            [new RuntimeRoleRouteMessage("reviewer", [new RuntimeRouteCandidateMessage("codex/gpt-6-astra")])]);
         var catalogs = new[]
         {
             new RuntimeModelCatalogMessage(
-                "local-pi",
-                [new RuntimeModelMessage("provider/model", "Model", "provider")],
+                "codex",
+                [new RuntimeModelMessage("codex/gpt-6-astra", "GPT-6 Astra", "codex")],
                 null),
         };
         UpdateNodeRuntimeConfigurationMessage? receivedUpdate = null;
@@ -56,8 +55,8 @@ public sealed class RuntimeRoutingGatewayTests : IClassFixture<ControlPlaneFixtu
 
         Assert.Equal(nodeId, loaded.NodeId);
         Assert.Equal(configuration.AllowedRoles, loaded.AllowedRoles);
-        Assert.Equal("local-pi", loaded.RoleRoutes.Single().Candidates.Single().RuntimeProfile);
-        Assert.Equal("provider/model", discovered.Single().Models.Single().Id);
+        Assert.Equal("codex/gpt-6-astra", loaded.RoleRoutes.Single().Candidates.Single().Model);
+        Assert.Equal("codex/gpt-6-astra", discovered.Single().Models.Single().Id);
         Assert.Equal(nodeId, saved.NodeId);
         Assert.NotNull(receivedUpdate);
         Assert.Equal("reviewer", receivedUpdate.RoleRoutes.Single().Role);

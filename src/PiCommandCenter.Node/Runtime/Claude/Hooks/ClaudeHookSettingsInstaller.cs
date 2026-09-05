@@ -34,13 +34,13 @@ public sealed class ClaudeHookSettingsInstaller
                 "claude-runtime");
     }
 
-    public ClaudeHookInstallResult Install(string profile, ClaudeHookSessionContext context)
+    /// <summary>
+    /// Installs settings for one session. <paramref name="allowWrite"/> must derive solely from a
+    /// supervisor-issued reservation grant; without it the allow list is read-only.
+    /// </summary>
+    public ClaudeHookInstallResult Install(bool allowWrite, ClaudeHookSessionContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        if (profile is not (ClaudeRuntimeProfiles.ReadOnly or ClaudeRuntimeProfiles.ReservedWrite))
-        {
-            throw new ArgumentOutOfRangeException(nameof(profile), profile, "Unknown Claude runtime profile.");
-        }
 
         _server.EnsureStarted();
         _server.Register(context);
@@ -57,7 +57,7 @@ public sealed class ClaudeHookSettingsInstaller
         RestrictOwnerOnly(hookPath, executable: true);
 
         var validatorUrl = _server.BaseUrl;
-        var settings = BuildSettings(profile, hookPath, validatorUrl, context.SessionId);
+        var settings = BuildSettings(allowWrite, hookPath, validatorUrl, context.SessionId);
         File.WriteAllText(settingsPath, settings, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         RestrictOwnerOnly(settingsPath, executable: false);
 
@@ -70,13 +70,12 @@ public sealed class ClaudeHookSettingsInstaller
     }
 
     internal static string BuildSettings(
-        string profile,
+        bool allowWrite,
         string hookPath,
         string validatorUrl,
         string sessionId)
     {
-        var write = profile == ClaudeRuntimeProfiles.ReservedWrite;
-        var allow = write
+        var allow = allowWrite
             ? new[] { "Read", "Glob", "Grep", "Edit", "Write" }
             : new[] { "Read", "Glob", "Grep" };
         var preCommand = $"{Quote(hookPath)} pre {Quote(validatorUrl)} {Quote(sessionId)}";

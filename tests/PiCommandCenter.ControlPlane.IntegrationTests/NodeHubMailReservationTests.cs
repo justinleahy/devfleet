@@ -154,10 +154,20 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
         db.WorkRequests.Add(request);
         db.AgentSessions.Add(new AgentSessionRow
         {
-            Id = RootSession, ProjectId = project.Id.Value, RequestId = request.Id.Value,
-            AgentName = "root", Role = "root", Runtime = "pi", RuntimeProfile = "root-readonly",
-            Liveness = "Active", Activity = "Idle", Attention = "None", WorkState = "Working",
-            StatusReason = "Seeded for hub tests", StartedAtUtcTicks = now.UtcTicks, Version = 1,
+            Id = RootSession,
+            ProjectId = project.Id.Value,
+            RequestId = request.Id.Value,
+            AgentName = "root",
+            Role = "root",
+            Runtime = "pi",
+            Model = "codex/default",
+            Liveness = "Active",
+            Activity = "Idle",
+            Attention = "None",
+            WorkState = "Working",
+            StatusReason = "Seeded for hub tests",
+            StartedAtUtcTicks = now.UtcTicks,
+            Version = 1,
         });
         foreach (var (id, name) in new[]
                  {
@@ -166,10 +176,21 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
         {
             db.AgentSessions.Add(new AgentSessionRow
             {
-                Id = id, ProjectId = project.Id.Value, RequestId = request.Id.Value, ParentSessionId = RootSession,
-                AgentName = name, Role = "implementer", Runtime = "pi", RuntimeProfile = "coder",
-                Liveness = "Active", Activity = "Idle", Attention = "None", WorkState = "Working",
-                StatusReason = "Seeded for hub tests", StartedAtUtcTicks = now.UtcTicks, Version = 1,
+                Id = id,
+                ProjectId = project.Id.Value,
+                RequestId = request.Id.Value,
+                ParentSessionId = RootSession,
+                AgentName = name,
+                Role = "implementer",
+                Runtime = "pi",
+                Model = "codex/default",
+                Liveness = "Active",
+                Activity = "Idle",
+                Attention = "None",
+                WorkState = "Working",
+                StatusReason = "Seeded for hub tests",
+                StartedAtUtcTicks = now.UtcTicks,
+                Version = 1,
             });
         }
 

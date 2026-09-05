@@ -1,14 +1,11 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
-using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
-using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
-using PiCommandCenter.Node.RuntimeRouting;
+using PiCommandCenter.Node.Runtime.Antigravity;
 
 namespace PiCommandCenter.Node.SubscriptionUsage;
 
@@ -39,18 +36,33 @@ public interface IRuntimeSubscriptionUsageCommandRunner
         CancellationToken cancellationToken);
 }
 
+public interface IAntigravitySubscriptionUsageCommandRunner
+{
+    Task<SubscriptionUsageCommandResult> RunAsync(
+        string executable,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// Starts a process with <see cref="ProcessStartInfo.ArgumentList"/> only (no shell),
-/// closed stdin, a combined 16KiB stdout+stderr capture budget, and process-tree kill.
-/// Process exit plus EOF on both pipes is one operation under a single 10s deadline: a
+/// closed stdin, a combined 256KiB stdout+stderr capture budget, and process-tree kill.
+/// Process exit plus EOF on both pipes is one operation under a single 15s deadline: a
 /// descendant that inherits a pipe and outlives its parent must not turn a valid-looking
 /// prefix into a success, so any part that is cancelled or fails closes the result without
 /// its partial output. Caller cancellation is observed before start and propagated.
 /// </summary>
 public sealed class RuntimeSubscriptionUsageCommandRunner : IRuntimeSubscriptionUsageCommandRunner
 {
-    public const int MaxOutputBytes = 16 * 1024;
-    public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
+    /// <summary>
+    /// A normalized sidecar report is a few KiB per provider; the budget leaves generous headroom
+    /// for Node diagnostics on stderr without becoming unbounded.
+    /// </summary>
+    public const int MaxOutputBytes = 256 * 1024;
+    /// <summary>
+    /// Host deadline must exceed sidecar's 8-second deadline to cover SDK startup and serialization.
+    /// </summary>
+    public static readonly TimeSpan Timeout = TimeSpan.FromSeconds(15);
 
     /// <summary>Upper bound on waiting for a killed tree to leave; the kill itself is best-effort.</summary>
     public static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds(2);
@@ -78,20 +90,18 @@ public sealed class RuntimeSubscriptionUsageCommandRunner : IRuntimeSubscription
         ArgumentException.ThrowIfNullOrWhiteSpace(executable);
         cancellationToken.ThrowIfCancellationRequested();
 
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = executable,
-            WorkingDirectory = Directory.GetCurrentDirectory(),
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        };
-        foreach (var argument in arguments)
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
+        return await ExecutePreparedAsync(
+                CreateStartInfo(executable, arguments, Directory.GetCurrentDirectory()),
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    internal async Task<SubscriptionUsageCommandResult> ExecutePreparedAsync(
+        ProcessStartInfo startInfo,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        cancellationToken.ThrowIfCancellationRequested();
 
         Process? process;
         try
@@ -161,6 +171,29 @@ public sealed class RuntimeSubscriptionUsageCommandRunner : IRuntimeSubscription
                 Truncated: false,
                 Missing: false);
         }
+    }
+
+    internal static ProcessStartInfo CreateStartInfo(
+        string executable,
+        IReadOnlyList<string> arguments,
+        string workingDirectory)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executable,
+            WorkingDirectory = workingDirectory,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        return startInfo;
     }
 
     private static SubscriptionUsageCommandResult NotStarted(bool missing)
@@ -302,37 +335,139 @@ public sealed class RuntimeSubscriptionUsageCommandRunner : IRuntimeSubscription
 }
 
 /// <summary>
-/// Probes each allowed provider for remaining subscription windows. Pi and Claude quota come from
-/// <see cref="IProviderSubscriptionQuotaReader"/>; Claude additionally runs fixed, non-interactive
-/// CLI commands for version and sign-in state, and Antigravity runs its print-mode <c>/usage</c>
-/// report and parses the strict tab-separated grammar it prints. Anything that drifts from the
-/// expected shape closes the provider with a stable diagnostic and no windows. Raw command output
-/// never leaves this class.
+/// Runs Antigravity subscription commands only after establishing the mandatory read-only
+/// filesystem boundary. The fixed non-secret working directory keeps usage probes independent
+/// of the node process's current repository.
+/// </summary>
+public sealed class AntigravitySubscriptionUsageCommandRunner
+    : IAntigravitySubscriptionUsageCommandRunner
+{
+    internal const string WorkingDirectory = "/tmp";
+
+    private static readonly SubscriptionUsageCommandResult MissingExecutable =
+        new(null, string.Empty, string.Empty, TimedOut: false, Truncated: false, Missing: true);
+
+    private readonly Func<
+        ProcessStartInfo,
+        CancellationToken,
+        Task<SubscriptionUsageCommandResult>> _executeAsync;
+    private readonly string? _bwrapPath;
+    private readonly IReadOnlyList<string>? _maskedLocations;
+
+    public AntigravitySubscriptionUsageCommandRunner()
+        : this(
+            new RuntimeSubscriptionUsageCommandRunner().ExecutePreparedAsync,
+            bwrapPath: null,
+            maskedLocations: null)
+    {
+    }
+
+    internal AntigravitySubscriptionUsageCommandRunner(
+        Func<ProcessStartInfo, CancellationToken, Task<SubscriptionUsageCommandResult>> executeAsync,
+        string? bwrapPath,
+        IReadOnlyList<string>? maskedLocations)
+    {
+        ArgumentNullException.ThrowIfNull(executeAsync);
+        _executeAsync = executeAsync;
+        _bwrapPath = bwrapPath;
+        _maskedLocations = maskedLocations;
+    }
+
+    public Task<SubscriptionUsageCommandResult> RunAsync(
+        string executable,
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(executable);
+        cancellationToken.ThrowIfCancellationRequested();
+        // Once wrapped, Process.Start can only report a missing bwrap. Resolve the original
+        // executable first so an uninstalled agy keeps the source's Missing contract.
+        if (!ExecutableExists(executable))
+        {
+            return Task.FromResult(MissingExecutable);
+        }
+
+        var startInfo = RuntimeSubscriptionUsageCommandRunner.CreateStartInfo(
+            executable,
+            arguments,
+            WorkingDirectory);
+
+        AntigravityReadOnlySandbox.Apply(
+            startInfo,
+            WorkingDirectory,
+            _bwrapPath,
+            _maskedLocations);
+        return _executeAsync(startInfo, cancellationToken);
+    }
+
+    private static bool ExecutableExists(string executable)
+    {
+        if (executable.Contains(Path.DirectorySeparatorChar)
+            || executable.Contains(Path.AltDirectorySeparatorChar))
+        {
+            return File.Exists(executable);
+        }
+
+        var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+        foreach (var directory in path.Split(
+                     Path.PathSeparator,
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (File.Exists(Path.Combine(directory, executable)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
+
+/// <summary>
+/// Runs the bundled Pi usage sidecar and the ordered provider-native supplemental sources
+/// concurrently, then merges their normalized reports deterministically. Only the fields named
+/// in <see cref="TryParseReport"/> are read from sidecar JSON. Sidecar drift closes its contract
+/// providers; an individual supplemental failure is isolated. Raw command and provider output
+/// never leaves its source boundary.
 /// </summary>
 public sealed class RuntimeSubscriptionUsageProbe : IRuntimeSubscriptionUsageProbe
 {
-    public const string UnknownDiagnostic = "unknown_runtime_profile";
     public const string ProcessTimeout = "process_timeout";
     public const string ProcessMissing = "process_missing";
     public const string ProcessTruncated = "process_truncated";
-    public const string ProcessMalformed = "process_malformed";
     public const string ProcessFailed = "process_failed";
 
-    /// <summary>
-    /// A quota reader's answer did not hold together: <c>available</c> without coherent windows,
-    /// or a closed answer without a diagnostic.
-    /// </summary>
-    public const string QuotaIncoherent = "quota_incoherent";
+    /// <summary>The document as a whole could not be read: not JSON, wrong root shape, or a report that cannot be attributed to a contract provider.</summary>
+    public const string ProcessMalformed = "process_malformed";
 
-    /// <summary><c>claude auth status</c> reported no signed-in account, so no credential was read.</summary>
-    public const string SignedOut = "signed_out";
+    /// <summary>One provider's report did not hold together; sibling reports are unaffected.</summary>
+    public const string ReportMalformed = "report_malformed";
+
+    /// <summary>The provider reported no limit carrying a percentage, so there is nothing to show.</summary>
+    public const string QuotaNotReported = "quota_not_reported";
+
+    /// <summary>The sidecar closed the provider as <c>unavailable</c> without naming a reason.</summary>
+    public const string ProviderUnavailable = "provider_unavailable";
+
+    /// <summary>The sidecar closed the provider as <c>error</c> without naming a reason.</summary>
+    public const string ProviderError = "provider_error";
+
+    /// <summary>Stable, secret-free label naming where every row came from.</summary>
+    public const string Source = "pi ModelRuntime provider usage";
 
     /// <summary>
-    /// Only documented non-interactive quota surface: standalone print-mode slash with a bounded
-    /// wait. The advertised 8s deadline sits under the runner's 10s one so the CLI can finish its
-    /// own timeout path and exit cleanly instead of being killed mid-report.
+    /// Provider ids the sidecar emits. A report for any other id is drift, not a new provider:
+    /// the DTO must never carry an identifier the page has not agreed to render.
     /// </summary>
-    private static readonly string[] AntigravityUsageArguments = ["-p", "/usage", "--print-timeout", "8s"];
+    public static readonly IReadOnlyList<string> Providers =
+    [
+        "openai-codex",
+        "anthropic",
+        "kimi-code",
+        "zai",
+        "xai-oauth",
+        "opencode-go",
+    ];
 
     /// <summary>
     /// More windows than any real plan has is a malformed response, not a long list. Matches the
@@ -340,328 +475,147 @@ public sealed class RuntimeSubscriptionUsageProbe : IRuntimeSubscriptionUsagePro
     /// </summary>
     public const int MaxWindows = 8;
 
-    /// <summary>
-    /// Slack allowed between a reported used and remaining percentage: each may be rounded to one
-    /// decimal independently, so the pair can miss 100 by up to 0.1 without contradicting itself.
-    /// </summary>
-    private const double PercentSumTolerance = 0.25;
-
-    private const string ClaudeCommandSource = "claude --version; claude auth status";
-    private const string AntigravitySource = "agy --version; agy -p /usage --print-timeout 8s";
-
-    /// <summary>Documented <c>claude auth status</c> exit code when no account is logged in.</summary>
-    private const int ClaudeNotLoggedInExitCode = 1;
+    /// <summary>Bounds the limit label, the window label that may disambiguate it, and a sidecar diagnostic.</summary>
+    public const int MaxLabelLength = 40;
 
     /// <summary>
-    /// Only these canonical labels may reach the DTO; anything else in <c>subscriptionType</c>
-    /// is dropped. The allowlist also bounds the label length.
+    /// Slack allowed between a reported used and remaining fraction. Each may be rounded
+    /// independently upstream; anything wider is two claims about the same window. Stays under
+    /// the page's 0.25-point tolerance even after this class rounds both to two decimals.
     /// </summary>
-    private static readonly string[] KnownPlanLabels = ["Pro", "Max", "Team", "Enterprise", "API"];
+    private const double FractionSumTolerance = 0.002;
 
-    /// <summary>
-    /// Exact second-column labels <c>agy -p /usage</c> prints, and the window suffix each becomes.
-    /// Any other label is drift, not a new window kind.
-    /// </summary>
-    private static readonly (string Label, string Suffix)[] AntigravityWindowKinds =
-    [
-        ("Weekly Limit Remaining", "weekly"),
-        ("Five Hour Limit Remaining", "five-hour"),
-    ];
+    /// <summary>9999-12-31T23:59:59.999Z, the last instant <see cref="DateTimeOffset"/> can hold.</summary>
+    private const long MaxEpochMilliseconds = 253_402_300_799_999;
 
-    /// <summary>Bounds the model-group column so a window name stays short and printable.</summary>
-    private const int MaxAntigravityGroupLength = 32;
-
-    private static readonly string[] Rfc3339Formats =
-    [
-        "yyyy-MM-dd'T'HH:mm:ss'Z'",
-        "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'",
-        "yyyy-MM-dd'T'HH:mm:sszzz",
-        "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFzzz",
-    ];
-
-    private static readonly Regex SemVer = new(
-        @"^(?<v>\d+\.\d+\.\d+)(?:[-+][A-Za-z0-9.-]+)?(?:\s|$)",
-        RegexOptions.CultureInvariant | RegexOptions.Compiled);
-
-    /// <summary>Words of ASCII letters, digits, or <c>.+/-</c> separated by single spaces or that punctuation.</summary>
-    private static readonly Regex AntigravityGroup = new(
-        @"^[A-Za-z0-9]+(?:[ .+/-][A-Za-z0-9]+)*$",
-        RegexOptions.CultureInvariant | RegexOptions.Compiled);
-
-    private readonly INodeRuntimeRoutingStore _routes;
     private readonly IOptions<NodeOptions> _node;
-    private readonly IOptions<ClaudeCodeOptions> _claude;
-    private readonly IOptions<AntigravityOptions> _antigravity;
-    private readonly IProviderSubscriptionQuotaReader _quota;
+    private readonly IOptions<SubscriptionUsageOptions> _options;
     private readonly IRuntimeSubscriptionUsageCommandRunner _runner;
+    private readonly IReadOnlyList<ISupplementalSubscriptionUsageSource> _supplementalSources;
     private readonly TimeProvider _time;
 
     public RuntimeSubscriptionUsageProbe(
-        INodeRuntimeRoutingStore routes,
         IOptions<NodeOptions> node,
-        IOptions<ClaudeCodeOptions> claude,
-        IOptions<AntigravityOptions> antigravity,
+        IOptions<SubscriptionUsageOptions> options,
         TimeProvider time,
-        IProviderSubscriptionQuotaReader quota,
+        IEnumerable<ISupplementalSubscriptionUsageSource> supplementalSources,
         IRuntimeSubscriptionUsageCommandRunner? runner = null)
     {
-        _routes = routes;
         _node = node;
-        _claude = claude;
-        _antigravity = antigravity;
+        _options = options;
         _time = time;
-        _quota = quota;
+        _supplementalSources = [.. supplementalSources];
         _runner = runner ?? new RuntimeSubscriptionUsageCommandRunner();
     }
 
     public async Task<NodeSubscriptionUsageMessage> GetAsync(
         CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var observedAt = _time.GetUtcNow();
-        var groups = GroupProfiles(_routes.Current.AllowedRuntimeProfiles);
-        var probes = new Task<ProviderSubscriptionUsageMessage>[groups.Count];
-        for (var i = 0; i < groups.Count; i++)
+        var sidecarTask = ReadSidecarAsync(observedAt, cancellationToken);
+        var supplementalTasks =
+            new Task<ProviderSubscriptionUsageMessage?>[_supplementalSources.Count];
+        var operations = new Task[supplementalTasks.Length + 1];
+        operations[0] = sidecarTask;
+        for (var i = 0; i < supplementalTasks.Length; i++)
         {
-            probes[i] = ProbeGroupAsync(groups[i], observedAt, cancellationToken);
-        }
-
-        // WhenAll preserves input order, so providers follow first-appearance order in the
-        // allowed profiles regardless of which process finishes first.
-        var providers = await Task.WhenAll(probes).ConfigureAwait(false);
-        return new NodeSubscriptionUsageMessage(_node.Value.Id, providers);
-    }
-
-    private async Task<ProviderSubscriptionUsageMessage> ProbeGroupAsync(
-        ProfileGroup group,
-        DateTimeOffset observedAt,
-        CancellationToken cancellationToken)
-        => group.Kind switch
-        {
-            ProviderKind.Pi => await PiSnapshotAsync(group.Profiles, observedAt, cancellationToken)
-                .ConfigureAwait(false),
-            ProviderKind.Claude => await ClaudeSnapshotAsync(group.Profiles, observedAt, cancellationToken)
-                .ConfigureAwait(false),
-            ProviderKind.Antigravity => await AntigravitySnapshotAsync(group.Profiles, observedAt, cancellationToken)
-                .ConfigureAwait(false),
-            _ => Closed(
-                "unknown", group.Profiles, observedAt, "none", SubscriptionUsageStatuses.Unavailable, UnknownDiagnostic),
-        };
-
-    /// <summary>Pi has no CLI surface worth spawning; the OAuth reader is the whole reading.</summary>
-    private async Task<ProviderSubscriptionUsageMessage> PiSnapshotAsync(
-        IReadOnlyList<string> profiles,
-        DateTimeOffset observedAt,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var quota = await _quota.ReadPiAsync(cancellationToken).ConfigureAwait(false);
-        return Merge("pi", profiles, observedAt, quota.Source, version: null, authenticated: null, planLabel: null, quota);
-    }
-
-    /// <summary>
-    /// Version and sign-in state come from the CLI; the windows come from the OAuth reader only
-    /// when both commands have succeeded and the CLI reports a signed-in account. A signed-out
-    /// account closes here without touching the credential file, however stale its contents.
-    /// The CLI's plan label wins over the reader's.
-    /// </summary>
-    private async Task<ProviderSubscriptionUsageMessage> ClaudeSnapshotAsync(
-        IReadOnlyList<string> profiles,
-        DateTimeOffset observedAt,
-        CancellationToken cancellationToken)
-    {
-        const string provider = "claude";
-        var executable = _claude.Value.Executable;
-        if (string.IsNullOrWhiteSpace(executable))
-        {
-            return Closed(provider, profiles, observedAt, ClaudeCommandSource, SubscriptionUsageStatuses.Unavailable, ProcessMissing);
-        }
-
-        var versionResult = await RunAsync(executable, ["--version"], cancellationToken)
-            .ConfigureAwait(false);
-        if (Classify(versionResult) is { } versionFailure)
-        {
-            return Closed(provider, profiles, observedAt, ClaudeCommandSource, versionFailure);
-        }
-
-        if (!TryParseSemVer(versionResult.StandardOutput, out var version))
-        {
-            return Closed(provider, profiles, observedAt, ClaudeCommandSource, SubscriptionUsageStatuses.Error, ProcessMalformed);
-        }
-
-        var authResult = await RunAsync(executable, ["auth", "status"], cancellationToken)
-            .ConfigureAwait(false);
-        if (Classify(authResult, ClaudeNotLoggedInExitCode) is { } authFailure)
-        {
-            return Closed(provider, profiles, observedAt, ClaudeCommandSource, authFailure);
-        }
-
-        if (!TryParseClaudeAuth(authResult.StandardOutput, out var authenticated, out var planLabel))
-        {
-            return Closed(provider, profiles, observedAt, ClaudeCommandSource, SubscriptionUsageStatuses.Error, ProcessMalformed);
-        }
-
-        // Exit 1 is documented only for the not-logged-in case; any other nonzero exit is a failure.
-        if (authResult.ExitCode == ClaudeNotLoggedInExitCode && authenticated)
-        {
-            return Closed(provider, profiles, observedAt, ClaudeCommandSource, SubscriptionUsageStatuses.Error, ProcessFailed);
-        }
-
-        if (!authenticated)
-        {
-            return new ProviderSubscriptionUsageMessage(
-                provider,
-                profiles,
-                SubscriptionUsageStatuses.Unavailable,
-                Authenticated: false,
-                planLabel,
-                version,
-                [],
+            var task = ReadSupplementalAsync(
+                _supplementalSources[i],
                 observedAt,
-                ClaudeCommandSource,
-                SignedOut);
+                cancellationToken);
+            supplementalTasks[i] = task;
+            operations[i + 1] = task;
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        var quota = await _quota.ReadClaudeAsync(cancellationToken).ConfigureAwait(false);
-        return Merge(
-            provider,
-            profiles,
-            observedAt,
-            $"{ClaudeCommandSource}; {quota.Source}",
-            version,
-            authenticated: true,
-            planLabel ?? quota.PlanLabel,
-            quota);
-    }
+        await Task.WhenAll(operations).ConfigureAwait(false);
 
-    private async Task<ProviderSubscriptionUsageMessage> AntigravitySnapshotAsync(
-        IReadOnlyList<string> profiles,
-        DateTimeOffset observedAt,
-        CancellationToken cancellationToken)
-    {
-        const string provider = "antigravity";
-        var executable = _antigravity.Value.Executable;
-        if (string.IsNullOrWhiteSpace(executable))
+        var sidecarProviders = await sidecarTask.ConfigureAwait(false);
+        var providers = new List<ProviderSubscriptionUsageMessage>(sidecarProviders);
+        foreach (var task in supplementalTasks)
         {
-            return Closed(provider, profiles, observedAt, AntigravitySource, SubscriptionUsageStatuses.Unavailable, ProcessMissing);
-        }
-
-        var versionResult = await RunAsync(executable, ["--version"], cancellationToken)
-            .ConfigureAwait(false);
-        if (Classify(versionResult) is { } versionFailure)
-        {
-            return Closed(provider, profiles, observedAt, AntigravitySource, versionFailure);
-        }
-
-        if (!TryParseSemVer(versionResult.StandardOutput, out var version))
-        {
-            return Closed(provider, profiles, observedAt, AntigravitySource, SubscriptionUsageStatuses.Error, ProcessMalformed);
-        }
-
-        var usageResult = await RunAsync(executable, AntigravityUsageArguments, cancellationToken)
-            .ConfigureAwait(false);
-        if (Classify(usageResult) is { } usageFailure)
-        {
-            return Closed(provider, profiles, observedAt, AntigravitySource, usageFailure);
-        }
-
-        if (!TryParseAntigravityUsage(usageResult.StandardOutput, out var windows))
-        {
-            return Closed(provider, profiles, observedAt, AntigravitySource, SubscriptionUsageStatuses.Error, ProcessMalformed);
-        }
-
-        return new ProviderSubscriptionUsageMessage(
-            provider,
-            profiles,
-            SubscriptionUsageStatuses.Available,
-            Authenticated: null,
-            PlanLabel: null,
-            version,
-            windows,
-            observedAt,
-            AntigravitySource,
-            Diagnostic: null);
-    }
-
-    /// <summary>
-    /// Normalizes a quota reader result into the DTO. <c>available</c> is honoured only when the
-    /// windows hold together; anything else is closed with the reader's diagnostic and no windows,
-    /// while the CLI-observed version, sign-in state, and plan label are kept.
-    /// </summary>
-    private static ProviderSubscriptionUsageMessage Merge(
-        string provider,
-        IReadOnlyList<string> profiles,
-        DateTimeOffset observedAt,
-        string source,
-        string? version,
-        bool? authenticated,
-        string? planLabel,
-        ProviderSubscriptionQuotaReadResult quota)
-    {
-        var status = quota.Status switch
-        {
-            SubscriptionQuotaReadStatus.Available when AreCoherent(quota.Windows) => SubscriptionUsageStatuses.Available,
-            SubscriptionQuotaReadStatus.Unavailable => SubscriptionUsageStatuses.Unavailable,
-            _ => SubscriptionUsageStatuses.Error,
-        };
-        var diagnostic = status == SubscriptionUsageStatuses.Available ? null
-            : quota.Status == SubscriptionQuotaReadStatus.Available ? QuotaIncoherent
-            : quota.Diagnostic ?? QuotaIncoherent;
-
-        return new ProviderSubscriptionUsageMessage(
-            provider,
-            profiles,
-            status,
-            authenticated ?? quota.Authenticated,
-            planLabel ?? quota.PlanLabel,
-            version,
-            status == SubscriptionUsageStatuses.Available ? quota.Windows : [],
-            observedAt,
-            source,
-            diagnostic);
-    }
-
-    /// <summary>
-    /// Nonempty, bounded, distinctly named windows whose percentages are finite figures on the
-    /// 0..100 scale and, when both are present, sum to 100 within rounding slack. This is the
-    /// DTO's own validity rule, applied here so a drifting reader fails closed on the node.
-    /// </summary>
-    private static bool AreCoherent(IReadOnlyList<SubscriptionUsageWindowMessage> windows)
-    {
-        if (windows.Count is 0 or > MaxWindows)
-        {
-            return false;
-        }
-
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var window in windows)
-        {
-            if (string.IsNullOrWhiteSpace(window.Name)
-                || !names.Add(window.Name)
-                || !IsPercentage(window.PercentUsed)
-                || !IsPercentage(window.PercentRemaining)
-                || (window.PercentUsed is null && window.PercentRemaining is null)
-                || (window.PercentUsed is { } used
-                    && window.PercentRemaining is { } remaining
-                    && Math.Abs(used + remaining - 100) > PercentSumTolerance))
+            if (await task.ConfigureAwait(false) is not { } supplemental)
             {
-                return false;
+                continue;
+            }
+
+            var existing = providers.FindIndex(
+                provider => string.Equals(
+                    provider.Provider,
+                    supplemental.Provider,
+                    StringComparison.Ordinal));
+            if (existing >= 0)
+            {
+                providers[existing] = supplemental;
+            }
+            else
+            {
+                providers.Add(supplemental);
             }
         }
 
-        return true;
+        return new NodeSubscriptionUsageMessage(_node.Value.Id, providers);
     }
 
-    private static bool IsPercentage(double? value)
-        => value is not { } percent || (double.IsFinite(percent) && percent is >= 0 and <= 100);
+    private async Task<IReadOnlyList<ProviderSubscriptionUsageMessage>> ReadSidecarAsync(
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken)
+    {
+        var options = _options.Value;
+        if (string.IsNullOrWhiteSpace(options.NodeExecutable)
+            || string.IsNullOrWhiteSpace(options.ScriptPath))
+        {
+            return ClosedAll(observedAt, SubscriptionUsageStatuses.Unavailable, ProcessMissing);
+        }
+
+        var result = await _runner.RunAsync(
+                options.NodeExecutable,
+                [options.ScriptPath],
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (Classify(result) is { } failure)
+        {
+            return ClosedAll(observedAt, failure.Status, failure.Diagnostic);
+        }
+
+        if (!TryParseDocument(result.StandardOutput, observedAt, out var providers))
+        {
+            return ClosedAll(observedAt, SubscriptionUsageStatuses.Error, ProcessMalformed);
+        }
+
+        return providers;
+    }
+
+    private static async Task<ProviderSubscriptionUsageMessage?> ReadSupplementalAsync(
+        ISupplementalSubscriptionUsageSource source,
+        DateTimeOffset observedAt,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var provider = source.Provider;
+            var message = await source.ReadAsync(observedAt, cancellationToken)
+                .ConfigureAwait(false);
+            return message is not null
+                && string.Equals(message.Provider, provider, StringComparison.Ordinal)
+                    ? message
+                    : null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 
     /// <summary>
     /// Maps a raw command result to a closed outcome, or null when the output may be parsed.
     /// A missing executable is <c>unavailable</c>; every other failure is <c>error</c>.
-    /// <paramref name="acceptedNonZeroExit"/> lets a caller admit one documented exit code
-    /// whose output it will validate itself.
     /// </summary>
-    private static Failure? Classify(SubscriptionUsageCommandResult result, int? acceptedNonZeroExit = null)
+    private static Failure? Classify(SubscriptionUsageCommandResult result)
     {
         if (result.Missing)
         {
@@ -678,7 +632,7 @@ public sealed class RuntimeSubscriptionUsageProbe : IRuntimeSubscriptionUsagePro
             return new Failure(SubscriptionUsageStatuses.Error, ProcessTruncated);
         }
 
-        if (result.ExitCode is not int exitCode || (exitCode != 0 && exitCode != acceptedNonZeroExit))
+        if (result.ExitCode != 0)
         {
             return new Failure(SubscriptionUsageStatuses.Error, ProcessFailed);
         }
@@ -686,268 +640,426 @@ public sealed class RuntimeSubscriptionUsageProbe : IRuntimeSubscriptionUsagePro
         return null;
     }
 
-    private static bool TryParseSemVer(string stdout, out string version)
-    {
-        version = string.Empty;
-        var line = stdout.AsSpan().Trim();
-        var end = line.IndexOfAny('\r', '\n');
-        if (end >= 0)
-        {
-            line = line[..end];
-        }
-
-        var match = SemVer.Match(line.ToString());
-        if (!match.Success)
-        {
-            return false;
-        }
-
-        version = match.Groups["v"].Value;
-        return true;
-    }
-
     /// <summary>
-    /// Strict parse of <c>agy -p /usage</c>: every nonempty line is exactly four tab-separated
-    /// columns — model group, window label, <c>NN%</c> remaining, RFC 3339 reset — and becomes
-    /// the window <c>&lt;group&gt; weekly</c> or <c>&lt;group&gt; five-hour</c> with used derived
-    /// as <c>100 - remaining</c>. A single line that fails, a repeated window, or more than
-    /// <see cref="MaxWindows"/> rows rejects the whole report; no other text is tolerated, so an
-    /// error banner or account line never reaches the DTO.
+    /// Strict parse of the document: a JSON object whose <c>reports</c> array holds at most one
+    /// object per contract provider, each naming a distinct one. Everything else at this level
+    /// is ignored. Reports come out in the order the sidecar printed them.
     /// </summary>
-    private static bool TryParseAntigravityUsage(
+    private static bool TryParseDocument(
         string stdout,
-        out IReadOnlyList<SubscriptionUsageWindowMessage> windows)
+        DateTimeOffset observedAt,
+        out IReadOnlyList<ProviderSubscriptionUsageMessage> providers)
     {
-        windows = [];
-        var parsed = new List<SubscriptionUsageWindowMessage>();
-        var names = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var rawLine in stdout.AsSpan().EnumerateLines())
-        {
-            if (rawLine.IsEmpty)
-            {
-                continue;
-            }
-
-            if (parsed.Count == MaxWindows || !TryParseAntigravityRow(rawLine, out var window) || !names.Add(window.Name))
-            {
-                return false;
-            }
-
-            parsed.Add(window);
-        }
-
-        if (parsed.Count == 0)
-        {
-            return false;
-        }
-
-        windows = parsed;
-        return true;
-    }
-
-    private static bool TryParseAntigravityRow(
-        ReadOnlySpan<char> line,
-        [NotNullWhen(true)] out SubscriptionUsageWindowMessage? window)
-    {
-        window = null;
-        Span<Range> columns = stackalloc Range[5];
-        if (line.Split(columns, '\t') != 4)
-        {
-            return false;
-        }
-
-        var group = line[columns[0]];
-        if (group.Length > MaxAntigravityGroupLength || !AntigravityGroup.IsMatch(group))
-        {
-            return false;
-        }
-
-        var suffix = WindowSuffix(line[columns[1]]);
-        if (suffix is null
-            || !TryParsePercent(line[columns[2]], out var remaining)
-            || !DateTimeOffset.TryParseExact(
-                line[columns[3]],
-                Rfc3339Formats,
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
-                out var resetsAt))
-        {
-            return false;
-        }
-
-        window = new SubscriptionUsageWindowMessage($"{group} {suffix}", 100 - remaining, remaining, resetsAt);
-        return true;
-    }
-
-    private static string? WindowSuffix(ReadOnlySpan<char> label)
-    {
-        foreach (var (known, suffix) in AntigravityWindowKinds)
-        {
-            if (label.SequenceEqual(known))
-            {
-                return suffix;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>Whole percent with a trailing sign: one to three digits, no sign or spaces, at most 100.</summary>
-    private static bool TryParsePercent(ReadOnlySpan<char> column, out int percent)
-    {
-        percent = 0;
-        return column.Length is >= 2 and <= 4
-            && column[^1] == '%'
-            && int.TryParse(column[..^1], NumberStyles.None, CultureInfo.InvariantCulture, out percent)
-            && percent <= 100;
-    }
-
-    /// <summary>
-    /// Strict parse of <c>claude auth status</c> JSON: a single object with a boolean
-    /// <c>loggedIn</c>. Only <c>subscriptionType</c> is read beyond that, and only when it
-    /// matches a known plan label; email, organization, and other fields are never touched.
-    /// </summary>
-    private static bool TryParseClaudeAuth(
-        string stdout,
-        out bool authenticated,
-        out string? planLabel)
-    {
-        authenticated = false;
-        planLabel = null;
+        providers = [];
+        JsonDocument document;
         try
         {
-            using var document = JsonDocument.Parse(stdout);
-            var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object)
-            {
-                return false;
-            }
-
-            if (!root.TryGetProperty("loggedIn", out var loggedIn)
-                || (loggedIn.ValueKind != JsonValueKind.True && loggedIn.ValueKind != JsonValueKind.False))
-            {
-                return false;
-            }
-
-            authenticated = loggedIn.GetBoolean();
-            if (root.TryGetProperty("subscriptionType", out var subscription)
-                && subscription.ValueKind == JsonValueKind.String)
-            {
-                planLabel = SanitizePlanLabel(subscription.GetString());
-            }
-
-            return true;
+            document = JsonDocument.Parse(stdout);
         }
         catch (JsonException)
         {
             return false;
         }
+
+        using (document)
+        {
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("reports", out var reports)
+                || reports.ValueKind != JsonValueKind.Array
+                || reports.GetArrayLength() > Providers.Count)
+            {
+                return false;
+            }
+
+            var parsed = new List<ProviderSubscriptionUsageMessage>(reports.GetArrayLength());
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var report in reports.EnumerateArray())
+            {
+                if (report.ValueKind != JsonValueKind.Object
+                    || !report.TryGetProperty("provider", out var providerElement)
+                    || providerElement.ValueKind != JsonValueKind.String)
+                {
+                    return false;
+                }
+
+                var provider = KnownProvider(providerElement);
+                if (provider is null || !seen.Add(provider))
+                {
+                    return false;
+                }
+
+                parsed.Add(Describe(provider, report, observedAt));
+            }
+
+            providers = parsed;
+            return true;
+        }
     }
 
-    private static string? SanitizePlanLabel(string? raw)
+    /// <summary>
+    /// A readable report takes the status the sidecar declared: <c>available</c> with its
+    /// windows (or <c>unavailable</c> when no limit carried a percentage), otherwise closed with
+    /// the sidecar's diagnostic. Either way it is stamped with the report's own <c>fetchedAt</c>.
+    /// An unreadable report is <c>error</c> stamped with the probe time.
+    /// </summary>
+    private static ProviderSubscriptionUsageMessage Describe(string provider, JsonElement report, DateTimeOffset observedAt)
     {
-        if (raw is null)
+        if (!TryParseStatus(report, out var status, out var diagnostic)
+            || !TryParseReport(report, out var fetchedAt, out var windows))
         {
-            return null;
+            return Closed(provider, observedAt, SubscriptionUsageStatuses.Error, ReportMalformed);
         }
 
-        foreach (var known in KnownPlanLabels)
+        if (diagnostic is not null)
         {
-            if (string.Equals(raw, known, StringComparison.OrdinalIgnoreCase))
+            return Closed(provider, fetchedAt, status, diagnostic);
+        }
+
+        if (windows.Count == 0)
+        {
+            return Closed(provider, fetchedAt, SubscriptionUsageStatuses.Unavailable, QuotaNotReported);
+        }
+
+        return new ProviderSubscriptionUsageMessage(
+            provider,
+            SubscriptionUsageStatuses.Available,
+            Authenticated: null,
+            PlanLabel: null,
+            Version: null,
+            windows,
+            fetchedAt,
+            Source,
+            Diagnostic: null);
+    }
+
+    /// <summary>
+    /// Reads the sidecar's explicit <c>status</c>. For <c>unavailable</c> or <c>error</c> the
+    /// <paramref name="diagnostic"/> is the sidecar's own token when it named one and safe, or
+    /// <see cref="ProviderUnavailable"/>/<see cref="ProviderError"/> when it named none; a
+    /// present but unsafe token fails the report. For <c>available</c> the diagnostic is null
+    /// and any the sidecar attached is ignored.
+    /// </summary>
+    private static bool TryParseStatus(JsonElement report, out string status, out string? diagnostic)
+    {
+        status = SubscriptionUsageStatuses.Error;
+        diagnostic = null;
+        if (!report.TryGetProperty("status", out var statusElement) || statusElement.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        if (statusElement.ValueEquals(SubscriptionUsageStatuses.Available))
+        {
+            status = SubscriptionUsageStatuses.Available;
+            return true;
+        }
+
+        if (statusElement.ValueEquals(SubscriptionUsageStatuses.Unavailable))
+        {
+            status = SubscriptionUsageStatuses.Unavailable;
+            diagnostic = ProviderUnavailable;
+        }
+        else if (statusElement.ValueEquals(SubscriptionUsageStatuses.Error))
+        {
+            diagnostic = ProviderError;
+        }
+        else
+        {
+            return false;
+        }
+
+        if (!report.TryGetProperty("diagnostic", out var diagnosticElement))
+        {
+            return true;
+        }
+
+        if (!TrySafeDiagnostic(diagnosticElement, out var named))
+        {
+            return false;
+        }
+
+        diagnostic = named;
+        return true;
+    }
+
+    /// <summary>Returns the interned contract id the element spells exactly, without materializing any other string.</summary>
+    private static string? KnownProvider(JsonElement element)
+    {
+        foreach (var provider in Providers)
+        {
+            if (element.ValueEquals(provider))
             {
-                return known;
+                return provider;
             }
         }
 
         return null;
     }
 
-    private static ProviderSubscriptionUsageMessage Closed(
-        string provider,
-        IReadOnlyList<string> profiles,
+    /// <summary>
+    /// Strict parse of one report. Reads <c>fetchedAt</c> (epoch milliseconds) and, per
+    /// <c>limits[]</c> entry, <c>label</c>, <c>window.resetsAt</c>, and
+    /// <c>amount.usedFraction</c>/<c>remainingFraction</c>. A limit with neither fraction has no
+    /// percentage to show and is skipped; a present fraction must be finite in 0..1 and, when
+    /// both are present, the pair must sum to one within rounding slack. Window names are the
+    /// labels; when a label repeats, <c>window.label</c> is appended to every occurrence so the
+    /// names stay distinct and deterministic. Anything else fails the report.
+    /// </summary>
+    private static bool TryParseReport(
+        JsonElement report,
+        out DateTimeOffset fetchedAt,
+        out IReadOnlyList<SubscriptionUsageWindowMessage> windows)
+    {
+        windows = [];
+        if (!report.TryGetProperty("fetchedAt", out var fetchedAtElement)
+            || !TryEpochMilliseconds(fetchedAtElement, out fetchedAt)
+            || !report.TryGetProperty("limits", out var limits)
+            || limits.ValueKind != JsonValueKind.Array
+            || limits.GetArrayLength() > MaxWindows)
+        {
+            fetchedAt = default;
+            return false;
+        }
+
+        var parsed = new List<ParsedLimit>(limits.GetArrayLength());
+        foreach (var limit in limits.EnumerateArray())
+        {
+            if (!TryParseLimit(limit, out var window))
+            {
+                return false;
+            }
+
+            if (window is { } kept)
+            {
+                parsed.Add(kept);
+            }
+        }
+
+        var labelCounts = new Dictionary<string, int>(parsed.Count, StringComparer.Ordinal);
+        foreach (var limit in parsed)
+        {
+            labelCounts[limit.Label] = labelCounts.GetValueOrDefault(limit.Label) + 1;
+        }
+
+        var names = new HashSet<string>(parsed.Count, StringComparer.Ordinal);
+        var built = new SubscriptionUsageWindowMessage[parsed.Count];
+        for (var i = 0; i < built.Length; i++)
+        {
+            var limit = parsed[i];
+            var name = limit.Label;
+            if (labelCounts[limit.Label] > 1)
+            {
+                if (limit.WindowLabel is null)
+                {
+                    return false;
+                }
+
+                name = $"{limit.Label} \u2014 {limit.WindowLabel}";
+            }
+
+            if (!names.Add(name))
+            {
+                return false;
+            }
+
+            built[i] = new SubscriptionUsageWindowMessage(name, limit.PercentUsed, limit.PercentRemaining, limit.ResetsAt);
+        }
+
+        windows = built;
+        return true;
+    }
+
+    /// <summary>
+    /// One <c>limits[]</c> entry. Returns false on malformed data; true with a null
+    /// <paramref name="window"/> when the entry is well-formed but carries no percentage.
+    /// </summary>
+    private static bool TryParseLimit(JsonElement limit, out ParsedLimit? window)
+    {
+        window = null;
+        if (limit.ValueKind != JsonValueKind.Object
+            || !limit.TryGetProperty("label", out var labelElement)
+            || !TrySafeLabel(labelElement, out var label)
+            || !limit.TryGetProperty("window", out var windowElement)
+            || windowElement.ValueKind != JsonValueKind.Object
+            || !limit.TryGetProperty("amount", out var amount)
+            || amount.ValueKind != JsonValueKind.Object
+            || !TryOptionalFraction(amount, "usedFraction", out var used)
+            || !TryOptionalFraction(amount, "remainingFraction", out var remaining))
+        {
+            return false;
+        }
+
+        DateTimeOffset? resetsAt = null;
+        if (windowElement.TryGetProperty("resetsAt", out var resetsAtElement))
+        {
+            if (!TryEpochMilliseconds(resetsAtElement, out var resets))
+            {
+                return false;
+            }
+
+            resetsAt = resets;
+        }
+
+        // The window label is only consulted when a limit label repeats; an absent or unsafe one
+        // is therefore tolerated here and rejected later only if it turns out to be needed.
+        string? windowLabel = null;
+        if (windowElement.TryGetProperty("label", out var windowLabelElement)
+            && TrySafeLabel(windowLabelElement, out var safeWindowLabel))
+        {
+            windowLabel = safeWindowLabel;
+        }
+
+        if (used is null && remaining is null)
+        {
+            return true;
+        }
+
+        if (used is { } u && remaining is { } r && Math.Abs(u + r - 1) > FractionSumTolerance)
+        {
+            return false;
+        }
+
+        window = new ParsedLimit(label, windowLabel, Percent(used), Percent(remaining), resetsAt);
+        return true;
+    }
+
+    private static double? Percent(double? fraction)
+        => fraction is { } value ? Math.Round(value * 100, 2, MidpointRounding.AwayFromZero) : null;
+
+    /// <summary>Absent is null; present must be a finite JSON number in 0..1.</summary>
+    private static bool TryOptionalFraction(JsonElement amount, string name, out double? fraction)
+    {
+        fraction = null;
+        if (!amount.TryGetProperty(name, out var element))
+        {
+            return true;
+        }
+
+        if (element.ValueKind != JsonValueKind.Number
+            || !element.TryGetDouble(out var value)
+            || !double.IsFinite(value)
+            || value is < 0 or > 1)
+        {
+            return false;
+        }
+
+        fraction = value;
+        return true;
+    }
+
+    /// <summary>A JSON integer of non-negative epoch milliseconds that <see cref="DateTimeOffset"/> can hold.</summary>
+    private static bool TryEpochMilliseconds(JsonElement element, out DateTimeOffset instant)
+    {
+        instant = default;
+        if (element.ValueKind != JsonValueKind.Number
+            || !element.TryGetInt64(out var milliseconds)
+            || milliseconds is < 0 or > MaxEpochMilliseconds)
+        {
+            return false;
+        }
+
+        instant = DateTimeOffset.FromUnixTimeMilliseconds(milliseconds);
+        return true;
+    }
+
+    /// <summary>
+    /// A JSON string of one to <see cref="MaxLabelLength"/> printable ASCII characters with no
+    /// leading or trailing space. Rejected text is dropped here and never reaches the DTO.
+    /// </summary>
+    private static bool TrySafeLabel(JsonElement element, [NotNullWhen(true)] out string? label)
+    {
+        label = null;
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var text = element.GetString()!;
+        if (text.Length is 0 or > MaxLabelLength || text[0] == ' ' || text[^1] == ' ')
+        {
+            return false;
+        }
+
+        foreach (var c in text)
+        {
+            if (c is < ' ' or > '~')
+            {
+                return false;
+            }
+        }
+
+        label = text;
+        return true;
+    }
+
+    /// <summary>
+    /// A JSON string of one to <see cref="MaxLabelLength"/> lowercase ASCII letters, digits, or
+    /// underscores: a stable token, never free text that could carry an upstream message.
+    /// </summary>
+    private static bool TrySafeDiagnostic(JsonElement element, [NotNullWhen(true)] out string? diagnostic)
+    {
+        diagnostic = null;
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var text = element.GetString()!;
+        if (text.Length is 0 or > MaxLabelLength)
+        {
+            return false;
+        }
+
+        foreach (var c in text)
+        {
+            if (c is not ((>= 'a' and <= 'z') or (>= '0' and <= '9') or '_'))
+            {
+                return false;
+            }
+        }
+
+        diagnostic = text;
+        return true;
+    }
+
+    /// <summary>One closed row per contract provider: the command answered for none of them.</summary>
+    private static IReadOnlyList<ProviderSubscriptionUsageMessage> ClosedAll(
         DateTimeOffset observedAt,
-        string source,
-        Failure failure)
-        => Closed(provider, profiles, observedAt, source, failure.Status, failure.Diagnostic);
+        string status,
+        string diagnostic)
+    {
+        var providers = new ProviderSubscriptionUsageMessage[Providers.Count];
+        for (var i = 0; i < providers.Length; i++)
+        {
+            providers[i] = Closed(Providers[i], observedAt, status, diagnostic);
+        }
+
+        return providers;
+    }
 
     private static ProviderSubscriptionUsageMessage Closed(
         string provider,
-        IReadOnlyList<string> profiles,
         DateTimeOffset observedAt,
-        string source,
         string status,
         string diagnostic)
         => new(
             provider,
-            profiles,
             status,
             Authenticated: null,
             PlanLabel: null,
             Version: null,
             [],
             observedAt,
-            source,
+            Source,
             diagnostic);
 
-    /// <summary>Observes caller cancellation before every command, including between the two Claude commands.</summary>
-    private Task<SubscriptionUsageCommandResult> RunAsync(
-        string executable,
-        IReadOnlyList<string> arguments,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return _runner.RunAsync(executable, arguments, cancellationToken);
-    }
-
-    /// <summary>
-    /// One group per provider in first-appearance order. Both Claude profiles collapse into one
-    /// group; every other profile is probed at most once even when the allowed list repeats it.
-    /// </summary>
-    private static IReadOnlyList<ProfileGroup> GroupProfiles(IReadOnlyList<string> allowed)
-    {
-        var groups = new List<ProfileGroup>();
-        var claude = new List<string>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var profile in allowed)
-        {
-            if (!seen.Add(profile))
-            {
-                continue;
-            }
-
-            if (profile is AgentRuntimeProfiles.ClaudeReadOnly or AgentRuntimeProfiles.ClaudeReservedWrite)
-            {
-                claude.Add(profile);
-                if (claude.Count == 1)
-                {
-                    groups.Add(new ProfileGroup(ProviderKind.Claude, claude));
-                }
-
-                continue;
-            }
-
-            var kind = profile switch
-            {
-                AgentRuntimeProfiles.LocalPi => ProviderKind.Pi,
-                AgentRuntimeProfiles.AntigravityReadOnly => ProviderKind.Antigravity,
-                _ => ProviderKind.Unknown,
-            };
-            groups.Add(new ProfileGroup(kind, [profile]));
-        }
-
-        claude.Sort(StringComparer.Ordinal);
-        return groups;
-    }
-
-    private enum ProviderKind
-    {
-        Pi,
-        Claude,
-        Antigravity,
-        Unknown,
-    }
-
-    private sealed record ProfileGroup(ProviderKind Kind, IReadOnlyList<string> Profiles);
-
     private readonly record struct Failure(string Status, string Diagnostic);
+
+    private readonly record struct ParsedLimit(
+        string Label,
+        string? WindowLabel,
+        double? PercentUsed,
+        double? PercentRemaining,
+        DateTimeOffset? ResetsAt);
 }

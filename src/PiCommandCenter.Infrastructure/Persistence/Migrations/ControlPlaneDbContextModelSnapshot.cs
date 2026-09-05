@@ -235,6 +235,9 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.Property<long>("LastHeartbeatAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("ResourceSnapshotJson")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(16)
@@ -420,6 +423,44 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.ToTable("WorkRequests", (string)null);
                 });
 
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Completion.RequestResultRow", b =>
+                {
+                    b.Property<Guid>("RequestId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ChangedFilesJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CheckpointCommitId")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RequestBranch")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ReviewFindingsJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SummaryMarkdown")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("VerificationSummaryJson")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("RequestId");
+
+                    b.ToTable("RequestResults", (string)null);
+                });
+
             modelBuilder.Entity("PiCommandCenter.Infrastructure.Mail.MailAgentIdentityRow", b =>
                 {
                     b.Property<string>("SessionId")
@@ -568,6 +609,11 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("Model")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ParentSessionId")
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
@@ -591,11 +637,6 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Runtime")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("RuntimeProfile")
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("TEXT");
@@ -686,95 +727,6 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.HasKey("ProjectId");
 
                     b.ToTable("ProjectFencingTokens", (string)null);
-                });
-
-            modelBuilder.Entity("PiCommandCenter.Infrastructure.Completion.RequestResultRow", b =>
-                {
-                    b.Property<Guid>("RequestId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ChangedFilesJson")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("CreatedAtUtcTicks")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("RequestBranch")
-                        .HasMaxLength(256)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CheckpointCommitId")
-                        .HasMaxLength(64)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ReviewFindingsJson")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SummaryMarkdown")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("VerificationSummaryJson")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("RequestId");
-
-                    b.ToTable("RequestResults", (string)null);
-                });
-
-            modelBuilder.Entity("PiCommandCenter.Infrastructure.Verification.VerificationRunRow", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("RequestId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("CommandId")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("TEXT");
-
-                    b.Property<long?>("CompletedAtUtcTicks")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int?>("ExitCode")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("Mandatory")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("OutputArtifactPath")
-                        .HasMaxLength(1024)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("OutputSummary")
-                        .HasMaxLength(16384)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ProfileId")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("StartedAtUtcTicks")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("RequestId")
-                        .HasDatabaseName("IX_VerificationRuns_RequestId");
-
-                    b.ToTable("VerificationRuns", (string)null);
                 });
 
             modelBuilder.Entity("PiCommandCenter.Infrastructure.Reservations.ReservationAuditFactRow", b =>
@@ -900,6 +852,58 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.ToTable("ReservationScopes", (string)null);
                 });
 
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Verification.VerificationRunRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CommandId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("CompletedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("ExitCode")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Mandatory")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("OutputArtifactPath")
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OutputSummary")
+                        .HasMaxLength(16384)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProfileId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("StartedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RequestId")
+                        .HasDatabaseName("IX_VerificationRuns_RequestId");
+
+                    b.ToTable("VerificationRuns", (string)null);
+                });
+
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
                 {
                     b.HasOne("Microsoft.AspNetCore.Identity.IdentityRole", null)
@@ -959,7 +963,6 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
-
 
             modelBuilder.Entity("PiCommandCenter.Domain.Requests.WorkRequest", b =>
                 {

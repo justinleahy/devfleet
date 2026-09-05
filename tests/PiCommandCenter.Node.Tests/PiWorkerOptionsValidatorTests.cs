@@ -30,7 +30,7 @@ public sealed class PiWorkerOptionsValidatorTests
     }
 
     [Fact]
-    public void Route_candidates_must_be_allowed_nonblank_and_unique()
+    public void Route_candidates_must_be_canonical_selectors_and_unique()
     {
         var options = ValidOptions();
         options.AllowedChildRoles = ["reviewer"];
@@ -38,18 +38,59 @@ public sealed class PiWorkerOptionsValidatorTests
         {
             ["reviewer"] =
             [
-                new() { RuntimeProfile = "claude-readonly", Model = " " },
-                new() { RuntimeProfile = "claude-readonly", Model = " " },
-                new() { RuntimeProfile = "arbitrary-executable", Model = "model" },
+                new() { Model = "claude-code/default" },
+                new() { Model = " claude-code/default " },
+                new() { Model = "arbitrary-executable/model" },
+                new() { Model = "opus" },
+                new() { Model = " " },
             ],
         };
 
         var result = new PiWorkerOptionsValidator().Validate(PiWorkerOptions.SectionName, options);
 
         Assert.False(result.Succeeded);
-        Assert.Contains(result.Failures ?? [], failure => failure.Contains("null or non-empty", StringComparison.Ordinal));
-        Assert.Contains(result.Failures ?? [], failure => failure.Contains("duplicate", StringComparison.Ordinal));
-        Assert.Contains(result.Failures ?? [], failure => failure.Contains("not present", StringComparison.Ordinal));
+        var failures = result.Failures ?? [];
+        Assert.Contains(failures, failure => failure.Contains("duplicate model candidate 'claude-code/default'", StringComparison.Ordinal));
+        Assert.Contains(failures, failure => failure.Contains("got 'arbitrary-executable/model'", StringComparison.Ordinal));
+        Assert.Contains(failures, failure => failure.Contains("got 'opus'", StringComparison.Ordinal));
+        Assert.Contains(failures, failure => failure.Contains("got ' '", StringComparison.Ordinal));
+        Assert.Equal(4, failures.Count());
+    }
+
+    [Fact]
+    public void Root_model_must_be_a_canonical_codex_selector()
+    {
+        var options = ValidOptions();
+        options.Model = "gpt-6";
+
+        var result = new PiWorkerOptionsValidator().Validate(PiWorkerOptions.SectionName, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(result.Failures ?? [], failure => failure.Contains("'Pi:Model'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Root_model_rejects_non_codex_runtimes()
+    {
+        var options = ValidOptions();
+        options.Model = "claude-code/default";
+
+        var result = new PiWorkerOptionsValidator().Validate(PiWorkerOptions.SectionName, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(result.Failures ?? [], failure => failure.Contains("'Pi:Model'", StringComparison.Ordinal));
+        Assert.Contains(result.Failures ?? [], failure => failure.Contains("codex", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Root_model_accepts_codex_default()
+    {
+        var options = ValidOptions();
+        options.Model = "codex/default";
+
+        var result = new PiWorkerOptionsValidator().Validate(PiWorkerOptions.SectionName, options);
+
+        Assert.True(result.Succeeded, string.Join(Environment.NewLine, result.Failures ?? []));
     }
 
     [Fact]
@@ -61,9 +102,9 @@ public sealed class PiWorkerOptionsValidatorTests
         {
             ["reviewer"] =
             [
-                new() { RuntimeProfile = "claude-readonly", Model = "model-a" },
-                new() { RuntimeProfile = "claude-readonly", Model = "model-b" },
-                new() { RuntimeProfile = "local-pi", Model = "model-c" },
+                new() { Model = "claude-code/model-a" },
+                new() { Model = "claude-code/model-b" },
+                new() { Model = "codex/model-c" },
             ],
         };
 

@@ -18,17 +18,18 @@
     <header class="page-head">
         <h1>Subscription usage</h1>
         <p class="page-lead">
-            Provider subscription limits are read on the node through authenticated usage surfaces
-            used by the installed provider clients. A card reports windows only when the node can
-            validate the response; private provider surfaces can change, so schema drift fails closed
-            instead of showing a guess. Nothing here is estimated, and refreshing never calls a model.
+            Every provider subscription the node finds authenticated is listed here, read from the
+            node's own usage report rather than inferred from which clients happen to be installed.
+            A card reports windows only when the node can validate the response; private provider
+            surfaces can change, so schema drift fails closed instead of showing a guess. Nothing
+            here is estimated, and refreshing never calls a model.
         </p>
     </header>
 
     <section aria-labelledby="node-heading">
         <h2 id="node-heading">Node</h2>
         <p class="panel-lead">
-            Usage is observed per node, because the credentials and CLIs live there. Pick an online
+            Usage is observed per node, because the provider credentials live there. Pick an online
             node, then refresh when you want a fresh reading; this page never polls on its own.
         </p>
 
@@ -100,7 +101,7 @@
     </section>
 
     <section aria-labelledby="providers-heading">
-        <h2 id="providers-heading">Providers</h2>
+        <h2 id="providers-heading">Subscription providers</h2>
 
         @* One chain: a failed read must not be followed by an empty-state line that reads like
            a successful "nothing to report". *@
@@ -132,9 +133,9 @@
         else if (_providers.Count == 0)
         {
             <p class="panel-empty">
-                This node reported no providers. Either no supported CLI is installed on it, or none
-                of the installed ones expose subscription state that can be read without spending
-                quota.
+                This node reported no subscriptions. Either no provider account is authenticated on
+                it, or none of the authenticated ones expose subscription state that can be read
+                without spending quota.
             </p>
         }
         else
@@ -154,14 +155,13 @@
                         </FluentStack>
 
                         <dl class="usage-meta">
-                            <div class="usage-meta-row">
-                                <dt>Runtime profiles</dt>
-                                <dd>@provider.ProfilesText</dd>
-                            </div>
-                            <div class="usage-meta-row">
-                                <dt>Version</dt>
-                                <dd>@(provider.Version ?? "not reported")</dd>
-                            </div>
+                            @if (provider.Version is not null)
+                            {
+                                <div class="usage-meta-row">
+                                    <dt>Client version</dt>
+                                    <dd>@provider.Version</dd>
+                                </div>
+                            }
                             @if (provider.PlanLabel is not null)
                             {
                                 <div class="usage-meta-row">
@@ -189,8 +189,10 @@
                         @if (provider.Windows.Count > 0)
                         {
                             <p class="usage-note">
-                                Subscription limit windows the node could verify. These are plan
-                                limits, not session or context usage.
+                                Subscription limit windows the node could verify, each as a share of
+                                that window's own allowance. These are plan limits, not session or
+                                context usage, and the node reports proportions rather than raw
+                                credits or request counts.
                             </p>
                             <ul class="usage-windows">
                                 @foreach (var window in provider.Windows)
@@ -213,10 +215,10 @@
                         else if (provider.State == ProviderState.Unavailable)
                         {
                             <p class="usage-none">
-                                @provider.Provider exposes no safe machine-readable remaining-quota
-                                surface: the node found no way to read how much of this subscription
-                                is left without spending quota to find out. Nothing on this card is a
-                                measure of remaining allowance.
+                                @provider.Provider reported no readable limit window: the node found
+                                no way to read how much of this subscription is left without spending
+                                quota to find out. Nothing on this card is a measure of remaining
+                                allowance.
                             </p>
                         }
 
@@ -229,15 +231,15 @@
                         {
                             <p class="usage-note">
                                 Being signed in is not a quota reading. A working sign-in says this
-                                node can start the CLI, not that any allowance remains.
+                                node can reach the provider, not that any allowance remains.
                             </p>
                         }
 
                         @if (provider.Authenticated is false)
                         {
                             <p class="usage-note">
-                                Sign in on the node itself to make this provider usable; usage cannot
-                                be read for an account that is not signed in there.
+                                Sign in on the node itself to make this subscription usable; usage
+                                cannot be read for an account that is not signed in there.
                             </p>
                         }
 
@@ -304,25 +306,22 @@
     private const double PercentSumTolerance = 0.25;
 
     /// <summary>
-    /// Provider identifiers the node probe emits. Anything else is shown as an unknown provider, so
-    /// a node cannot put arbitrary text in a heading, an ARIA label, or a DOM id.
+    /// The provider identifiers the node's usage report emits, each mapped to the name its vendor
+    /// is known by. Anything else is shown as an unknown provider, so a node cannot put arbitrary
+    /// text in a heading, an ARIA label, or a DOM id.
     /// </summary>
     private static (string Key, string Name) CanonicalProvider(string? provider) => provider switch
     {
-        "pi" => ("pi", "Pi"),
-        "claude" => ("claude", "Claude Code"),
-        "antigravity" => ("antigravity", "Antigravity"),
+        "openai-codex" => ("openai-codex", "OpenAI"),
+        "anthropic" => ("anthropic", "Anthropic"),
+        "kimi-code" => ("kimi-code", "Kimi"),
+        "zai" => ("zai", "Z.AI"),
+        "xai-oauth" => ("xai-oauth", "xAI"),
+        "opencode-go" => ("opencode-go", "OpenCode"),
+        "cursor" => ("cursor", "Cursor"),
+        "google-antigravity" => ("google-antigravity", "Google Antigravity"),
         _ => ("unknown", "Unknown provider"),
     };
-
-    /// <summary>The configured runtime-profile allowlist; only exact matches are ever echoed.</summary>
-    private static readonly string[] KnownProfiles =
-    [
-        AgentRuntimeProfiles.LocalPi,
-        AgentRuntimeProfiles.ClaudeReadOnly,
-        AgentRuntimeProfiles.ClaudeReservedWrite,
-        AgentRuntimeProfiles.AntigravityReadOnly,
-    ];
 
     private IReadOnlyList<NodeDto> _onlineNodes = Array.Empty<NodeDto>();
     private IReadOnlyList<ProviderView> _providers = Array.Empty<ProviderView>();
@@ -508,35 +507,6 @@
         return value is not { } reported || (double.IsFinite(reported) && reported is >= 0 and <= 100);
     }
 
-    /// <summary>
-    /// Only the exact configured profile names are echoed; anything else is counted, never shown.
-    /// </summary>
-    private static string DescribeProfiles(IReadOnlyList<string> profiles)
-    {
-        var known = new List<string>(KnownProfiles.Length);
-        var unrecognized = 0;
-        foreach (var profile in profiles)
-        {
-            var index = Array.IndexOf(KnownProfiles, profile);
-            if (index < 0)
-            {
-                unrecognized++;
-            }
-            else if (!known.Contains(KnownProfiles[index]))
-            {
-                known.Add(KnownProfiles[index]);
-            }
-        }
-
-        if (unrecognized == 0)
-        {
-            return known.Count == 0 ? "none reported" : string.Join(", ", known);
-        }
-
-        var tail = unrecognized == 1 ? "1 unrecognized profile" : $"{unrecognized} unrecognized profiles";
-        return known.Count == 0 ? tail : $"{string.Join(", ", known)} \u00b7 {tail}";
-    }
-
     private static string Utc(DateTimeOffset value) => value.ToUniversalTime().ToString("u");
 
     private enum ProviderState
@@ -556,7 +526,6 @@
         ProviderState State,
         string BadgeText,
         Appearance BadgeAppearance,
-        string ProfilesText,
         string? Version,
         string? PlanLabel,
         bool? Authenticated,
@@ -617,7 +586,6 @@
                 state,
                 badgeText,
                 badgeAppearance,
-                DescribeProfiles(provider.RuntimeProfiles),
                 Sanitize(provider.Version),
                 Sanitize(provider.PlanLabel),
                 provider.Authenticated,

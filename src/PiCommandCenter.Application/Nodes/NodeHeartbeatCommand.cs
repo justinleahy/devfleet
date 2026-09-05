@@ -7,4 +7,15 @@ namespace PiCommandCenter.Application.Nodes;
 /// </summary>
 public sealed record NodeHeartbeatCommand(
     NodeId Id,
-    IReadOnlyList<string> ActiveSessionIds);
+    IReadOnlyList<string> ActiveSessionIds,
+    NodeResourceSnapshotDto? Resources = null);
+
+public sealed record NodeResourceSnapshotDto(
+    DateTimeOffset ObservedAt,
+    double? CpuUsagePercent,
+    long? MemoryUsedBytes,
+    long? MemoryTotalBytes,
+    long? DiskUsedBytes,
+    long? DiskTotalBytes,
+    double? LoadAverageOneMinute,
+    double? UptimeSeconds);

@@ -322,9 +322,9 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
             session.Property(s => s.Runtime)
                 .IsRequired()
                 .HasMaxLength(64);
-            session.Property(s => s.RuntimeProfile)
+            session.Property(s => s.Model)
                 .IsRequired()
-                .HasMaxLength(64);
+                .HasMaxLength(256);
             session.Property(s => s.ProviderSessionId)
                 .HasMaxLength(256);
 

@@ -1,11 +1,12 @@
 using PiCommandCenter.Application.Runtime;
 
 namespace PiCommandCenter.Node;
-/// <summary>One trusted runtime/model candidate in an ordered node-owned role route.</summary>
+
+/// <summary>One trusted model candidate in an ordered node-owned role route.</summary>
 public sealed class AgentRoleRouteCandidate
 {
-    public string RuntimeProfile { get; set; } = string.Empty;
-    public string? Model { get; set; }
+    /// <summary>Canonical <c>runtime/model</c> selector (see <see cref="AgentModelSelector"/>).</summary>
+    public string Model { get; set; } = string.Empty;
 }
 
 
@@ -32,10 +33,10 @@ public sealed class PiWorkerOptions
     public string AgentDataDirectory { get; set; } = "~/.local/share/pi-command-center/pi-agent";
 
     /// <summary>
-    /// Optional default model identifier sent to the worker in <c>session.start</c>; empty
-    /// lets the Pi SDK choose its default.
+    /// Canonical <c>runtime/model</c> selector for the root agent; <c>codex/default</c> lets the
+    /// provider choose its default model.
     /// </summary>
-    public string Model { get; set; } = string.Empty;
+    public string Model { get; set; } = DefaultCodex;
 
     /// <summary>
     /// Optional system prompt sent to the worker in <c>session.start</c>; empty sends none.
@@ -60,43 +61,44 @@ public sealed class PiWorkerOptions
     /// </summary>
     public int LeaseRenewalSeconds { get; set; } = 30;
 
-    /// <summary>Runtime profiles a child agent may run under (SPEC §15).</summary>
-    public string[] AllowedRuntimeProfiles { get; set; } =
-        [AgentRuntimeProfiles.LocalPi, AgentRuntimeProfiles.ClaudeReadOnly,
-            AgentRuntimeProfiles.ClaudeReservedWrite, AgentRuntimeProfiles.AntigravityReadOnly];
-
     /// <summary>
-    /// Ordered runtime/model candidates for each role. The node tries candidates in order;
+    /// Ordered model candidates for each role. The node tries candidates in order;
     /// agent-generated spawn requests cannot override this routing policy.
     /// </summary>
     public Dictionary<string, AgentRoleRouteCandidate[]> RoleRoutes { get; set; } =
         new(StringComparer.Ordinal)
         {
-            ["root"] = [Candidate(AgentRuntimeProfiles.LocalPi)],
+            ["root"] = [Candidate(DefaultCodex)],
             ["architect"] =
             [
-                Candidate(AgentRuntimeProfiles.ClaudeReadOnly),
-                Candidate(AgentRuntimeProfiles.AntigravityReadOnly),
-                Candidate(AgentRuntimeProfiles.LocalPi),
+                Candidate(DefaultClaude),
+                Candidate(DefaultAntigravity),
+                Candidate(DefaultMuse),
+                Candidate(DefaultCodex),
             ],
             ["implementer"] =
             [
-                Candidate(AgentRuntimeProfiles.LocalPi),
-                Candidate(AgentRuntimeProfiles.ClaudeReservedWrite),
+                Candidate(DefaultCodex),
+                Candidate(DefaultClaude),
             ],
             ["reviewer"] =
             [
-                Candidate(AgentRuntimeProfiles.AntigravityReadOnly),
-                Candidate(AgentRuntimeProfiles.ClaudeReadOnly),
-                Candidate(AgentRuntimeProfiles.LocalPi),
+                Candidate(DefaultAntigravity),
+                Candidate(DefaultClaude),
+                Candidate(DefaultMuse),
+                Candidate(DefaultCodex),
             ],
             ["verifier"] =
             [
-                Candidate(AgentRuntimeProfiles.LocalPi),
-                Candidate(AgentRuntimeProfiles.ClaudeReadOnly),
+                Candidate(DefaultCodex),
+                Candidate(DefaultClaude),
             ],
         };
 
-    private static AgentRoleRouteCandidate Candidate(string runtimeProfile)
-        => new() { RuntimeProfile = runtimeProfile };
+    private const string DefaultCodex = AgentModelSelector.Codex + "/" + AgentModelSelector.DefaultModelId;
+    private const string DefaultClaude = AgentModelSelector.ClaudeCode + "/" + AgentModelSelector.DefaultModelId;
+    private const string DefaultAntigravity = AgentModelSelector.Antigravity + "/" + AgentModelSelector.DefaultModelId;
+    private const string DefaultMuse = AgentModelSelector.Muse + "/" + AgentModelSelector.DefaultModelId;
+
+    private static AgentRoleRouteCandidate Candidate(string model) => new() { Model = model };
 }

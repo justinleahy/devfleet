@@ -103,14 +103,78 @@
                 @foreach (var node in _nodes)
                 {
                     <li class="node-row">
-                        <span class="node-name">@node.DisplayName</span>
-                        <FluentBadge Appearance="@BadgeAppearance(node.Status)">@node.Status.ToString()</FluentBadge>
-                        <span class="node-version">agent @node.AgentVersion</span>
-                        <span class="node-seen">
-                            <span class="visually-hidden">Last heartbeat</span>
-                            @Relative(node.LastHeartbeatAt, _snapshot)
-                            <span class="node-seen-utc">@node.LastHeartbeatAt.ToString("u")</span>
-                        </span>
+                        <div class="node-head">
+                            <span class="node-name">@node.DisplayName</span>
+                            <FluentBadge Appearance="@BadgeAppearance(node.Status)">@node.Status.ToString()</FluentBadge>
+                            <span class="node-version">agent @node.AgentVersion</span>
+                            <span class="node-seen">
+                                <span class="visually-hidden">Last heartbeat</span>
+                                @Relative(node.LastHeartbeatAt, _snapshot)
+                                <span class="node-seen-utc">@node.LastHeartbeatAt.ToString("u")</span>
+                            </span>
+                        </div>
+
+                        @if (node.Resources is { } resources)
+                        {
+                            <dl class="node-metrics">
+                                @foreach (var meter in Meters(resources))
+                                {
+                                    <div class="node-metric">
+                                        <dt>@meter.Label</dt>
+                                        <dd>
+                                            @if (meter.Percent is { } percent)
+                                            {
+                                                <span class="node-metric-value">@Percent(percent)</span>
+                                                <span class="node-meter @MeterLevel(percent)" aria-hidden="true">
+                                                    <span class="node-meter-fill" style="width:@(Fill(percent))%"></span>
+                                                </span>
+                                                @if (meter.Detail is { } detail)
+                                                {
+                                                    <span class="node-metric-detail">@detail</span>
+                                                }
+                                            }
+                                            else
+                                            {
+                                                <span class="node-metric-none">Unavailable</span>
+                                            }
+                                        </dd>
+                                    </div>
+                                }
+                                <div class="node-metric">
+                                    <dt>Load, 1 minute</dt>
+                                    <dd>
+                                        @if (Finite(resources.LoadAverageOneMinute) is { } load)
+                                        {
+                                            <span class="node-metric-value">@load.ToString("0.00")</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="node-metric-none">Unavailable</span>
+                                        }
+                                    </dd>
+                                </div>
+                                <div class="node-metric">
+                                    <dt>Uptime</dt>
+                                    <dd>
+                                        @if (Finite(resources.UptimeSeconds) is { } uptime)
+                                        {
+                                            <span class="node-metric-value">@Uptime(uptime)</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="node-metric-none">Unavailable</span>
+                                        }
+                                    </dd>
+                                </div>
+                            </dl>
+                        }
+                        else
+                        {
+                            <p class="node-resources-none">
+                                System metrics unavailable &mdash; this node's last heartbeat carried no
+                                resource sample.
+                            </p>
+                        }
                     </li>
                 }
             </ul>
@@ -550,6 +614,93 @@
 
         return $"{(int)delta.TotalDays}d ago";
     }
+
+    // Latest-snapshot telemetry: every field is independently nullable, so each one is
+    // formatted only when the node actually reported it. A missing value reads as
+    // "Unavailable" rather than a zero that looks like a measurement.
+    private static IReadOnlyList<MeterView> Meters(NodeResourceSnapshotDto resources) =>
+    [
+        new("CPU", Finite(resources.CpuUsagePercent), null),
+        new(
+            "Memory",
+            Utilization(resources.MemoryUsedBytes, resources.MemoryTotalBytes),
+            BytePair(resources.MemoryUsedBytes, resources.MemoryTotalBytes)),
+        new(
+            "Disk",
+            Utilization(resources.DiskUsedBytes, resources.DiskTotalBytes),
+            BytePair(resources.DiskUsedBytes, resources.DiskTotalBytes)),
+    ];
+
+    private static double? Finite(double? value) =>
+        value is { } number && double.IsFinite(number) ? number : null;
+
+    private static double? Utilization(long? used, long? total) =>
+        used is { } bytes && total is { } capacity && capacity > 0
+            ? Math.Clamp(bytes / (double)capacity * 100d, 0d, 100d)
+            : null;
+
+    private static string? BytePair(long? used, long? total) =>
+        used is { } bytes && total is { } capacity && capacity > 0
+            ? $"{Bytes(bytes)} of {Bytes(capacity)}"
+            : null;
+
+    private static string Percent(double value) => $"{Math.Clamp(value, 0d, 100d).ToString("0.0")}%";
+
+    // Integer width keeps the inline style culture-proof; a decimal separator would
+    // depend on the request culture and could emit an invalid length.
+    private static int Fill(double value) => (int)Math.Round(Math.Clamp(value, 0d, 100d));
+
+    private static string MeterLevel(double percent) => percent switch
+    {
+        >= 90d => "is-critical",
+        >= 75d => "is-high",
+        _ => "is-normal",
+    };
+
+    private static readonly string[] ByteUnits = ["KiB", "MiB", "GiB", "TiB", "PiB"];
+
+    private static string Bytes(long value)
+    {
+        if (value < 1024L)
+        {
+            return $"{value} B";
+        }
+
+        var scaled = value / 1024d;
+        var unit = 0;
+        while (scaled >= 1024d && unit < ByteUnits.Length - 1)
+        {
+            scaled /= 1024d;
+            unit++;
+        }
+
+        return $"{scaled.ToString("0.0")} {ByteUnits[unit]}";
+    }
+
+    private static string Uptime(double seconds)
+    {
+        if (seconds < 60d)
+        {
+            return $"{(int)Math.Max(seconds, 0d)}s";
+        }
+
+        // A reported uptime beyond TimeSpan's range would throw during render, so the
+        // value is capped rather than trusted.
+        var span = TimeSpan.FromSeconds(Math.Min(seconds, TimeSpan.MaxValue.TotalSeconds - 1d));
+        if (span.TotalHours < 1d)
+        {
+            return $"{span.Minutes}m";
+        }
+
+        if (span.TotalDays < 1d)
+        {
+            return $"{span.Hours}h {span.Minutes}m";
+        }
+
+        return $"{(int)span.TotalDays}d {span.Hours}h {span.Minutes}m";
+    }
+
+    private readonly record struct MeterView(string Label, double? Percent, string? Detail);
 
     private void OpenRegistration()
     {

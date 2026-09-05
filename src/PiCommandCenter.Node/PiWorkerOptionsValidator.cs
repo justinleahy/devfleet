@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using PiCommandCenter.Application.Runtime;
 
 namespace PiCommandCenter.Node;
 
@@ -54,10 +55,7 @@ public sealed class PiWorkerOptionsValidator : IValidateOptions<PiWorkerOptions>
             failures.Add($"'{nameof(options.AllowedChildRoles)}' must contain at least one role.");
         }
 
-        if (options.AllowedRuntimeProfiles.Length == 0)
-        {
-            failures.Add($"'{nameof(options.AllowedRuntimeProfiles)}' must contain at least one profile.");
-        }
+        ValidateRootModel(options.Model, failures);
 
         foreach (var role in options.AllowedChildRoles)
         {
@@ -70,30 +68,10 @@ public sealed class PiWorkerOptionsValidator : IValidateOptions<PiWorkerOptions>
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var candidate in candidates)
             {
-                if (candidate is null || string.IsNullOrWhiteSpace(candidate.RuntimeProfile))
+                var selector = ValidateSelector(candidate?.Model, $"Every candidate in 'Pi:RoleRoutes:{role}'", failures);
+                if (selector is not null && !seen.Add(selector.Value))
                 {
-                    failures.Add($"Every candidate in 'Pi:RoleRoutes:{role}' must name a runtime profile.");
-                    continue;
-                }
-
-                if (!options.AllowedRuntimeProfiles.Contains(candidate.RuntimeProfile, StringComparer.Ordinal))
-                {
-                    failures.Add(
-                        $"Runtime profile '{candidate.RuntimeProfile}' in 'Pi:RoleRoutes:{role}' "
-                        + $"is not present in '{nameof(options.AllowedRuntimeProfiles)}'.");
-                }
-
-                if (candidate.Model is not null && string.IsNullOrWhiteSpace(candidate.Model))
-                {
-                    failures.Add($"Models in 'Pi:RoleRoutes:{role}' must be null or non-empty.");
-                }
-
-                var key = candidate.RuntimeProfile + "\0" + candidate.Model;
-                if (!seen.Add(key))
-                {
-                    failures.Add(
-                        $"'Pi:RoleRoutes:{role}' contains duplicate runtime/model candidate "
-                        + $"'{candidate.RuntimeProfile}/{candidate.Model ?? "<default>"}'.");
+                    failures.Add($"'Pi:RoleRoutes:{role}' contains duplicate model candidate '{selector.Value}'.");
                 }
             }
         }
@@ -106,5 +84,29 @@ public sealed class PiWorkerOptionsValidator : IValidateOptions<PiWorkerOptions>
         return failures.Count > 0
             ? ValidateOptionsResult.Fail(failures)
             : ValidateOptionsResult.Success;
+    }
+
+    private static void ValidateRootModel(string? value, List<string> failures)
+    {
+        var selector = ValidateSelector(value, $"'Pi:{nameof(PiWorkerOptions.Model)}'", failures);
+        if (selector is not null && selector.Runtime != AgentModelSelector.Codex)
+        {
+            failures.Add(
+                $"'Pi:{nameof(PiWorkerOptions.Model)}' must use runtime '{AgentModelSelector.Codex}'; "
+                + $"got '{selector.Value}'.");
+        }
+    }
+
+    private static AgentModelSelector? ValidateSelector(string? value, string subject, List<string> failures)
+    {
+        if (AgentModelSelector.TryParse(value, out var selector))
+        {
+            return selector;
+        }
+
+        failures.Add(
+            $"{subject} must be a canonical '<runtime>/<model>' selector "
+            + $"(runtimes: {string.Join(", ", AgentModelSelector.Runtimes)}); got '{value}'.");
+        return null;
     }
 }

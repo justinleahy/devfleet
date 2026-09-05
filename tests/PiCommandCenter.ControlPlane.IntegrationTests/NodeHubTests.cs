@@ -70,6 +70,40 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
     }
 
     [Fact]
+    public async Task Heartbeat_maps_every_resource_snapshot_field_onto_the_node_projection()
+    {
+        await _connection.InvokeAsync<NodeDto>(
+            "Register", new NodeRegistrationMessage(_nodeId, "pi-hub-resources", "1.0.0", "{}"));
+        var observedAt = new DateTimeOffset(2026, 9, 5, 15, 0, 0, TimeSpan.Zero);
+        var resources = new NodeResourceSnapshotMessage(
+            observedAt,
+            CpuUsagePercent: 12.5,
+            MemoryUsedBytes: 1024L * 1024L,
+            MemoryTotalBytes: 2L * 1024L * 1024L,
+            DiskUsedBytes: 3L * 1024L * 1024L,
+            DiskTotalBytes: 4L * 1024L * 1024L,
+            LoadAverageOneMinute: 0.5,
+            UptimeSeconds: 3661d);
+
+        var heartbeaten = await _connection.InvokeAsync<NodeDto>(
+            "Heartbeat", new NodeHeartbeatMessage(_nodeId, ["session-a"], resources));
+
+        Assert.NotNull(heartbeaten.Resources);
+        Assert.Equal(observedAt, heartbeaten.Resources.ObservedAt);
+        Assert.Equal(12.5, heartbeaten.Resources.CpuUsagePercent);
+        Assert.Equal(1024L * 1024L, heartbeaten.Resources.MemoryUsedBytes);
+        Assert.Equal(2L * 1024L * 1024L, heartbeaten.Resources.MemoryTotalBytes);
+        Assert.Equal(3L * 1024L * 1024L, heartbeaten.Resources.DiskUsedBytes);
+        Assert.Equal(4L * 1024L * 1024L, heartbeaten.Resources.DiskTotalBytes);
+        Assert.Equal(0.5, heartbeaten.Resources.LoadAverageOneMinute);
+        Assert.Equal(3661d, heartbeaten.Resources.UptimeSeconds);
+
+        var cleared = await _connection.InvokeAsync<NodeDto>(
+            "Heartbeat", new NodeHeartbeatMessage(_nodeId, ["session-a"], Resources: null));
+        Assert.Null(cleared.Resources);
+    }
+
+    [Fact]
     public async Task Heartbeat_of_an_unregistered_node_fails_the_call()
     {
         await Assert.ThrowsAnyAsync<HubException>(() => _connection.InvokeAsync<NodeDto>(

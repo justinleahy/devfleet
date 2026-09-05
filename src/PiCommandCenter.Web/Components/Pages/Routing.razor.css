@@ -103,7 +103,7 @@ h2 {
     font-family: var(--monospace-font-family, ui-monospace, monospace);
 }
 
-/* Model catalogs: one dense row per runtime profile. */
+/* Model catalogs: one dense row per runtime. */
 .catalog-list {
     display: flex;
     flex-direction: column;
@@ -165,10 +165,9 @@ h2 {
 }
 
 .candidate-fields {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    align-items: end;
-    gap: calc(var(--design-unit) * 3px);
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
     min-width: 0;
 }
 
@@ -176,12 +175,18 @@ h2 {
     width: 100%;
 }
 
-.candidate-note {
-    margin: 0 0 calc(var(--design-unit) * 1px);
-    align-self: end;
+.candidate-note,
+.candidate-error {
+    margin: 0;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
     line-height: var(--type-ramp-minus-1-line-height);
+    overflow-wrap: anywhere;
+}
+
+.candidate-error {
+    color: var(--error);
+    font-weight: 600;
 }
 
 .candidate-actions {
@@ -213,10 +218,6 @@ h2 {
 
     .candidate-actions {
         margin-block-start: 0;
-    }
-
-    .candidate-fields {
-        grid-template-columns: 1fr;
     }
 
     .node-picker ::deep .field {

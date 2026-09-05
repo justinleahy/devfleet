@@ -21,7 +21,7 @@ public sealed class AgentSession
         string agentName,
         string role,
         string runtime,
-        string runtimeProfile,
+        string model,
         string? providerSessionId,
         AgentLiveness liveness,
         AgentActivity activity,
@@ -43,7 +43,7 @@ public sealed class AgentSession
         AgentName = agentName;
         Role = role;
         Runtime = runtime;
-        RuntimeProfile = runtimeProfile;
+        Model = model;
         ProviderSessionId = providerSessionId;
         Liveness = liveness;
         Activity = activity;
@@ -72,10 +72,11 @@ public sealed class AgentSession
 
     public string Role { get; }
 
-    /// <summary>Runtime identifier, e.g. <c>pi</c>, <c>claude-code</c>, <c>antigravity</c>.</summary>
+    /// <summary>Runtime identifier, e.g. <c>codex</c>, <c>claude-code</c>, <c>antigravity</c>.</summary>
     public string Runtime { get; }
 
-    public string RuntimeProfile { get; }
+    /// <summary>Canonical model selector, e.g. <c>codex/gpt-6-astra</c>; <c>default</c> as the model part means the provider default.</summary>
+    public string Model { get; }
 
     /// <summary>The runtime's own session identifier, when it has reported one.</summary>
     public string? ProviderSessionId { get; private set; }
@@ -124,14 +125,14 @@ public sealed class AgentSession
         string agentName,
         string role,
         string runtime,
-        string runtimeProfile,
+        string model,
         DateTimeOffset startedAt)
     {
         var cleanId = CleanRequired(id, nameof(id));
         var cleanName = CleanRequired(agentName, nameof(agentName));
         var cleanRole = CleanRequired(role, nameof(role));
         var cleanRuntime = CleanRequired(runtime, nameof(runtime));
-        var cleanProfile = CleanRequired(runtimeProfile, nameof(runtimeProfile));
+        var cleanModel = CleanRequired(model, nameof(model));
 
         return new AgentSession(
             cleanId,
@@ -141,7 +142,7 @@ public sealed class AgentSession
             cleanName,
             cleanRole,
             cleanRuntime,
-            cleanProfile,
+            cleanModel,
             providerSessionId: null,
             AgentLiveness.Starting,
             AgentActivity.Idle,
@@ -169,7 +170,7 @@ public sealed class AgentSession
         string agentName,
         string role,
         string runtime,
-        string runtimeProfile,
+        string model,
         string? providerSessionId,
         AgentLiveness liveness,
         AgentActivity activity,
@@ -188,7 +189,7 @@ public sealed class AgentSession
         var cleanName = CleanRequired(agentName, nameof(agentName));
         var cleanRole = CleanRequired(role, nameof(role));
         var cleanRuntime = CleanRequired(runtime, nameof(runtime));
-        var cleanProfile = CleanRequired(runtimeProfile, nameof(runtimeProfile));
+        var cleanModel = CleanRequired(model, nameof(model));
         var cleanReason = CleanRequired(statusReason, nameof(statusReason));
 
         if (endedAt is not null && endedAt.Value < startedAt)
@@ -214,7 +215,7 @@ public sealed class AgentSession
             cleanName,
             cleanRole,
             cleanRuntime,
-            cleanProfile,
+            cleanModel,
             CleanOptional(providerSessionId, nameof(providerSessionId)),
             liveness,
             activity,

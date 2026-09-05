@@ -77,32 +77,22 @@ public sealed class ClaudeCodeRuntimeAdapter : IAgentRuntimeAdapter
                 "A child session requires a parent session id.", nameof(request));
         }
 
-        if (!ClaudeCodeProfiles.IsSupported(request.RuntimeProfile))
+        if (request.Model.Runtime != AgentModelSelector.ClaudeCode)
         {
             throw new NotSupportedException(
-                $"Claude Code profile '{request.RuntimeProfile}' is not supported. "
-                + $"Use '{ClaudeCodeProfiles.ReadOnly}' or '{ClaudeCodeProfiles.ReservedWrite}'.");
+                $"Claude Code adapter only accepts '{AgentModelSelector.ClaudeCode}/<model>' selectors; got '{request.Model}'.");
         }
 
-        if (request.RuntimeProfile == ClaudeCodeProfiles.ReservedWrite
-            && request.Authorization is null)
-        {
-            throw new InvalidOperationException(
-                "Claude reserved-write requires an acquired reservation lease.");
-        }
-
+        var grant = request.Authorization;
         string settingsPath;
-        ClaudeHookInstallResult? install = null;
         if (_hookInstaller is not null)
         {
-            var grant = request.Authorization;
             var hookContext = new ClaudeHookSessionContext(
                 request.SessionId,
                 grant?.LeaseId ?? Guid.Empty,
                 grant?.FencingToken ?? 0,
                 request.WorkingDirectory);
-            install = _hookInstaller.Install(request.RuntimeProfile, hookContext);
-            settingsPath = install.SettingsPath;
+            settingsPath = _hookInstaller.Install(allowWrite: grant is not null, hookContext).SettingsPath;
         }
         else
         {
@@ -129,10 +119,10 @@ public sealed class ClaudeCodeRuntimeAdapter : IAgentRuntimeAdapter
             "--permission-mode",
             "dontAsk",
         };
-        if (request.Model is not null)
+        if (!request.Model.IsProviderDefault)
         {
             arguments.Add("--model");
-            arguments.Add(request.Model);
+            arguments.Add(request.Model.ModelId);
         }
 
         var process = _processFactory.Start(new OfficialProcessStartRequest(
@@ -589,7 +579,7 @@ internal sealed class ClaudeCodeSession : IAsyncDisposable
             var payload = new Dictionary<string, object?>(parsed.Payload, StringComparer.Ordinal)
             {
                 ["processId"] = ProcessId,
-                ["profile"] = _request.RuntimeProfile,
+                ["model"] = _request.Model.Value,
                 ["runtimeKind"] = AgentRuntimeKinds.ClaudeCode,
                 ["providerSessionId"] = _providerSessionId,
             };

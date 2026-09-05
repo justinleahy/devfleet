@@ -18,6 +18,25 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
     public const string RootSessionIdPrefix = "pi-root-";
     public const string ChildSessionIdPrefix = "pi-child-";
 
+    /// <summary>Pi SDK provider prefix that a <c>codex/&lt;id&gt;</c> selector maps onto.</summary>
+    internal const string PiCodexProviderPrefix = "openai-codex/";
+
+    /// <summary>
+    /// Pi-native model override for a selector: <c>openai-codex/&lt;id&gt;</c>. The provider default
+    /// is sent as <c>openai-codex/default</c> so the worker resolves it inside that provider instead
+    /// of letting the SDK fall back to any authenticated provider. Rejects non-codex runtimes.
+    /// </summary>
+    internal static string ResolveModelOverride(AgentModelSelector selector)
+    {
+        if (selector.Runtime != AgentModelSelector.Codex)
+        {
+            throw new NotSupportedException(
+                $"Pi runtime only accepts '{AgentModelSelector.Codex}/<model>' selectors; got '{selector}'.");
+        }
+
+        return PiCodexProviderPrefix + selector.ModelId;
+    }
+
     private readonly PiWorkerOptions _options;
     private readonly IPiWorkerProcessFactory _processFactory;
     private readonly IPiOrchestrationRequestHandler _orchestration;
@@ -79,6 +98,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
                 "A child session requires a parent session id.", nameof(request));
         }
 
+        var model = ResolveModelOverride(request.Model);
 
         // The orchestrator owns the session id; AgentStartRequest validates it non-empty.
         var sessionId = request.SessionId;
@@ -111,7 +131,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
             await session.StartAsync(
                 request.WorkingDirectory,
                 _options.AgentDataDirectory,
-                model: request.Model ?? _options.Model,
+                model,
                 systemPrompt: _options.SystemPrompt,
                 request.Mode,
                 request.ParentSessionId,

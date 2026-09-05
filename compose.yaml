@@ -51,7 +51,10 @@ services:
       Pi__WorkerPath: /app/runtime/pi-worker/src/index.ts
       Claude__Executable: /usr/local/bin/claude
       Antigravity__Executable: /usr/local/bin/agy
-      SubscriptionUsage__PiCredentialPath: /provider-auth/pi/auth.json
+      Muse__Executable: /usr/local/lib/muse/muse
+      MUSE_NO_AUTO_UPDATE: "1"
+      SubscriptionUsage__NodeExecutable: node
+      SubscriptionUsage__ScriptPath: /app/runtime/pi-worker/src/usage.ts
       SubscriptionUsage__ClaudeCredentialPath: /home/node/.claude/.credentials.json
     cap_add:
       - ALL
@@ -62,7 +65,9 @@ services:
       - ${HOME}/Developer:${HOME}/Developer:rw,z
       - ${HOME}/.local/bin/claude:/usr/local/bin/claude:ro,z
       - ${HOME}/.local/bin/agy:/usr/local/bin/agy:ro,z
+      - ${HOME}/.local/bin:/usr/local/lib/muse:ro,z
       - ${HOME}/.claude:/home/node/.claude:rw,z
       - ${HOME}/.claude.json:/home/node/.claude.json:rw,z
-      - ${HOME}/.pi/agent:/provider-auth/pi:rw,z
+      - ${HOME}/.pi/agent:/home/node/.pi/agent:rw,z
       - ${HOME}/.gemini:/home/node/.gemini:rw,z
+      - ${HOME}/.config/muse:/home/node/.config/muse:rw,z

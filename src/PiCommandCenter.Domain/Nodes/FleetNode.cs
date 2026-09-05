@@ -18,6 +18,7 @@ public sealed class FleetNode
         NodeStatus status,
         DateTimeOffset lastHeartbeatAt,
         string capabilitiesJson,
+        string? resourceSnapshotJson,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt,
         long version)
@@ -28,6 +29,7 @@ public sealed class FleetNode
         Status = status;
         LastHeartbeatAt = lastHeartbeatAt;
         CapabilitiesJson = capabilitiesJson;
+        ResourceSnapshotJson = resourceSnapshotJson;
         CreatedAt = createdAt;
         UpdatedAt = updatedAt;
         Version = version;
@@ -47,6 +49,7 @@ public sealed class FleetNode
 
     /// <summary>Non-empty JSON document describing node capabilities.</summary>
     public string CapabilitiesJson { get; private set; }
+    public string? ResourceSnapshotJson { get; private set; }
 
     public DateTimeOffset CreatedAt { get; }
 
@@ -75,6 +78,7 @@ public sealed class FleetNode
             NodeStatus.Offline,
             lastHeartbeatAt: at,
             capabilities,
+            resourceSnapshotJson: null,
             createdAt: at,
             updatedAt: at,
             version: 1);
@@ -90,7 +94,8 @@ public sealed class FleetNode
         string capabilitiesJson,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt,
-        long version)
+        long version,
+        string? resourceSnapshotJson = null)
     {
         var (display, versionText, capabilities) = Normalize(displayName, agentVersion, capabilitiesJson);
 
@@ -101,21 +106,27 @@ public sealed class FleetNode
             status,
             lastHeartbeatAt,
             capabilities,
+            resourceSnapshotJson,
             createdAt,
             updatedAt,
             version);
     }
 
     /// <summary>
-    /// Applies a heartbeat: the node becomes <see cref="NodeStatus.Online"/>, timestamps advance
-    /// and identity metadata is refreshed. Throws <see cref="ArgumentException"/> on invalid input.
+    /// Applies a heartbeat: the node becomes <see cref="NodeStatus.Online"/>, timestamps advance,
+    /// identity metadata is refreshed, and the latest resource snapshot is replaced.
     /// </summary>
-    public void Heartbeat(string agentVersion, string capabilitiesJson, DateTimeOffset at)
+    public void Heartbeat(
+        string agentVersion,
+        string capabilitiesJson,
+        DateTimeOffset at,
+        string? resourceSnapshotJson = null)
     {
         var (_, version, capabilities) = Normalize(DisplayName, agentVersion, capabilitiesJson);
 
         AgentVersion = version;
         CapabilitiesJson = capabilities;
+        ResourceSnapshotJson = resourceSnapshotJson;
         Status = NodeStatus.Online;
         LastHeartbeatAt = at;
         UpdatedAt = at;

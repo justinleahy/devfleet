@@ -101,7 +101,7 @@ public static class AgentSessionProjector
             agentName: OptionalText(@event.Payload, "agentName") ?? "agent",
             role: OptionalText(@event.Payload, "role") ?? "worker",
             runtime: @event.Runtime,
-            runtimeProfile: OptionalText(@event.Payload, "runtimeProfile") ?? "default",
+            model: OptionalText(@event.Payload, "model") ?? "codex/default",
             startedAt: @event.OccurredAt);
         aggregate.Apply(@event);
 
@@ -114,7 +114,7 @@ public static class AgentSessionProjector
             AgentName = aggregate.AgentName,
             Role = aggregate.Role,
             Runtime = aggregate.Runtime,
-            RuntimeProfile = aggregate.RuntimeProfile,
+            Model = aggregate.Model,
             StartedAtUtcTicks = aggregate.StartedAt.UtcTicks,
         };
         CopyTo(aggregate, row);
@@ -129,7 +129,7 @@ public static class AgentSessionProjector
         agentName: row.AgentName,
         role: row.Role,
         runtime: row.Runtime,
-        runtimeProfile: row.RuntimeProfile,
+        model: row.Model,
         providerSessionId: row.ProviderSessionId,
         liveness: ParseEnum<AgentLiveness>(row.Liveness, AgentLiveness.Starting),
         activity: ParseEnum<AgentActivity>(row.Activity, AgentActivity.Idle),

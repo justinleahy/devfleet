@@ -1,6 +1,7 @@
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Node.Runtime;
 using PiCommandCenter.Node.Runtime.Claude;
+using PiCommandCenter.Node.Runtime.Muse;
 
 
 namespace PiCommandCenter.Node.Child;
@@ -22,8 +23,7 @@ public sealed class ChildAgent
         string sessionId,
         string agentName,
         string role,
-        string runtimeProfile,
-        string? model,
+        string model,
         string runtimeKind,
         string parentSessionId,
         string requestId,
@@ -35,9 +35,8 @@ public sealed class ChildAgent
         SessionId = sessionId;
         AgentName = agentName;
         Role = role;
-        RuntimeKind = runtimeKind;
-        RuntimeProfile = runtimeProfile;
         Model = model;
+        RuntimeKind = runtimeKind;
         ParentSessionId = parentSessionId;
         RequestId = requestId;
         ProjectId = projectId;
@@ -52,9 +51,8 @@ public sealed class ChildAgent
 
     public string Role { get; }
 
-    public string RuntimeProfile { get; }
-    public string? Model { get; }
-
+    /// <summary>Canonical <c>runtime/model</c> selector the trusted route chose for this child.</summary>
+    public string Model { get; }
 
     public string RuntimeKind { get; }
 
@@ -125,6 +123,10 @@ public sealed class ChildAgent
             else if (adapter is ClaudeCodeRuntimeAdapter claude)
             {
                 await claude.CloseSessionAsync(SessionId, CancellationToken.None).ConfigureAwait(false);
+            }
+            else if (adapter is MuseCodeRuntimeAdapter muse)
+            {
+                await muse.CloseSessionAsync(SessionId, CancellationToken.None).ConfigureAwait(false);
             }
             else
             {

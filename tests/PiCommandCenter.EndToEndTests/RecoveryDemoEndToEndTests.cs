@@ -112,7 +112,7 @@ public sealed class RecoveryDemoEndToEndTests : IClassFixture<EndToEndFixture>, 
                 {
                     ["agentName"] = "root",
                     ["role"] = "root",
-                    ["runtimeProfile"] = "root-readonly",
+                    ["model"] = "codex/default",
                 })),
             new NodeEventMessage(
                 EventId: $"evt-ext-{requestId:N}",

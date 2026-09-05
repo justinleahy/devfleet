@@ -23,7 +23,17 @@ public class NodeContractShapeTests
         var id = Guid.NewGuid();
         var seen = DateTimeOffset.UtcNow;
 
-        var dto = new NodeDto(id, "pi-01", "1.2.3", seen, NodeStatus.Online, "{}", Version: 7);
+        var resources = new NodeResourceSnapshotDto(
+            seen,
+            CpuUsagePercent: 12.5,
+            MemoryUsedBytes: 1024L,
+            MemoryTotalBytes: 2048L,
+            DiskUsedBytes: 4096L,
+            DiskTotalBytes: 8192L,
+            LoadAverageOneMinute: 0.25,
+            UptimeSeconds: 90d);
+
+        var dto = new NodeDto(id, "pi-01", "1.2.3", seen, NodeStatus.Online, "{}", Version: 7, Resources: resources);
 
         Assert.Equal(id, dto.Id);
         Assert.Equal("pi-01", dto.DisplayName);
@@ -32,7 +42,17 @@ public class NodeContractShapeTests
         Assert.Equal(NodeStatus.Online, dto.Status);
         Assert.Equal("{}", dto.CapabilitiesJson);
         Assert.Equal(7, dto.Version);
+        Assert.Equal(resources, dto.Resources);
+        Assert.Equal(seen, dto.Resources!.ObservedAt);
+        Assert.Equal(12.5, dto.Resources.CpuUsagePercent);
+        Assert.Equal(1024L, dto.Resources.MemoryUsedBytes);
+        Assert.Equal(2048L, dto.Resources.MemoryTotalBytes);
+        Assert.Equal(4096L, dto.Resources.DiskUsedBytes);
+        Assert.Equal(8192L, dto.Resources.DiskTotalBytes);
+        Assert.Equal(0.25, dto.Resources.LoadAverageOneMinute);
+        Assert.Equal(90d, dto.Resources.UptimeSeconds);
     }
+
 
     [Fact]
     public void RequestClaimDto_exposes_the_lease_a_node_needs_to_renew()

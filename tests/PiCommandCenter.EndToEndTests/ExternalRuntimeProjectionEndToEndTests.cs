@@ -75,7 +75,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
             _root,
             "Review",
             AgentRuntimeMode.Child,
-            ClaudeCodeProfiles.ReadOnly);
+            "claude-code/default");
 
         var start = adapter.StartAsync(request, CancellationToken.None);
         await process.WriteStdoutAsync(
@@ -126,7 +126,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
             _root,
             "Review the diff",
             AgentRuntimeMode.Child,
-            "google-personal");
+            "antigravity/default");
 
         var start = adapter.StartAsync(request, CancellationToken.None);
         await process.WaitForPromptAsync(TimeSpan.FromSeconds(5));
@@ -201,6 +201,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
         Assert.Equal(dtos.Count, db.SessionEvents.Count(e => e.SessionId == sessionId));
         var projection = await db.AgentSessions.SingleAsync(s => s.Id == sessionId);
         Assert.Equal(runtime, projection.Runtime);
+        Assert.Equal(runtime + "/" + AgentModelSelector.DefaultModelId, projection.Model);
         Assert.Equal(sessionId, projection.Id);
         Assert.False(string.IsNullOrWhiteSpace(projection.ProviderSessionId));
     }
@@ -218,7 +219,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
             ["parentSessionId"] = e.ParentSessionId,
             ["agentName"] = e.Payload.TryGetValue("agentName", out var n) ? n : "agent",
             ["role"] = e.Payload.TryGetValue("role", out var r) ? r : "reviewer",
-            ["runtimeProfile"] = e.Payload.TryGetValue("profile", out var p) ? p : "default",
+            ["model"] = e.Payload.TryGetValue("model", out var m) ? m : runtime + "/" + AgentModelSelector.DefaultModelId,
         };
         if (!payload.ContainsKey("providerSessionId") || payload["providerSessionId"] is null)
         {

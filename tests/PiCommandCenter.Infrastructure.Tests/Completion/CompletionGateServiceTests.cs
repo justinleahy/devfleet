@@ -301,7 +301,7 @@ public class CompletionGateServiceTests
             AgentName = id,
             Role = role,
             Runtime = "pi",
-            RuntimeProfile = "default",
+            Model = "codex/default",
             Liveness = nameof(AgentLiveness.Online),
             Activity = activity.ToString(),
             Attention = nameof(AgentAttention.None),

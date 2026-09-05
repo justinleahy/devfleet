@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.SubscriptionUsage;
+using PiCommandCenter.Node.SystemResources;
 
 
 namespace PiCommandCenter.Node;
@@ -58,11 +59,17 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<IRuntimeModelCommandRunner, RuntimeModelCommandRunner>()
             .AddSingleton<IRuntimeModelDiscovery, RuntimeModelDiscovery>()
             .AddSingleton<IRuntimeSubscriptionUsageCommandRunner, RuntimeSubscriptionUsageCommandRunner>()
+            .AddSingleton<IAntigravitySubscriptionUsageCommandRunner, AntigravitySubscriptionUsageCommandRunner>()
             .AddOptions<SubscriptionUsageOptions>()
             .BindConfiguration(SubscriptionUsageOptions.SectionName)
             .Services
-            .AddSingleton<IProviderSubscriptionQuotaReader, ProviderSubscriptionQuotaReader>()
+            .AddSingleton<IPostConfigureOptions<SubscriptionUsageOptions>, SubscriptionUsageOptionsPostConfigure>()
+            .AddSingleton<ISupplementalSubscriptionUsageSource, ClaudeSubscriptionUsageSource>()
+            .AddSingleton<ISupplementalSubscriptionUsageSource, AntigravitySubscriptionUsageSource>()
             .AddSingleton<IRuntimeSubscriptionUsageProbe, RuntimeSubscriptionUsageProbe>()
+            .AddSingleton<NodeSystemResourceMonitor>()
+            .AddSingleton<INodeSystemResourceMonitor>(
+                static sp => sp.GetRequiredService<NodeSystemResourceMonitor>())
             .AddSingleton<SqliteNodeEventSpool>()
             .AddSingleton<INodeEventSpool>(static sp => sp.GetRequiredService<SqliteNodeEventSpool>())
             .AddSingleton<NodeTransportClient>()
@@ -107,10 +114,21 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<Runtime.Antigravity.AntigravityRuntimeAdapter>()
             .AddSingleton<IAgentRuntimeAdapter>(
                 static sp => sp.GetRequiredService<Runtime.Antigravity.AntigravityRuntimeAdapter>())
+            .AddOptions<MuseCodeOptions>()
+            .BindConfiguration(MuseCodeOptions.SectionName)
+            .ValidateOnStart()
+            .Services
+            .AddSingleton<IValidateOptions<MuseCodeOptions>, MuseCodeOptionsValidator>()
+            .AddSingleton<Runtime.Muse.IMuseProcessFactory, Runtime.Muse.MuseProcessFactory>()
+            .AddSingleton<Runtime.Muse.MuseCodeRuntimeAdapter>()
+            .AddSingleton<IAgentRuntimeAdapter>(
+                static sp => sp.GetRequiredService<Runtime.Muse.MuseCodeRuntimeAdapter>())
+            .AddSingleton<Runtime.Muse.IMuseModelCatalogReader, Runtime.Muse.MuseModelCatalogReader>()
             .AddSingleton<IAgentRuntimeRegistry>(static sp => new Runtime.AgentRuntimeRegistry(
                 sp.GetRequiredService<Runtime.PiRuntimeAdapter>(),
                 sp.GetRequiredService<Runtime.Claude.ClaudeCodeRuntimeAdapter>(),
-                sp.GetRequiredService<Runtime.Antigravity.AntigravityRuntimeAdapter>()))
+                sp.GetRequiredService<Runtime.Antigravity.AntigravityRuntimeAdapter>(),
+                sp.GetRequiredService<Runtime.Muse.MuseCodeRuntimeAdapter>()))
             .AddSingleton<PiRootSessionSupervisor>()
             .AddSingleton<NodeWorker>()
             .AddSingleton<Runtime.Claude.Hooks.ClaudeHookAuditLog>()

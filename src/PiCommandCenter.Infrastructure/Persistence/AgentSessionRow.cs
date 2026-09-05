@@ -22,7 +22,7 @@ public sealed class AgentSessionRow
 
     public string Runtime { get; init; } = string.Empty;
 
-    public string RuntimeProfile { get; init; } = string.Empty;
+    public string Model { get; init; } = string.Empty;
 
     public string? ProviderSessionId { get; set; }
 

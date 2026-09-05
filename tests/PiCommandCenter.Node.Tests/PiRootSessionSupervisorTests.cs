@@ -132,7 +132,7 @@ public class PiRootSessionSupervisorTests : IDisposable
         Assert.Equal(claim.RequestId, pending[0].RequestId);
         Assert.Equal(claim.NodeId, pending[0].NodeId);
         Assert.Equal(sessionId, pending[0].SessionId);
-        Assert.Contains("local-pi", pending[0].PayloadJson);
+        Assert.Contains("codex/default", pending[0].PayloadJson);
         Assert.Contains("fake-provider-session", pending[0].PayloadJson);
 
         Assert.Contains(pending, e => e.Type == "turn.started");
