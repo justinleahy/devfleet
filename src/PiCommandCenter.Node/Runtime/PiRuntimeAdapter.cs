@@ -111,7 +111,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
             await session.StartAsync(
                 request.WorkingDirectory,
                 _options.AgentDataDirectory,
-                model: _options.Model,
+                model: request.Model ?? _options.Model,
                 systemPrompt: _options.SystemPrompt,
                 request.Mode,
                 request.ParentSessionId,

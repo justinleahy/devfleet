@@ -168,11 +168,8 @@ export function buildRootTools(request: ToolRequest): RootTool[] {
       "Start one child agent session for a role in this request.",
       {
         agentName: s("Child agent name"),
-        role: s("Child role"),
-        workingDirectory: s("Repository path the child works in"),
+        role: s("Child role routed by node policy"),
         prompt: s("Initial child prompt"),
-        mode: optional("Runtime mode (default child)"),
-        runtimeProfile: optional("Runtime profile name"),
       },
       request,
     ),

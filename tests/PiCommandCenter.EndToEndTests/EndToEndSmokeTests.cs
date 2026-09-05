@@ -30,7 +30,7 @@ public class EndToEndSmokeTests : IClassFixture<EndToEndFixture>
         Assert.True(healthResponse.IsSuccessStatusCode, $"status {(int)healthResponse.StatusCode}: {healthPayload}");
         Assert.Equal("Healthy", healthPayload.Trim());
         Assert.True(homeResponse.IsSuccessStatusCode, html);
-        Assert.Contains("Pi Command Center", html);
+        Assert.Contains("DevFleet", html);
         Assert.Contains("Fleet dashboard", html);
         Assert.Contains("Active projects", html);
         Assert.Contains("Queued requests", html);

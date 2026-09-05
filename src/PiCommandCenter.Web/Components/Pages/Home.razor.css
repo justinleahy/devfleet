@@ -1,3 +1,14 @@
+.page-head ::deep .page-head-row,
+.page-head ::deep .page-head-copy {
+    min-width: 0;
+}
+
+/* The button's shadow-root content keeps its intrinsic width, so a shrunken
+   host clips the label: let the copy absorb the squeeze instead. */
+.page-head ::deep .page-head-action {
+    flex-shrink: 0;
+}
+
 .page-head h1 {
     font-size: var(--type-ramp-plus-4-font-size);
     line-height: var(--type-ramp-plus-4-line-height);
@@ -316,5 +327,13 @@ h2 {
 
     .form-grid {
         grid-template-columns: 1fr;
+    }
+
+    /* Phone widths cannot hold heading + action side by side: stack them.
+       align-items is inline on the FluentStack host, hence !important. */
+    .page-head ::deep .page-head-row {
+        flex-direction: column;
+        align-items: flex-start !important;
+        row-gap: calc(var(--design-unit) * 3px);
     }
 }

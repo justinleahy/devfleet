@@ -73,6 +73,17 @@ Hub methods (one-argument DTOs in `PiCommandCenter.Contracts.NodeTransport`):
 | `RecordVerification` | `VerificationRunMessage` | `VerificationRunMessage` |
 | `EvaluateCompletion` | `EvaluateCompletionMessage` | `CompletionGateDecisionMessage` |
 
+
+Hub methods are **node → control plane**. Subscription usage is the reverse: the hub **invokes a client callback** on the connected node (no hub method of the same name).
+
+| Client callback | Arguments | Result |
+|---|---|---|
+| `GetSubscriptionUsage` | none | `NodeSubscriptionUsageMessage` (`NodeId`, `Providers`) |
+
+`NodeSubscriptionUsageGateway` uses `IHubContext<NodeHub>.Clients.Client(connectionId).InvokeCoreAsync<NodeSubscriptionUsageMessage>("GetSubscriptionUsage", [])` with a 35 s timeout. The node handler is `IRuntimeSubscriptionUsageProbe.GetAsync`. The callback is only issued for a manual Refresh on `/usage`; nothing polls it.
+
+`ProviderSubscriptionUsageMessage.Status`: `available` (at least one validated remaining-quota window; `Windows` nonempty), `unavailable` (no credential / `signed_out` per `claude auth status` / missing or unconfigured CLI), `error` (HTTP failure, timeout, oversized or malformed response, schema drift, credential commit failure, CLI timeout, non-zero exit, truncated or malformed output). `Windows` cross the hub already normalized (`Name`, `PercentUsed`, `PercentRemaining`, `ResetsAt`) on the 0–100 scale (Claude's upstream `utilization` already arrives in 0–100 percentage points and maps directly to `PercentUsed`; nothing is rescaled on the node), and at most **8** per provider; a longer list is rejected as schema drift by the node and again by the `/usage` page. The node never forwards provider response bodies, tokens, account/user IDs, or raw CLI output. `Source` and `Diagnostic` are stable, secret-free identifiers. Node-side sources — Pi via the private `chatgpt.com/backend-api/wham/usage`, Claude via the private `api.anthropic.com/api/oauth/usage`, Antigravity via `agy -p /usage --print-timeout 8s` text — and their fail-closed rules are in [architecture.md](architecture.md#subscription-usage-usage) and [research/subscription-usage.md](research/subscription-usage.md). Version/auth/plan fields are not remaining quota.
+
 ### Server-enforced bounds (`NodeTransportLimits`)
 
 | Limit | Value |

@@ -1,0 +1,675 @@
+@page "/usage"
+@namespace PiCommandCenter.Web.Components.Pages
+@rendermode InteractiveServer
+@using System.Text.RegularExpressions
+@using PiCommandCenter.Application
+@using PiCommandCenter.Application.Nodes
+@using PiCommandCenter.Application.Runtime
+@using PiCommandCenter.Contracts.NodeTransport
+@using PiCommandCenter.Domain.Nodes
+@inject INodeRegistry NodeRegistry
+@inject INodeSubscriptionUsageGateway Gateway
+@inject IClock Clock
+
+<PageTitle>Subscription usage &middot; DevFleet</PageTitle>
+
+<FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+
+    <header class="page-head">
+        <h1>Subscription usage</h1>
+        <p class="page-lead">
+            Provider subscription limits are read on the node through authenticated usage surfaces
+            used by the installed provider clients. A card reports windows only when the node can
+            validate the response; private provider surfaces can change, so schema drift fails closed
+            instead of showing a guess. Nothing here is estimated, and refreshing never calls a model.
+        </p>
+    </header>
+
+    <section aria-labelledby="node-heading">
+        <h2 id="node-heading">Node</h2>
+        <p class="panel-lead">
+            Usage is observed per node, because the credentials and CLIs live there. Pick an online
+            node, then refresh when you want a fresh reading; this page never polls on its own.
+        </p>
+
+        @if (_nodeError is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Could not load nodes"
+                              AllowDismiss="false">
+                @_nodeError
+            </FluentMessageBar>
+        }
+        else if (_loadingNodes)
+        {
+            <div class="state-block" role="status">
+                <FluentProgressRing aria-label="Loading nodes" />
+                <span>Loading nodes</span>
+            </div>
+        }
+        else if (_onlineNodes.Count == 0)
+        {
+            <p class="panel-empty">
+                No node is online. Subscription usage can only be read from a connected node, so
+                there is nothing to report until a node agent is running against this control plane.
+            </p>
+            <FluentButton Appearance="Appearance.Stealth" OnClick="ReloadNodesAsync" Disabled="@Busy">
+                Reload nodes
+            </FluentButton>
+        }
+        else
+        {
+            <div class="node-picker">
+                <FluentSelect TOption="NodeDto"
+                              Label="Online node"
+                              Items="@_onlineNodes"
+                              OptionText="@(node => node.DisplayName)"
+                              OptionValue="@(node => node.Id.ToString())"
+                              @bind-Value="_selectedNodeId"
+                              @bind-Value:after="OnNodeChangedAsync"
+                              Disabled="@Busy"
+                              Class="field" />
+                <FluentStack Class="node-picker-actions"
+                             Orientation="Orientation.Horizontal"
+                             HorizontalGap="8"
+                             Width="auto">
+                    <FluentButton Appearance="Appearance.Accent"
+                                  OnClick="RefreshUsageAsync"
+                                  Loading="@_loadingUsage"
+                                  Disabled="@Busy">
+                        Refresh
+                    </FluentButton>
+                    <FluentButton Appearance="Appearance.Stealth"
+                                  OnClick="ReloadNodesAsync"
+                                  Disabled="@Busy">
+                        Reload nodes
+                    </FluentButton>
+                </FluentStack>
+            </div>
+
+            if (_selectedNodeWentOffline)
+            {
+                <p class="usage-note">
+                    The node you were reading is no longer online, so its last reading was dropped.
+                    A node that has gone offline cannot report usage at all.
+                </p>
+            }
+
+            <p class="node-seen node-status" role="status" aria-live="polite">@StatusLine()</p>
+        }
+    </section>
+
+    <section aria-labelledby="providers-heading">
+        <h2 id="providers-heading">Providers</h2>
+
+        @* One chain: a failed read must not be followed by an empty-state line that reads like
+           a successful "nothing to report". *@
+        @if (_usageError is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Could not read usage from the node"
+                              AllowDismiss="false">
+                @_usageError
+            </FluentMessageBar>
+            <p class="panel-empty">
+                This is a control-plane or transport failure, not a quota reading: the node did not
+                answer, so no provider state could be read at all.
+            </p>
+        }
+        else if (_loadingUsage)
+        {
+            <div class="state-block" role="status">
+                <FluentProgressRing aria-label="Reading subscription usage" />
+                <span>Reading subscription usage</span>
+            </div>
+        }
+        else if (_usage is null)
+        {
+            <p class="panel-empty">
+                No reading has been taken yet. Pick an online node and choose Refresh.
+            </p>
+        }
+        else if (_providers.Count == 0)
+        {
+            <p class="panel-empty">
+                This node reported no providers. Either no supported CLI is installed on it, or none
+                of the installed ones expose subscription state that can be read without spending
+                quota.
+            </p>
+        }
+        else
+        {
+            foreach (var provider in _providers)
+            {
+                <FluentCard>
+                    <article class="panel usage-card" aria-labelledby="@provider.HeadingId">
+                        <FluentStack Orientation="Orientation.Horizontal"
+                                     VerticalAlignment="VerticalAlignment.Center"
+                                     HorizontalGap="12"
+                                     Width="100%">
+                            <h3 id="@provider.HeadingId">@provider.Provider</h3>
+                            <FluentBadge Appearance="@provider.BadgeAppearance">@provider.BadgeText</FluentBadge>
+                            <FluentSpacer />
+                            <span class="node-seen">observed @provider.ObservedUtc</span>
+                        </FluentStack>
+
+                        <dl class="usage-meta">
+                            <div class="usage-meta-row">
+                                <dt>Runtime profiles</dt>
+                                <dd>@provider.ProfilesText</dd>
+                            </div>
+                            <div class="usage-meta-row">
+                                <dt>Version</dt>
+                                <dd>@(provider.Version ?? "not reported")</dd>
+                            </div>
+                            @if (provider.PlanLabel is not null)
+                            {
+                                <div class="usage-meta-row">
+                                    <dt>Plan</dt>
+                                    <dd>@provider.PlanLabel</dd>
+                                </div>
+                            }
+                            @if (provider.Authenticated is { } authenticated)
+                            {
+                                <div class="usage-meta-row">
+                                    <dt>Sign-in</dt>
+                                    <dd>@(authenticated ? "Signed in on this node" : "Not signed in on this node")</dd>
+                                </div>
+                            }
+                            <div class="usage-meta-row">
+                                <dt>Observed</dt>
+                                <dd>@provider.ObservedUtc</dd>
+                            </div>
+                            <div class="usage-meta-row">
+                                <dt>Source</dt>
+                                <dd>@provider.Source</dd>
+                            </div>
+                        </dl>
+
+                        @if (provider.Windows.Count > 0)
+                        {
+                            <p class="usage-note">
+                                Subscription limit windows the node could verify. These are plan
+                                limits, not session or context usage.
+                            </p>
+                            <ul class="usage-windows">
+                                @foreach (var window in provider.Windows)
+                                {
+                                    <li class="usage-window">
+                                        <div class="usage-window-head">
+                                            <span class="usage-window-name">@window.Name</span>
+                                            <span class="usage-window-value">@window.ValueLabel</span>
+                                        </div>
+                                        <FluentProgress Min="0"
+                                                        Max="100"
+                                                        Value="@window.BarValue"
+                                                        aria-label="@($"{provider.Provider}, {window.Name}")"
+                                                        aria-valuetext="@window.ValueLabel" />
+                                        <p class="usage-window-reset">@window.ResetLabel</p>
+                                    </li>
+                                }
+                            </ul>
+                        }
+                        else if (provider.State == ProviderState.Unavailable)
+                        {
+                            <p class="usage-none">
+                                @provider.Provider exposes no safe machine-readable remaining-quota
+                                surface: the node found no way to read how much of this subscription
+                                is left without spending quota to find out. Nothing on this card is a
+                                measure of remaining allowance.
+                            </p>
+                        }
+
+                        @if (provider.Caveat is not null)
+                        {
+                            <p class="usage-note">@provider.Caveat</p>
+                        }
+
+                        @if (provider.Authenticated is true && provider.Windows.Count == 0)
+                        {
+                            <p class="usage-note">
+                                Being signed in is not a quota reading. A working sign-in says this
+                                node can start the CLI, not that any allowance remains.
+                            </p>
+                        }
+
+                        @if (provider.Authenticated is false)
+                        {
+                            <p class="usage-note">
+                                Sign in on the node itself to make this provider usable; usage cannot
+                                be read for an account that is not signed in there.
+                            </p>
+                        }
+
+                        @if (provider.Diagnostic is not null)
+                        {
+                            <p class="usage-diagnostic">
+                                <span class="usage-diagnostic-label">Node diagnostic</span>
+                                @provider.Diagnostic
+                            </p>
+                        }
+                    </article>
+                </FluentCard>
+            }
+        }
+    </section>
+</FluentStack>
+
+@code {
+    /// <summary>
+    /// The at-sign, built from its code point: written literally inside a C# string in a .razor
+    /// file it is read by the Razor parser as a transition rather than as string content.
+    /// </summary>
+    private static readonly string AtSign = char.ConvertFromUtf32(64);
+
+    // Declared before Redactions: static initialisers run in textual order.
+    private static readonly TimeSpan RedactionTimeout = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>
+    /// Anything that could carry an account or credential is removed before display. Every pattern
+    /// runs on the non-backtracking engine, so matching is linear in the (already bounded) input,
+    /// and the timeout is a last line of defence rather than the plan.
+    /// </summary>
+    private static readonly (Regex Pattern, string Replacement)[] Redactions =
+    [
+        Redaction(@"[\w.!#$%&'*+/=?^`{|}~-]+" + AtSign + @"[\w-]+(?:\.[\w-]+)+", "[account]"),
+        // No \b before a leading slash: between a space and "/" there is no word boundary.
+        Redaction(@"(?i)(?:/home|/Users|/root|/var/folders|C:\\Users)[\\/][^\s""']+", "[path]"),
+        Redaction(@"(?i)\bbearer\s+\S+", "[redacted]"),
+        Redaction(@"(?i)\b(?:token|api[_-]?key|key|secret|password|passwd|cookie|session|account|user(?:name)?|auth[\w-]*)\b\s*[:=]\s*\S+", "[redacted]"),
+        Redaction(@"(?i)\b(?:sk|pk|ghp|gho|github_pat|xox[abprs])[-_][A-Za-z0-9_-]+", "[redacted]"),
+        Redaction(@"\b[A-Za-z0-9+/_-]{24,}={0,2}\b", "[redacted]"),
+        Redaction(@"(?i)\bhttps?://\S+", "[url]"),
+    ];
+
+    private static (Regex, string) Redaction(string pattern, string replacement) =>
+        (new Regex(pattern, RegexOptions.CultureInvariant | RegexOptions.NonBacktracking, RedactionTimeout), replacement);
+
+    /// <summary>Shown in place of node text the redactor could not finish inspecting.</summary>
+    private const string Unreadable = "[unreadable]";
+
+    /// <summary>Node text is never inspected past this many characters, let alone displayed.</summary>
+    private const int SanitizeInputLimit = 512;
+    private const int DiagnosticLimit = 280;
+    private const int WindowNameLimit = 48;
+
+    /// <summary>More windows than any real plan has is a malformed response, not a long list.</summary>
+    private const int WindowLimit = 8;
+
+    /// <summary>
+    /// Slack allowed between a reported used and remaining percentage: each may be rounded to one
+    /// decimal place on the node (at most 0.1 in total), with a little room for the binary
+    /// representation of such figures. Anything wider is two claims about the same window.
+    /// </summary>
+    private const double PercentSumTolerance = 0.25;
+
+    /// <summary>
+    /// Provider identifiers the node probe emits. Anything else is shown as an unknown provider, so
+    /// a node cannot put arbitrary text in a heading, an ARIA label, or a DOM id.
+    /// </summary>
+    private static (string Key, string Name) CanonicalProvider(string? provider) => provider switch
+    {
+        "pi" => ("pi", "Pi"),
+        "claude" => ("claude", "Claude Code"),
+        "antigravity" => ("antigravity", "Antigravity"),
+        _ => ("unknown", "Unknown provider"),
+    };
+
+    /// <summary>The configured runtime-profile allowlist; only exact matches are ever echoed.</summary>
+    private static readonly string[] KnownProfiles =
+    [
+        AgentRuntimeProfiles.LocalPi,
+        AgentRuntimeProfiles.ClaudeReadOnly,
+        AgentRuntimeProfiles.ClaudeReservedWrite,
+        AgentRuntimeProfiles.AntigravityReadOnly,
+    ];
+
+    private IReadOnlyList<NodeDto> _onlineNodes = Array.Empty<NodeDto>();
+    private IReadOnlyList<ProviderView> _providers = Array.Empty<ProviderView>();
+    private NodeSubscriptionUsageMessage? _usage;
+    private string? _selectedNodeId;
+    private string? _nodeError;
+    private string? _usageError;
+    private DateTimeOffset? _readAt;
+    private bool _selectedNodeWentOffline;
+    private bool _loadingNodes = true;
+    private bool _loadingUsage;
+
+    private bool Busy => _loadingNodes || _loadingUsage;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadNodesAsync();
+        if (_selectedNodeId is not null)
+        {
+            await LoadUsageAsync();
+        }
+    }
+
+    private async Task ReloadNodesAsync()
+    {
+        _loadingNodes = true;
+        _nodeError = null;
+        try
+        {
+            var nodes = await NodeRegistry.ListAsync(CancellationToken.None);
+            var online = nodes.Where(node => node.Status == NodeStatus.Online).ToArray();
+            _onlineNodes = online;
+
+            var kept = _selectedNodeId is not null
+                && online.Any(node => node.Id.ToString() == _selectedNodeId);
+            if (!kept)
+            {
+                // An offline node cannot report usage, so its last reading is dropped rather
+                // than left on screen looking current.
+                _selectedNodeWentOffline = _selectedNodeId is not null;
+                _selectedNodeId = online.Length > 0 ? online[0].Id.ToString() : null;
+                ClearUsage();
+            }
+        }
+        catch (Exception ex)
+        {
+            _nodeError = ex.Message;
+            _onlineNodes = Array.Empty<NodeDto>();
+        }
+        finally
+        {
+            _loadingNodes = false;
+        }
+    }
+
+    private async Task OnNodeChangedAsync()
+    {
+        _selectedNodeWentOffline = false;
+        ClearUsage();
+        if (_selectedNodeId is not null)
+        {
+            await LoadUsageAsync();
+        }
+    }
+
+    private Task RefreshUsageAsync()
+    {
+        _selectedNodeWentOffline = false;
+        return LoadUsageAsync();
+    }
+
+    private async Task LoadUsageAsync()
+    {
+        if (!Guid.TryParse(_selectedNodeId, out var nodeId))
+        {
+            return;
+        }
+
+        _loadingUsage = true;
+        _usageError = null;
+        try
+        {
+            _usage = await Gateway.GetAsync(nodeId, CancellationToken.None);
+            _readAt = Clock.UtcNow;
+            _providers = _usage.Providers
+                .Select((provider, index) => ProviderView.Build(provider, index))
+                .ToArray();
+        }
+        catch (Exception ex)
+        {
+            // A failed read is reported as a failure; the previous numbers are not kept, because
+            // a stale figure shown after an error reads as a current one.
+            ClearUsage();
+            _usageError = ex.Message;
+        }
+        finally
+        {
+            _loadingUsage = false;
+        }
+    }
+
+    /// <summary>
+    /// Drops everything that belonged to the previous reading, its error included: an error from
+    /// one node must not stay on screen once the selection has moved to another.
+    /// </summary>
+    private void ClearUsage()
+    {
+        _usage = null;
+        _usageError = null;
+        _providers = Array.Empty<ProviderView>();
+        _readAt = null;
+    }
+
+    private string StatusLine()
+    {
+        if (_usageError is not null)
+        {
+            return "Usage could not be read from this node.";
+        }
+
+        if (_usage is null)
+        {
+            return "No reading taken \u00b7 refresh to read this node.";
+        }
+
+        var reported = _providers.Count(provider => provider.Windows.Count > 0);
+        return $"Read {_readAt?.ToUniversalTime().ToString("u") ?? "just now"} \u00b7 "
+            + $"{_providers.Count} provider(s) \u00b7 {reported} with a usable usage window \u00b7 "
+            + "manual refresh only";
+    }
+
+    /// <summary>
+    /// Strips anything account- or credential-shaped from node-supplied text and caps its length,
+    /// so a provider's own message can never leak an identity onto this page. Work is bounded
+    /// before anything is allocated or matched: nothing past <see cref="SanitizeInputLimit"/> is
+    /// inspected, and a token the cap cut in half is dropped rather than half-redacted.
+    /// </summary>
+    private static string? Sanitize(string? value, int limit = DiagnosticLimit)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var cutMidToken = value.Length > SanitizeInputLimit && !char.IsWhiteSpace(value[SanitizeInputLimit]);
+        var tokens = value[..Math.Min(value.Length, SanitizeInputLimit)]
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        if (cutMidToken && tokens.Length > 0)
+        {
+            tokens = tokens[..^1];
+        }
+
+        var text = string.Join(' ', tokens);
+        try
+        {
+            foreach (var (pattern, replacement) in Redactions)
+            {
+                text = pattern.Replace(text, replacement);
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Text the redactor could not finish is not shown at all: partial redaction is a leak.
+            return Unreadable;
+        }
+
+        if (text.Length > limit)
+        {
+            text = string.Concat(text.AsSpan(0, limit).TrimEnd(), "\u2026");
+        }
+
+        return text.Length == 0 ? null : text;
+    }
+
+    /// <summary>
+    /// A percentage the node may have reported. Absent is acceptable; present must be a finite
+    /// number on the 0..100 scale exactly, with no slack: a figure that needs clamping is not a
+    /// reading, and a node that sends one is not trusted for the rest of the window either.
+    /// </summary>
+    private static bool TryPercentage(double? value, out double? percent)
+    {
+        percent = value;
+        return value is not { } reported || (double.IsFinite(reported) && reported is >= 0 and <= 100);
+    }
+
+    /// <summary>
+    /// Only the exact configured profile names are echoed; anything else is counted, never shown.
+    /// </summary>
+    private static string DescribeProfiles(IReadOnlyList<string> profiles)
+    {
+        var known = new List<string>(KnownProfiles.Length);
+        var unrecognized = 0;
+        foreach (var profile in profiles)
+        {
+            var index = Array.IndexOf(KnownProfiles, profile);
+            if (index < 0)
+            {
+                unrecognized++;
+            }
+            else if (!known.Contains(KnownProfiles[index]))
+            {
+                known.Add(KnownProfiles[index]);
+            }
+        }
+
+        if (unrecognized == 0)
+        {
+            return known.Count == 0 ? "none reported" : string.Join(", ", known);
+        }
+
+        var tail = unrecognized == 1 ? "1 unrecognized profile" : $"{unrecognized} unrecognized profiles";
+        return known.Count == 0 ? tail : $"{string.Join(", ", known)} \u00b7 {tail}";
+    }
+
+    private static string Utc(DateTimeOffset value) => value.ToUniversalTime().ToString("u");
+
+    private enum ProviderState
+    {
+        Unavailable,
+        Available,
+        Error,
+        /// <summary>The node's answer did not hold together, so none of it is presented as a reading.</summary>
+        Invalid,
+    }
+
+    private sealed record WindowView(string Name, string ValueLabel, int BarValue, string ResetLabel);
+
+    private sealed record ProviderView(
+        string Provider,
+        string HeadingId,
+        ProviderState State,
+        string BadgeText,
+        Appearance BadgeAppearance,
+        string ProfilesText,
+        string? Version,
+        string? PlanLabel,
+        bool? Authenticated,
+        string ObservedUtc,
+        string Source,
+        IReadOnlyList<WindowView> Windows,
+        string? Caveat,
+        string? Diagnostic)
+    {
+        public static ProviderView Build(ProviderSubscriptionUsageMessage provider, int index)
+        {
+            var (key, name) = CanonicalProvider(provider.Provider);
+
+            // Exact status strings only: a status this page does not know is not "probably
+            // unavailable", it is a response that cannot be read.
+            var state = provider.Status switch
+            {
+                SubscriptionUsageStatuses.Available => ProviderState.Available,
+                SubscriptionUsageStatuses.Unavailable => ProviderState.Unavailable,
+                SubscriptionUsageStatuses.Error => ProviderState.Error,
+                _ => ProviderState.Invalid,
+            };
+
+            // Windows are trusted only from an exact "available" provider, and only when every one
+            // of them is coherent; one contradictory window discards the response, not just itself.
+            // Any other status that still carries windows is contradicting itself in the same way.
+            IReadOnlyList<WindowView> windows = Array.Empty<WindowView>();
+            var coherent = state == ProviderState.Available
+                ? TryBuildWindows(provider.Windows, out windows)
+                : provider.Windows.Count == 0;
+            if (!coherent)
+            {
+                state = ProviderState.Invalid;
+            }
+
+            var (badgeText, badgeAppearance) = state switch
+            {
+                ProviderState.Available => ("Usage reported", Appearance.Accent),
+                ProviderState.Unavailable => ("No quota surface", Appearance.Neutral),
+                ProviderState.Error => ("Read error", Appearance.Neutral),
+                _ => ("Invalid response", Appearance.Neutral),
+            };
+
+            var caveat = state switch
+            {
+                ProviderState.Error =>
+                    "The node reported an error while reading this provider, so its state is unknown rather than empty.",
+                ProviderState.Invalid =>
+                    "The node's answer for this provider did not hold together: an unrecognized status, or usage "
+                    + "windows that were missing, malformed, or contradicted each other or the status. It was "
+                    + "discarded, and nothing on this card is a reading.",
+                _ => null,
+            };
+
+            return new ProviderView(
+                name,
+                $"provider-{index}-{key}",
+                state,
+                badgeText,
+                badgeAppearance,
+                DescribeProfiles(provider.RuntimeProfiles),
+                Sanitize(provider.Version),
+                Sanitize(provider.PlanLabel),
+                provider.Authenticated,
+                Utc(provider.ObservedAt),
+                Sanitize(provider.Source) ?? "not reported",
+                windows,
+                caveat,
+                Sanitize(provider.Diagnostic));
+        }
+
+        private static bool TryBuildWindows(
+            IReadOnlyList<SubscriptionUsageWindowMessage> reported,
+            out IReadOnlyList<WindowView> windows)
+        {
+            windows = Array.Empty<WindowView>();
+            if (reported.Count is 0 or > WindowLimit)
+            {
+                return false;
+            }
+
+            var built = new WindowView[reported.Count];
+            for (var i = 0; i < built.Length; i++)
+            {
+                var window = reported[i];
+                var name = Sanitize(window.Name, WindowNameLimit);
+                if (name is null
+                    || !TryPercentage(window.PercentUsed, out var used)
+                    || !TryPercentage(window.PercentRemaining, out var remaining)
+                    || (used is null && remaining is null)
+                    || (used is { } u && remaining is { } r && Math.Abs(u + r - 100) > PercentSumTolerance))
+                {
+                    return false;
+                }
+
+                // Prefer what the provider actually stated; only the bar is derived, and by now
+                // the two figures are known to agree, so either one describes the same window.
+                var usedPercent = used ?? 100 - remaining!.Value;
+                var label = remaining is { } left
+                    ? $"{left.ToString("0.#")}% remaining"
+                    : $"{used!.Value.ToString("0.#")}% used";
+
+                built[i] = new WindowView(
+                    name,
+                    label,
+                    (int)Math.Round(usedPercent, MidpointRounding.AwayFromZero),
+                    window.ResetsAt is { } resets
+                        ? $"Resets {Utc(resets)}"
+                        : "Reset time not reported");
+            }
+
+            windows = built;
+            return true;
+        }
+    }
+}

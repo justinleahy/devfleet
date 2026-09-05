@@ -56,6 +56,19 @@ public sealed class PiRuntimeAdapterStartFlowTests
     }
 
     [Fact]
+    public async Task Route_model_overrides_the_global_Pi_model()
+    {
+        var options = DefaultOptions();
+        options.Model = "global-default";
+
+        var result = await StartRootAsync(
+            MakeRequest(AgentRuntimeMode.Child, "review", "pi-root-1", "role-specific"),
+            options);
+
+        Assert.Equal("role-specific", result.StartPayload?.GetProperty("model").GetString());
+    }
+
+    [Fact]
     public async Task Adapter_rejects_child_start_without_parent_session_id()
     {
         var harness = new Harness(DefaultOptions());
@@ -67,7 +80,8 @@ public sealed class PiRuntimeAdapterStartFlowTests
     private static AgentStartRequest MakeRequest(
         AgentRuntimeMode mode,
         string prompt,
-        string? parentSessionId = null)
+        string? parentSessionId = null,
+        string? model = null)
         => new(
             (mode is AgentRuntimeMode.Root
                 ? PiRuntimeAdapter.RootSessionIdPrefix
@@ -80,7 +94,8 @@ public sealed class PiRuntimeAdapterStartFlowTests
             "/tmp/picc-start-flow",
             prompt,
             mode,
-            AgentRuntimeProfiles.LocalPi);
+            AgentRuntimeProfiles.LocalPi,
+            model: model);
 
     private static PiWorkerOptions DefaultOptions() => new()
     {

@@ -19,6 +19,8 @@
     <ProjectReference Include="..\PiCommandCenter.Application\PiCommandCenter.Application.csproj" />
     <ProjectReference Include="..\PiCommandCenter.Infrastructure\PiCommandCenter.Infrastructure.csproj" />
     <ProjectReference Include="..\PiCommandCenter.Web\PiCommandCenter.Web.csproj" />
+    <ProjectReference Include="..\PiCommandCenter.Api\PiCommandCenter.Api.csproj" />
+
   </ItemGroup>
 
 </Project>

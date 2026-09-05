@@ -58,7 +58,8 @@ public class ClaudeCodeRuntimeAdapterTests : IDisposable
     private AgentStartRequest Request(
         string profile = ClaudeCodeProfiles.ReadOnly,
         string? cwd = null,
-        AgentRuntimeAuthorizationContext? authorization = null)
+        AgentRuntimeAuthorizationContext? authorization = null,
+        string? model = null)
         => new(
             sessionId: "claude-child-1",
             projectId: ProjectId.New(),
@@ -70,7 +71,8 @@ public class ClaudeCodeRuntimeAdapterTests : IDisposable
             prompt: "Review the change",
             mode: AgentRuntimeMode.Child,
             runtimeProfile: profile,
-            authorization: authorization);
+            authorization: authorization,
+            model: model);
 
     private static async Task<List<PiCommandCenter.Domain.Sessions.NormalizedAgentEvent>> CollectAsync(
         IAsyncEnumerable<PiCommandCenter.Domain.Sessions.NormalizedAgentEvent> watch,
@@ -109,7 +111,7 @@ public class ClaudeCodeRuntimeAdapterTests : IDisposable
     public async Task Start_launches_exact_argv_cwd_and_does_not_invent_credential_env()
     {
         var adapter = CreateAdapter();
-        var handle = await adapter.StartAsync(Request(), CancellationToken.None);
+        var handle = await adapter.StartAsync(Request(model: "claude-role-model"), CancellationToken.None);
 
         Assert.Equal("claude-session-fake-1", handle.ProviderSessionId);
         Assert.Equal(AgentRuntimeKinds.ClaudeCode, handle.RuntimeKind);
@@ -127,7 +129,7 @@ public class ClaudeCodeRuntimeAdapterTests : IDisposable
             {
                 "-p", "Review the change", "--output-format", "stream-json", "--verbose", "--settings",
                 Path.Combine(_root, "settings.json"), "--setting-sources", string.Empty,
-                "--permission-mode", "dontAsk",
+                "--permission-mode", "dontAsk", "--model", "claude-role-model",
             },
             argv.Skip(1).ToArray());
         Assert.Equal(_root, doc.RootElement.GetProperty("cwd").GetString());

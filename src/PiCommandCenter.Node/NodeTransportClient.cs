@@ -4,6 +4,9 @@ using Microsoft.Extensions.Options;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Verification;
+using PiCommandCenter.Node.RuntimeRouting;
+using PiCommandCenter.Node.SubscriptionUsage;
+
 
 
 namespace PiCommandCenter.Node;
@@ -18,6 +21,9 @@ public sealed class NodeTransportClient : INodeHubOps
     private readonly NodeOptions _options;
     private readonly NodeCredentialLoader _credentials;
     private readonly ILogger<NodeTransportClient> _logger;
+    private readonly INodeRuntimeRoutingStore _routing;
+    private readonly IRuntimeModelDiscovery _models;
+    private readonly IRuntimeSubscriptionUsageProbe _usage;
     private HubConnection? _connection;
     private NodeCredential? _credential;
 
@@ -34,13 +40,22 @@ public sealed class NodeTransportClient : INodeHubOps
     public NodeTransportClient(
         IOptions<NodeOptions> options,
         NodeCredentialLoader credentials,
+        INodeRuntimeRoutingStore routing,
+        IRuntimeModelDiscovery models,
+        IRuntimeSubscriptionUsageProbe usage,
         ILogger<NodeTransportClient> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(credentials);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(routing);
+        ArgumentNullException.ThrowIfNull(models);
+        ArgumentNullException.ThrowIfNull(usage);
         _options = options.Value;
         _credentials = credentials;
+        _routing = routing;
+        _models = models;
+        _usage = usage;
         _logger = logger;
     }
 
@@ -67,6 +82,16 @@ public sealed class NodeTransportClient : INodeHubOps
         connection.Reconnected += OnReconnectedAsync;
         connection.Closed += OnClosedAsync;
         connection.On<CancelSessionCommand>("CancelSession", OnCancelSessionAsync);
+        connection.On<NodeRuntimeConfigurationMessage>(
+            "GetRuntimeConfiguration",
+            () => Task.FromResult(_routing.Current));
+        connection.On<IReadOnlyList<RuntimeModelCatalogMessage>>(
+            "DiscoverRuntimeModels",
+            () => _models.DiscoverAsync());
+        connection.On<NodeSubscriptionUsageMessage>("GetSubscriptionUsage", () => _usage.GetAsync());
+        connection.On<UpdateNodeRuntimeConfigurationMessage, NodeRuntimeConfigurationMessage>(
+            "UpdateRuntimeConfiguration",
+            update => _routing.UpdateAsync(update));
 
         await connection.StartAsync(cancellationToken).ConfigureAwait(false);
         _connection = connection;

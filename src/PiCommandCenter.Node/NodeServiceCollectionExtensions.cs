@@ -4,6 +4,9 @@ using PiCommandCenter.Application.Runtime;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
+using PiCommandCenter.Node.RuntimeRouting;
+using PiCommandCenter.Node.SubscriptionUsage;
+
 
 namespace PiCommandCenter.Node;
 
@@ -49,6 +52,17 @@ public static class NodeServiceCollectionExtensions
             .Services
             .AddSingleton<IValidateOptions<PiWorkerOptions>, PiWorkerOptionsValidator>()
             .AddSingleton<IPostConfigureOptions<PiWorkerOptions>, PiWorkerOptionsPostConfigure>()
+            .AddSingleton<NodeRuntimeRoutingStore>()
+            .AddSingleton<INodeRuntimeRoutingStore>(
+                static sp => sp.GetRequiredService<NodeRuntimeRoutingStore>())
+            .AddSingleton<IRuntimeModelCommandRunner, RuntimeModelCommandRunner>()
+            .AddSingleton<IRuntimeModelDiscovery, RuntimeModelDiscovery>()
+            .AddSingleton<IRuntimeSubscriptionUsageCommandRunner, RuntimeSubscriptionUsageCommandRunner>()
+            .AddOptions<SubscriptionUsageOptions>()
+            .BindConfiguration(SubscriptionUsageOptions.SectionName)
+            .Services
+            .AddSingleton<IProviderSubscriptionQuotaReader, ProviderSubscriptionQuotaReader>()
+            .AddSingleton<IRuntimeSubscriptionUsageProbe, RuntimeSubscriptionUsageProbe>()
             .AddSingleton<SqliteNodeEventSpool>()
             .AddSingleton<INodeEventSpool>(static sp => sp.GetRequiredService<SqliteNodeEventSpool>())
             .AddSingleton<NodeTransportClient>()

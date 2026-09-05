@@ -1,0 +1,720 @@
+@page "/routing"
+@namespace PiCommandCenter.Web.Components.Pages
+@rendermode InteractiveServer
+@using PiCommandCenter.Application
+@using PiCommandCenter.Application.Nodes
+@using PiCommandCenter.Application.Runtime
+@using PiCommandCenter.Contracts.NodeTransport
+@using PiCommandCenter.Domain
+@using PiCommandCenter.Domain.Nodes
+@inject INodeRegistry NodeRegistry
+@inject INodeRuntimeConfigurationGateway Gateway
+@inject IClock Clock
+
+<PageTitle>Runtime routing &middot; DevFleet</PageTitle>
+
+<FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+
+    <header class="page-head">
+        <h1>Runtime routing</h1>
+        <p class="page-lead">
+            Each role starts on the first runtime in its list that can run; the next candidate is
+            tried only when the one before it fails. Runtimes, models, and the commands behind them
+            live on the node, so this page only reorders what the node reports it can do.
+        </p>
+    </header>
+
+    <section aria-labelledby="node-heading">
+        <h2 id="node-heading">Node</h2>
+        <p class="panel-lead">
+            Routing is stored on the node. Pick an online node to read its live configuration.
+        </p>
+
+        @if (_nodeError is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Could not load nodes"
+                              AllowDismiss="false">
+                @_nodeError
+            </FluentMessageBar>
+        }
+        else if (_loadingNodes)
+        {
+            <div class="state-block" role="status">
+                <FluentProgressRing aria-label="Loading nodes" />
+                <span>Loading nodes</span>
+            </div>
+        }
+        else if (_onlineNodes.Count == 0)
+        {
+            <p class="panel-empty">
+                No node is online. A node must be connected and registered before its routing can be
+                read or changed; start a node agent against this control plane and reload.
+            </p>
+            <FluentButton Appearance="Appearance.Stealth" OnClick="ReloadNodesAsync" Disabled="@Busy">
+                Reload nodes
+            </FluentButton>
+        }
+        else
+        {
+            <div class="node-picker">
+                <FluentSelect TOption="NodeDto"
+                              Label="Online node"
+                              Items="@_onlineNodes"
+                              OptionText="@(node => node.DisplayName)"
+                              OptionValue="@(node => node.Id.ToString())"
+                              @bind-Value="_selectedNodeId"
+                              @bind-Value:after="OnNodeChangedAsync"
+                              Disabled="@Busy"
+                              Class="field" />
+                <FluentStack Class="node-picker-actions"
+                             Orientation="Orientation.Horizontal"
+                             HorizontalGap="8"
+                             Width="auto">
+                    <FluentButton Appearance="Appearance.Stealth"
+                                  OnClick="ReloadConfigurationAsync"
+                                  Loading="@_loadingConfig"
+                                  Disabled="@Busy">
+                        Reload configuration
+                    </FluentButton>
+                    <FluentButton Appearance="Appearance.Outline"
+                                  OnClick="DiscoverModelsAsync"
+                                  Loading="@_discovering"
+                                  Disabled="@(Busy || _configuration is null)">
+                        Refresh models
+                    </FluentButton>
+                </FluentStack>
+            </div>
+
+            <p class="node-seen node-status" role="status" aria-live="polite">@StatusLine()</p>
+        }
+    </section>
+
+    @if (_configError is not null)
+    {
+        <FluentMessageBar Intent="MessageIntent.Error"
+                          Title="Could not load routing from the node"
+                          AllowDismiss="false">
+            @_configError
+        </FluentMessageBar>
+    }
+
+    @if (_loadingConfig)
+    {
+        <div class="state-block" role="status">
+            <FluentProgressRing aria-label="Loading routing configuration" />
+            <span>Loading routing configuration</span>
+        </div>
+    }
+    else if (_configuration is not null)
+    {
+        var configuration = _configuration;
+
+        <section aria-labelledby="models-heading">
+            <h2 id="models-heading">Model catalogs</h2>
+            <p class="panel-lead">
+                Model lists are produced by the node when you refresh them. A runtime that cannot
+                list models is reported here; type its model id by hand instead.
+            </p>
+
+            @if (_discoveryError is not null)
+            {
+                <FluentMessageBar Intent="MessageIntent.Error"
+                                  Title="Could not refresh models"
+                                  AllowDismiss="false">
+                    @_discoveryError
+                </FluentMessageBar>
+            }
+
+            @if (_catalogs.Count == 0)
+            {
+                <p class="panel-empty">
+                    No catalog has been fetched yet. Refresh models to ask this node what each
+                    runtime can serve; until then every model field stays free text.
+                </p>
+            }
+            else
+            {
+                <ul class="catalog-list">
+                    @foreach (var profile in configuration.AllowedRuntimeProfiles)
+                    {
+                        var catalog = Catalog(profile);
+                        <li class="catalog-row">
+                            <span class="node-name">@profile</span>
+                            @if (catalog is null)
+                            {
+                                <span class="node-missing">Not reported</span>
+                            }
+                            else if (catalog.Error is not null)
+                            {
+                                <FluentBadge Appearance="Appearance.Neutral">Unavailable</FluentBadge>
+                                <span class="catalog-error">@catalog.Error</span>
+                            }
+                            else
+                            {
+                                <FluentBadge Appearance="Appearance.Accent">@catalog.Models.Count models</FluentBadge>
+                                <span class="catalog-sample">@SampleModels(catalog)</span>
+                            }
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+
+        @if (_roles.Count == 0)
+        {
+            <p class="panel-empty">
+                This node reports no roles, so there is nothing to route.
+            </p>
+        }
+
+        @foreach (var role in _roles)
+        {
+            var headingId = $"role-{Slug(role.Role)}";
+            <FluentCard>
+                <section class="panel" aria-labelledby="@headingId">
+                    <FluentStack Orientation="Orientation.Horizontal"
+                                 VerticalAlignment="VerticalAlignment.Center"
+                                 HorizontalGap="12"
+                                 Width="100%">
+                        <h2 id="@headingId">@role.Role</h2>
+                        <FluentSpacer />
+                        <span class="node-seen">@CandidateSummary(role)</span>
+                    </FluentStack>
+
+                    @if (role.Candidates.Count == 0)
+                    {
+                        <p class="panel-empty">
+                            No route is configured. Add at least one candidate before saving.
+                        </p>
+                    }
+                    else
+                    {
+                        <ol class="candidate-list">
+                            @for (var index = 0; index < role.Candidates.Count; index++)
+                            {
+                                var position = index;
+                                var candidate = role.Candidates[position];
+                                var models = ModelsFor(candidate.RuntimeProfile);
+                                @* Keyed on the editor instance so moving a row moves its
+                                   controls instead of re-labelling the ones already there. *@
+                                <li class="candidate-row" @key="candidate">
+                                    <span class="candidate-rank" aria-hidden="true">@(position + 1)</span>
+                                    <div class="candidate-fields">
+                                        <FluentSelect TOption="string"
+                                                      Label="@($"Runtime for {role.Role}, choice {position + 1}")"
+                                                      Items="@RuntimeOptions(candidate.RuntimeProfile)"
+                                                      OptionText="@(profile => profile)"
+                                                      OptionValue="@(profile => profile)"
+                                                      @bind-Value="candidate.RuntimeProfile"
+                                                      @bind-Value:after="MarkEdited"
+                                                      Disabled="@Busy"
+                                                      Class="field" />
+
+                                        <FluentTextField @bind-Value="candidate.Model"
+                                                         @bind-Value:after="MarkEdited"
+                                                         Label="@($"Model for {role.Role}, choice {position + 1}")"
+                                                         Placeholder="Node default"
+                                                         Disabled="@Busy"
+                                                         Class="field" />
+
+                                        @if (models.Count > 0)
+                                        {
+                                            <FluentSelect TOption="RuntimeModelMessage"
+                                                          Label="@($"Discovered models for {candidate.RuntimeProfile}, choice {position + 1}")"
+                                                          Items="@models"
+                                                          OptionText="@(model => ModelLabel(model))"
+                                                          OptionValue="@(model => model.Id)"
+                                                          @bind-Value="candidate.Pick"
+                                                          @bind-Value:after="@(() => ApplyPick(candidate))"
+                                                          Disabled="@Busy"
+                                                          Class="field" />
+                                        }
+                                        else
+                                        {
+                                            <p class="candidate-note">@ModelNote(candidate.RuntimeProfile)</p>
+                                        }
+                                    </div>
+                                    <div class="candidate-actions">
+                                        <FluentButton Appearance="Appearance.Stealth"
+                                                      OnClick="@(() => MoveUp(role, position))"
+                                                      Disabled="@(Busy || position == 0)"
+                                                      aria-label="@($"Move {Describe(candidate)} earlier for {role.Role}")">
+                                            Up
+                                        </FluentButton>
+                                        <FluentButton Appearance="Appearance.Stealth"
+                                                      OnClick="@(() => MoveDown(role, position))"
+                                                      Disabled="@(Busy || position == role.Candidates.Count - 1)"
+                                                      aria-label="@($"Move {Describe(candidate)} later for {role.Role}")">
+                                            Down
+                                        </FluentButton>
+                                        <FluentButton Appearance="Appearance.Stealth"
+                                                      OnClick="@(() => Remove(role, position))"
+                                                      Disabled="@(Busy || role.Candidates.Count == 1)"
+                                                      aria-label="@($"Remove {Describe(candidate)} from {role.Role}")">
+                                            Remove
+                                        </FluentButton>
+                                    </div>
+                                </li>
+                            }
+                        </ol>
+                    }
+
+                    <FluentStack Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
+                        <FluentButton Appearance="Appearance.Outline"
+                                      OnClick="@(() => Add(role))"
+                                      Disabled="@(Busy || _runtimeProfiles.Count == 0)"
+                                      aria-label="@($"Add a candidate to {role.Role}")">
+                            Add candidate
+                        </FluentButton>
+                    </FluentStack>
+                </section>
+            </FluentCard>
+        }
+
+        <section class="save-bar" aria-labelledby="save-heading">
+            <h2 id="save-heading" class="visually-hidden">Save routing</h2>
+
+            @if (_saveError is not null)
+            {
+                <FluentMessageBar Intent="MessageIntent.Error"
+                                  Title="Could not save routing"
+                                  AllowDismiss="false">
+                    @_saveError
+                </FluentMessageBar>
+            }
+
+            @if (_saved is not null)
+            {
+                <div role="status">
+                    <FluentMessageBar Intent="MessageIntent.Success" AllowDismiss="false">
+                        @_saved
+                    </FluentMessageBar>
+                </div>
+            }
+
+            <FluentStack Orientation="Orientation.Horizontal"
+                         VerticalAlignment="VerticalAlignment.Center"
+                         HorizontalGap="12"
+                         Width="100%">
+                <FluentButton Appearance="Appearance.Accent"
+                              OnClick="SaveAsync"
+                              Loading="@_saving"
+                              Disabled="@(Busy || !HasCompleteRoutes)">
+                    Save routing
+                </FluentButton>
+                <span class="node-seen" role="status" aria-live="polite">
+                    Saving writes every role on the node; new child agents pick it up on their next start.
+                </span>
+            </FluentStack>
+        </section>
+    }
+</FluentStack>
+
+@code {
+    private readonly Dictionary<string, RuntimeModelCatalogMessage> _catalogs =
+        new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly List<RoleEditor> _roles = [];
+
+    private IReadOnlyList<NodeDto> _onlineNodes = Array.Empty<NodeDto>();
+    private IReadOnlyList<string> _runtimeProfiles = Array.Empty<string>();
+    private NodeRuntimeConfigurationMessage? _configuration;
+    private string? _selectedNodeId;
+    private string? _nodeError;
+    private string? _configError;
+    private string? _discoveryError;
+    private string? _saveError;
+    private string? _saved;
+    private DateTimeOffset? _loadedAt;
+    private DateTimeOffset? _discoveredAt;
+    private bool _loadingNodes = true;
+    private bool _loadingConfig;
+    private bool _discovering;
+    private bool _saving;
+
+    private bool Busy => _loadingNodes || _loadingConfig || _discovering || _saving;
+    private bool HasCompleteRoutes => _roles.Count > 0
+        && _roles.All(role => role.Candidates.Count > 0
+            && role.Candidates.All(candidate => !string.IsNullOrWhiteSpace(candidate.RuntimeProfile)));
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadNodesAsync();
+        if (_selectedNodeId is not null)
+        {
+            await ReloadConfigurationAsync();
+        }
+    }
+
+    private async Task ReloadNodesAsync()
+    {
+        _loadingNodes = true;
+        _nodeError = null;
+        try
+        {
+            var nodes = await NodeRegistry.ListAsync(CancellationToken.None);
+            var online = nodes.Where(node => node.Status == NodeStatus.Online).ToArray();
+            _onlineNodes = online;
+
+            // Keep the operator's node across reloads; otherwise adopt the first online one.
+            if (_selectedNodeId is null || !online.Any(node => node.Id.ToString() == _selectedNodeId))
+            {
+                _selectedNodeId = online.Length > 0 ? online[0].Id.ToString() : null;
+                ClearConfiguration();
+            }
+        }
+        catch (Exception ex)
+        {
+            _nodeError = ex.Message;
+            _onlineNodes = Array.Empty<NodeDto>();
+        }
+        finally
+        {
+            _loadingNodes = false;
+        }
+    }
+
+    private async Task OnNodeChangedAsync()
+    {
+        ClearConfiguration();
+        if (_selectedNodeId is not null)
+        {
+            await ReloadConfigurationAsync();
+        }
+    }
+
+    private async Task ReloadConfigurationAsync()
+    {
+        if (!TryNodeId(out var nodeId))
+        {
+            return;
+        }
+
+        _loadingConfig = true;
+        _configError = null;
+        _saveError = null;
+        _saved = null;
+        try
+        {
+            Apply(await Gateway.GetAsync(nodeId, CancellationToken.None));
+            _loadedAt = Clock.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _configError = ex.Message;
+            ClearConfiguration();
+        }
+        finally
+        {
+            _loadingConfig = false;
+        }
+    }
+
+    private async Task DiscoverModelsAsync()
+    {
+        if (!TryNodeId(out var nodeId))
+        {
+            return;
+        }
+
+        _discovering = true;
+        _discoveryError = null;
+        try
+        {
+            var catalogs = await Gateway.DiscoverModelsAsync(nodeId, CancellationToken.None);
+            _catalogs.Clear();
+            foreach (var catalog in catalogs)
+            {
+                _catalogs[catalog.RuntimeProfile] = catalog;
+            }
+
+            // A model the node no longer lists must stay in the field: it may be a hand-written id.
+            foreach (var role in _roles)
+            {
+                foreach (var candidate in role.Candidates)
+                {
+                    candidate.SyncPick(ModelsFor(candidate.RuntimeProfile));
+                }
+            }
+
+            _discoveredAt = Clock.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _discoveryError = ex.Message;
+        }
+        finally
+        {
+            _discovering = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        if (!TryNodeId(out var nodeId) || _configuration is null)
+        {
+            return;
+        }
+
+        _saving = true;
+        _saveError = null;
+        _saved = null;
+        try
+        {
+            // Every allowed role is sent, including the ones left empty, so the node's stored
+            // routing is exactly what this page shows.
+            var routes = _roles
+                .Select(role => new RuntimeRoleRouteMessage(
+                    role.Role,
+                    role.Candidates.Select(candidate => candidate.ToMessage()).ToArray()))
+                .ToArray();
+
+            var updated = await Gateway.UpdateAsync(
+                nodeId,
+                new UpdateNodeRuntimeConfigurationMessage(routes),
+                CancellationToken.None);
+
+            Apply(updated);
+            _loadedAt = Clock.UtcNow;
+            _saved = $"Saved {routes.Length} role route(s) to the node.";
+        }
+        catch (Exception ex)
+        {
+            // Edits stay on screen: the operator can correct and retry without retyping.
+            _saveError = ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private void Apply(NodeRuntimeConfigurationMessage configuration)
+    {
+        _configuration = configuration;
+        _runtimeProfiles = configuration.AllowedRuntimeProfiles;
+        _roles.Clear();
+
+        foreach (var role in configuration.AllowedRoles)
+        {
+            var editor = new RoleEditor(role);
+            var route = configuration.RoleRoutes
+                .FirstOrDefault(r => string.Equals(r.Role, role, StringComparison.OrdinalIgnoreCase));
+            if (route is not null)
+            {
+                foreach (var candidate in route.Candidates)
+                {
+                    var editable = new CandidateEditor
+                    {
+                        RuntimeProfile = candidate.RuntimeProfile,
+                        Model = candidate.Model,
+                    };
+                    editable.SyncPick(ModelsFor(candidate.RuntimeProfile));
+                    editor.Candidates.Add(editable);
+                }
+            }
+
+            _roles.Add(editor);
+        }
+    }
+
+    private void ClearConfiguration()
+    {
+        _configuration = null;
+        _runtimeProfiles = Array.Empty<string>();
+        _roles.Clear();
+        _catalogs.Clear();
+        _discoveryError = null;
+        _discoveredAt = null;
+        _loadedAt = null;
+        _saveError = null;
+        _saved = null;
+    }
+
+    private bool TryNodeId(out Guid nodeId) => Guid.TryParse(_selectedNodeId, out nodeId);
+
+    private void MarkEdited()
+    {
+        _saved = null;
+        _saveError = null;
+    }
+
+    private void ApplyPick(CandidateEditor candidate)
+    {
+        candidate.AdoptPick();
+        MarkEdited();
+    }
+
+    private void Add(RoleEditor role)
+    {
+        if (_runtimeProfiles.Count == 0)
+        {
+            return;
+        }
+
+        role.Candidates.Add(new CandidateEditor { RuntimeProfile = _runtimeProfiles[0] });
+        MarkEdited();
+    }
+
+    private void Remove(RoleEditor role, int index)
+    {
+        if (index >= 0 && index < role.Candidates.Count)
+        {
+            role.Candidates.RemoveAt(index);
+            MarkEdited();
+        }
+    }
+
+    private void MoveUp(RoleEditor role, int index)
+    {
+        if (index > 0)
+        {
+            (role.Candidates[index - 1], role.Candidates[index]) =
+                (role.Candidates[index], role.Candidates[index - 1]);
+            MarkEdited();
+        }
+    }
+
+    private void MoveDown(RoleEditor role, int index)
+    {
+        if (index >= 0 && index < role.Candidates.Count - 1)
+        {
+            (role.Candidates[index + 1], role.Candidates[index]) =
+                (role.Candidates[index], role.Candidates[index + 1]);
+            MarkEdited();
+        }
+    }
+
+    private RuntimeModelCatalogMessage? Catalog(string profile) =>
+        _catalogs.TryGetValue(profile, out var catalog) ? catalog : null;
+
+    private IReadOnlyList<RuntimeModelMessage> ModelsFor(string profile) =>
+        Catalog(profile) is { Error: null } catalog ? catalog.Models : Array.Empty<RuntimeModelMessage>();
+
+    private IReadOnlyList<string> RuntimeOptions(string current)
+    {
+        // A node may report a candidate on a profile it no longer allows; keep it selectable so
+        // opening this page never silently rewrites the stored route.
+        if (string.IsNullOrEmpty(current)
+            || _runtimeProfiles.Contains(current, StringComparer.OrdinalIgnoreCase))
+        {
+            return _runtimeProfiles;
+        }
+
+        var options = new List<string>(_runtimeProfiles.Count + 1);
+        options.AddRange(_runtimeProfiles);
+        options.Add(current);
+        return options;
+    }
+
+    private string ModelNote(string profile)
+    {
+        var catalog = Catalog(profile);
+        if (catalog is null)
+        {
+            return _discoveredAt is null
+                ? "Refresh models to see what this node offers, or type a model id."
+                : "This node reported no catalog for this runtime; type a model id.";
+        }
+
+        return catalog.Error is not null
+            ? $"Discovery unavailable: {catalog.Error} Type a model id instead."
+            : "This node listed no models for this runtime; type a model id.";
+    }
+
+    private string StatusLine()
+    {
+        if (_configuration is null)
+        {
+            return _configError is not null
+                ? "Routing could not be read from this node."
+                : "No routing loaded.";
+        }
+
+        var models = _discoveredAt is null
+            ? "models not fetched"
+            : $"models fetched {_discoveredAt.Value.ToString("u")}";
+
+        return $"Loaded {_loadedAt?.ToString("u") ?? "just now"} \u00b7 {_roles.Count} role(s) \u00b7 "
+            + $"{_runtimeProfiles.Count} runtime profile(s) \u00b7 {models}";
+    }
+
+    private static string CandidateSummary(RoleEditor role) => role.Candidates.Count switch
+    {
+        0 => "no candidate",
+        1 => "1 candidate",
+        _ => $"{role.Candidates.Count} candidates in order",
+    };
+
+    private static string ModelLabel(RuntimeModelMessage model) =>
+        model.Provider is null ? model.DisplayName : $"{model.DisplayName} ({model.Provider})";
+
+    private static string Describe(CandidateEditor candidate) =>
+        string.IsNullOrWhiteSpace(candidate.Model)
+            ? $"{candidate.RuntimeProfile} on its default model"
+            : $"{candidate.RuntimeProfile} on {candidate.Model}";
+
+    private static string SampleModels(RuntimeModelCatalogMessage catalog)
+    {
+        if (catalog.Models.Count == 0)
+        {
+            return "none reported";
+        }
+
+        var shown = catalog.Models.Take(3).Select(model => model.Id);
+        var suffix = catalog.Models.Count > 3 ? ", \u2026" : string.Empty;
+        return string.Join(", ", shown) + suffix;
+    }
+
+    private static string Slug(string value)
+    {
+        var slug = new char[value.Length];
+        for (var i = 0; i < value.Length; i++)
+        {
+            var c = value[i];
+            slug[i] = char.IsLetterOrDigit(c) ? char.ToLowerInvariant(c) : '-';
+        }
+
+        return new string(slug);
+    }
+
+    private sealed class RoleEditor(string role)
+    {
+        public string Role { get; } = role;
+
+        public List<CandidateEditor> Candidates { get; } = [];
+    }
+
+    private sealed class CandidateEditor
+    {
+        public string RuntimeProfile { get; set; } = string.Empty;
+
+        public string? Model { get; set; }
+
+        /// <summary>
+        /// Selection in the discovered-model picker. Held apart from <see cref="Model"/> so a
+        /// hand-written id that no runtime lists is never cleared by the picker.
+        /// </summary>
+        public string? Pick { get; set; }
+
+        public void AdoptPick()
+        {
+            if (!string.IsNullOrEmpty(Pick))
+            {
+                Model = Pick;
+            }
+        }
+
+        public void SyncPick(IReadOnlyList<RuntimeModelMessage> models)
+        {
+            Pick = models.Any(model => string.Equals(model.Id, Model, StringComparison.Ordinal))
+                ? Model
+                : null;
+        }
+
+        public RuntimeRouteCandidateMessage ToMessage() => new(
+            RuntimeProfile.Trim(),
+            string.IsNullOrWhiteSpace(Model) ? null : Model.Trim());
+    }
+}

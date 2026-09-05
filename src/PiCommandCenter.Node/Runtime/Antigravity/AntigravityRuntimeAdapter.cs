@@ -20,8 +20,20 @@ namespace PiCommandCenter.Node.Runtime.Antigravity;
 /// </summary>
 public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
 {
-    internal static readonly string[] LaunchArguments =
-        ["--input-format", "stream-json", "--output-format", "stream-json"];
+    internal static IReadOnlyList<string> BuildLaunchArguments(string? model)
+    {
+        var arguments = new List<string>
+        {
+            "--input-format", "stream-json", "--output-format", "stream-json",
+        };
+        if (model is not null)
+        {
+            arguments.Add("--model");
+            arguments.Add(model);
+        }
+
+        return arguments;
+    }
 
     private static readonly HashSet<string> ReadOnlyProfiles = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -78,7 +90,7 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
 
         var process = _processFactory.Start(new AntigravityProcessStartInfo(
             _options.Executable,
-            LaunchArguments,
+            BuildLaunchArguments(request.Model),
             request.WorkingDirectory));
 
         var session = new AntigravitySession(

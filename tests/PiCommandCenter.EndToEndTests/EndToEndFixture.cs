@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using System.Net;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using PiCommandCenter.ControlPlane.Security;
@@ -67,7 +69,7 @@ public sealed class EndToEndFixture : IDisposable
             AllowAutoRedirect = true,
             HandleCookies = true,
         });
-        var (cookie, token) = IssueAntiforgery(factory);
+        var (cookie, token) = IssueAntiforgery(factory, asAdmin: true);
         if (!string.IsNullOrEmpty(cookie))
         {
             client.DefaultRequestHeaders.Add("Cookie", cookie);
@@ -90,17 +92,34 @@ public sealed class EndToEndFixture : IDisposable
         return client;
     }
 
-    public (string CookieHeader, string RequestToken) IssueAntiforgery() => IssueAntiforgery(Factory);
+    public (string CookieHeader, string RequestToken) IssueAntiforgery(bool asAdmin = false) =>
+        IssueAntiforgery(Factory, asAdmin);
 
-    public (string CookieHeader, string RequestToken) IssueAntiforgery(WebApplicationFactory<Program> factory)
+    public (string CookieHeader, string RequestToken) IssueAntiforgery(
+        WebApplicationFactory<Program> factory,
+        bool asAdmin = false)
     {
         using var scope = factory.Services.CreateScope();
         var antiforgery = scope.ServiceProvider.GetRequiredService<IAntiforgery>();
         var httpContext = new DefaultHttpContext { RequestServices = scope.ServiceProvider };
         httpContext.Request.Scheme = "http";
         httpContext.Request.Host = new HostString("localhost");
+        if (asAdmin)
+        {
+            httpContext.User = CreateAdminPrincipalAsync(scope.ServiceProvider).GetAwaiter().GetResult();
+        }
         var tokens = antiforgery.GetAndStoreTokens(httpContext);
         return (httpContext.Response.Headers.SetCookie.ToString(), tokens.RequestToken ?? string.Empty);
+    }
+
+    private static async Task<ClaimsPrincipal> CreateAdminPrincipalAsync(IServiceProvider services)
+    {
+        var userManager = services.GetRequiredService<UserManager<IdentityUser>>();
+        var admin = await userManager.FindByNameAsync(AuthTestMaterial.Username)
+            ?? throw new InvalidOperationException(
+                $"Admin account '{AuthTestMaterial.Username}' was not synchronized into the test host.");
+        return await services.GetRequiredService<SignInManager<IdentityUser>>()
+            .CreateUserPrincipalAsync(admin);
     }
 
     public string CreateGitRepository()

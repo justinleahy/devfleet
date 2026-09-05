@@ -23,6 +23,7 @@ public sealed class ChildAgent
         string agentName,
         string role,
         string runtimeProfile,
+        string? model,
         string runtimeKind,
         string parentSessionId,
         string requestId,
@@ -36,6 +37,7 @@ public sealed class ChildAgent
         Role = role;
         RuntimeKind = runtimeKind;
         RuntimeProfile = runtimeProfile;
+        Model = model;
         ParentSessionId = parentSessionId;
         RequestId = requestId;
         ProjectId = projectId;
@@ -51,6 +53,8 @@ public sealed class ChildAgent
     public string Role { get; }
 
     public string RuntimeProfile { get; }
+    public string? Model { get; }
+
 
     public string RuntimeKind { get; }
 

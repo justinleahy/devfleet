@@ -56,6 +56,17 @@ The Node process reads the file and authenticates the SignalR connection. The se
 
 Outside the `Testing` environment, missing `Admin:PasswordFile` or `NodeAuthentication:CredentialFile` (or unreadable/empty files) **fails process start** with an actionable message to run Control Plane `--setup` / `scripts/setup-local.sh`. No insecure built-in password. `--setup` is explicit; it is not invoked on ordinary `dotnet run`.
 
+### Data Protection keys (cookie persistence)
+
+| Key | Meaning |
+|---|---|
+| `DataProtection:KeysDirectory` | Directory for ASP.NET Core Data Protection keys. Stable application name is `PiCommandCenter.ControlPlane`. `~` is expanded via `PrivateFileAccess.ExpandPath`. |
+
+Purpose: keep authenticated browser sessions valid across Control Plane process restarts and container redeploys. Keys must live on a volume that survives image rebuilds (Docker: `/data/data-protection-keys` on the shared `/data` volume; local typed-options default: `~/.config/pi-command-center/data-protection-keys`).
+
+This is **not** the admin password hash (`Admin:PasswordFile`) and **not** the node token (`NodeAuthentication:CredentialFile`). Those authenticate operators and nodes. Data Protection keys only protect cookies, antiforgery tokens, and other ASP.NET Core payloads so a second host sharing the same database, auth material, and key directory can accept a cookie issued by the first.
+
+`DataProtection:KeysDirectory` is created with owner-only directory mode (`0700`) on Unix. File persistence alone does **not** encrypt keys at rest.
 
 ## Filesystem modes (Linux)
 
@@ -63,6 +74,7 @@ Outside the `Testing` environment, missing `Admin:PasswordFile` or `NodeAuthenti
 |---|---|
 | `$PI_CC_DATA` (`~/.local/share/pi-command-center`) | `0700` |
 | `Admin:PasswordFile`, `NodeAuthentication:CredentialFile`, node spool DB, Claude session settings | `0600` (directories `0700`) |
+| `DataProtection:KeysDirectory` | `0700` |
 | Claude reservation hook script | owner-only executable |
 
 `scripts/setup-local.sh` creates these. systemd units load `EnvironmentFile=` from that private directory.

@@ -13,6 +13,7 @@ using PiCommandCenter.Domain.Mail;
 using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Verification;
+using PiCommandCenter.ControlPlane.RuntimeRouting;
 
 namespace PiCommandCenter.ControlPlane.Hubs;
 
@@ -53,13 +54,14 @@ public sealed class NodeHub(
     IRequestClaimService claimService,
     IVerificationRunStore verificationRuns,
     ICompletionGateService completionGate,
+    NodeConnectionDirectory nodeConnections,
     TimeProvider timeProvider,
     ILogger<NodeHub> logger) : Hub
 {
     public async Task<NodeDto> Register(NodeRegistrationMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        return await registry.RegisterAsync(
+        var registered = await registry.RegisterAsync(
             new RegisterNodeCommand(
                 new NodeId(message.NodeId),
                 message.DisplayName,
@@ -67,7 +69,8 @@ public sealed class NodeHub(
                 message.CapabilitiesJson),
             timeProvider.GetUtcNow(),
             Context.ConnectionAborted).ConfigureAwait(false);
-
+        nodeConnections.Bind(message.NodeId, Context.ConnectionId);
+        return registered;
     }
 
     public async Task<NodeDto> Heartbeat(NodeHeartbeatMessage message)
@@ -550,6 +553,7 @@ public sealed class NodeHub(
                 "Node transport connection {ConnectionId} closed with error",
                 Context.ConnectionId);
         }
+        nodeConnections.Unbind(Context.ConnectionId);
 
         await base.OnDisconnectedAsync(exception).ConfigureAwait(false);
     }

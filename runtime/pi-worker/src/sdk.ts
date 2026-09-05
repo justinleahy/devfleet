@@ -114,6 +114,24 @@ export async function createRestrictedResourceLoader(
  * through the node (no unrestricted SDK builtins) plus orchestration or
  * reservation-enforced tools (SPEC.md sections 18.1, 25.2, 25.3).
  */
+async function resolveConfiguredModel(modelRuntime: ModelRuntime, value: string) {
+  const separator = value.indexOf("/");
+  if (separator <= 0 || separator === value.length - 1) {
+    throw new Error(`Pi model '${value}' must use provider/model format`);
+  }
+  const provider = value.slice(0, separator);
+  const id = value.slice(separator + 1);
+  const model = modelRuntime.getModel(provider, id);
+  if (model === undefined) {
+    throw new Error(`Pi model '${value}' is not present in the node catalog`);
+  }
+  const available = await modelRuntime.getAvailable(provider);
+  if (!available.some((candidate) => candidate.id === id)) {
+    throw new Error(`Pi model '${value}' has no configured authentication on this node`);
+  }
+  return model;
+}
+
 export function createSdkSessionFactory(nodeRequest: NodeRequest): PiSessionFactory {
   return {
     async create(config: RootSessionConfig): Promise<PiSessionLike> {
@@ -141,6 +159,9 @@ export function createSdkSessionFactory(nodeRequest: NodeRequest): PiSessionFact
         sessionManager: SessionManager.create(config.cwd),
         settingsManager,
       });
+      if (config.model !== undefined) {
+        await session.setModel(await resolveConfiguredModel(modelRuntime, config.model));
+      }
       return session as unknown as PiSessionLike;
     },
   };

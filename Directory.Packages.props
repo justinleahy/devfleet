@@ -19,6 +19,7 @@
 
     <!-- Realtime / node transport -->
     <PackageVersion Include="Microsoft.AspNetCore.SignalR.Client" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
 
     <!-- Background worker -->
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.10" />
@@ -33,6 +34,7 @@
     <!-- Transitive pins: secure servicing versions for vulnerable transitive deps -->
     <PackageVersion Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.13" />
     <PackageVersion Include="System.Security.Cryptography.Xml" Version="10.0.10" />
+    <PackageVersion Include="Microsoft.OpenApi" Version="2.7.5" />
   </ItemGroup>
 
 </Project>

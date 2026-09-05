@@ -447,4 +447,11 @@ describe("root tools remain untouched", () => {
       [...EXPECTED_ROOT_TOOLS],
     );
   });
+
+  it("keeps runtime and model selection out of agent spawn input", () => {
+    const tools = buildRootTools(async () => ({ ok: true }));
+    const spawn = tools.find((tool) => tool.name === "spawn_agent");
+    assert.ok(spawn);
+    assert.deepEqual(Object.keys(spawn.properties), ["agentName", "role", "prompt"]);
+  });
 });

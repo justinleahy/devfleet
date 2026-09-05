@@ -1,44 +1,53 @@
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.SignalR;
+using Microsoft.AspNetCore.Routing;
 using PiCommandCenter.Application.Mail;
+using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Application.Sessions;
-using PiCommandCenter.ControlPlane.Hubs;
-using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Mail;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Sessions;
 
-namespace PiCommandCenter.ControlPlane.Api;
+namespace PiCommandCenter.Api;
 
 /// <summary>
-/// Browser-facing mail and session endpoints (SPEC §16, §30.3, §30.4): request thread history,
-/// human guidance to root/specific/all targets, session-directed messages and cancellation, and
-/// message acknowledgement. Delivered messages are live-routed to a session's node group when
-/// that session is active on a connected node.
+/// Mail and session endpoints (SPEC §16, §30.3, §30.4): request thread history, human guidance
+/// to root/specific/all targets, session-directed messages and cancellation, and message
+/// acknowledgement. Delivered messages are live-routed through <see cref="INativeApiRealtimeGateway"/>
+/// to any node currently hosting a recipient session.
 /// </summary>
 internal static class MailEndpoints
 {
-    public static RouteGroupBuilder MapMailEndpoints(this IEndpointRouteBuilder routes)
+    /// <summary>
+    /// Maps the mail routes relative to <paramref name="group"/>; <paramref name="locationPrefix"/>
+    /// is the group's absolute prefix, used only to build <c>Location</c> headers.
+    /// </summary>
+    public static void MapMailEndpoints(this RouteGroupBuilder group, string locationPrefix)
     {
-        var sessions = routes.MapGroup("/api/sessions").WithTags("Sessions");
+        var sessions = group.MapGroup("/sessions").WithTags("Sessions");
         sessions.MapPost("/{sessionId}/message", SendSessionMessageAsync);
-        sessions.MapPost("/{sessionId}/cancel", CancelSessionAsync);
+        sessions.MapPost("/{sessionId}/cancel", (
+            string sessionId,
+            [FromBody] CancelSessionRequest? body,
+            IAgentSessionStore sessionStore,
+            INativeApiRealtimeGateway realtime,
+            CancellationToken cancellationToken) =>
+            CancelSessionAsync(sessionId, body, sessionStore, realtime, locationPrefix, cancellationToken));
 
-        var messages = routes.MapGroup("/api/messages").WithTags("Messages");
+        var messages = group.MapGroup("/messages").WithTags("Messages");
         messages.MapPost("/{messageId}/acknowledge", AcknowledgeAsync);
 
-        var requests = routes.MapGroup("/api/requests/{requestId:guid}").WithTags("Messages");
+        var requests = group.MapGroup("/requests/{requestId:guid}").WithTags("Messages");
         requests.MapGet("/messages", ListThreadAsync);
         requests.MapPost("/messages", SendAsync);
         requests.MapPost("/reply", ReplyAsync);
         requests.MapPost("/guidance", SendGuidanceAsync);
-
-        return requests;
     }
 
-    /// <summary>GET /api/requests/{requestId}/messages?projectId=…[&amp;threadId=…]</summary>
+    /// <summary>GET {prefix}/requests/{requestId}/messages?projectId=…[&amp;threadId=…]</summary>
     private static async Task<Results<Ok<MessageListResponse>, BadRequest<ProblemDetails>>> ListThreadAsync(
         Guid requestId,
         [FromQuery] Guid projectId,
@@ -58,11 +67,12 @@ internal static class MailEndpoints
         return TypedResults.Ok(new MessageListResponse(thread));
     }
 
-    /// <summary>POST /api/requests/{requestId}/messages</summary>
+    /// <summary>POST {prefix}/requests/{requestId}/messages</summary>
     private static async Task<Results<Ok<AgentMessageDto>, NotFound<ProblemDetails>, BadRequest<ProblemDetails>>> SendAsync(
         Guid requestId,
         [FromBody] SendAgentMessageRequest body,
         IMessageService messages,
+        INativeApiRealtimeGateway realtime,
         CancellationToken cancellationToken)
     {
         if (!body.TryValidate(out var error, out var importance))
@@ -82,6 +92,8 @@ internal static class MailEndpoints
                 body.BodyMarkdown,
                 importance,
                 body.AckRequired), cancellationToken);
+
+            await realtime.RouteMailAsync(delivered, cancellationToken);
             return TypedResults.Ok(delivered);
         }
         catch (MailSessionNotFoundException ex)
@@ -95,14 +107,14 @@ internal static class MailEndpoints
     }
 
     /// <summary>
-    /// POST /api/requests/{requestId}/reply — explicit reply operation (SPEC §16.3): recipients
+    /// POST {prefix}/requests/{requestId}/reply — explicit reply operation (SPEC §16.3): recipients
     /// are derived from the thread's participants, excluding the replying session.
     /// </summary>
     private static async Task<Results<Ok<AgentMessageDto>, NotFound<ProblemDetails>, BadRequest<ProblemDetails>>> ReplyAsync(
         Guid requestId,
         [FromBody] ReplyAgentMessageRequest body,
         IMessageService messages,
-        IHubContext<NodeHub> hub,
+        INativeApiRealtimeGateway realtime,
         CancellationToken cancellationToken)
     {
         if (body.ProjectId == Guid.Empty
@@ -112,10 +124,6 @@ internal static class MailEndpoints
             return TypedResults.BadRequest(Problem("Invalid request", "ProjectId, SenderSessionId, and BodyMarkdown are required."));
         }
 
-        var importance = string.Equals(body.Importance, "high", StringComparison.OrdinalIgnoreCase)
-            ? MessageImportance.High
-            : MessageImportance.Normal;
-
         try
         {
             var delivered = await messages.ReplyAsync(new ReplyAgentMessageCommand(
@@ -123,10 +131,10 @@ internal static class MailEndpoints
                 string.IsNullOrWhiteSpace(body.ThreadId) ? requestId.ToString() : body.ThreadId,
                 body.SenderSessionId,
                 body.BodyMarkdown,
-                importance,
+                ParseImportance(body.Importance),
                 body.AckRequired), cancellationToken);
 
-            await LiveRouteAsync(hub, delivered, cancellationToken);
+            await realtime.RouteMailAsync(delivered, cancellationToken);
             return TypedResults.Ok(delivered);
         }
         catch (MailThreadNotFoundException ex)
@@ -144,7 +152,7 @@ internal static class MailEndpoints
     }
 
     /// <summary>
-    /// POST /api/requests/{requestId}/guidance — high-priority human guidance (SPEC §16.5).
+    /// POST {prefix}/requests/{requestId}/guidance — high-priority human guidance (SPEC §16.5).
     /// Target "root" reaches the request's root session, "all" reaches every active session,
     /// and any other value must name one session exactly.
     /// </summary>
@@ -153,7 +161,7 @@ internal static class MailEndpoints
         [FromBody] SendGuidanceRequest body,
         IMessageService messages,
         IAgentSessionStore sessions,
-        IHubContext<NodeHub> hub,
+        INativeApiRealtimeGateway realtime,
         CancellationToken cancellationToken)
     {
         if (body.ProjectId == Guid.Empty || string.IsNullOrWhiteSpace(body.BodyMarkdown))
@@ -192,7 +200,7 @@ internal static class MailEndpoints
                 MessageImportance.High,
                 AckRequired: true), cancellationToken);
 
-            await LiveRouteAsync(hub, delivered, cancellationToken);
+            await realtime.RouteMailAsync(delivered, cancellationToken);
             return TypedResults.Ok(new GuidanceDeliveryResponse(delivered.Id, delivered.ThreadId, recipients));
         }
         catch (MailValidationException ex)
@@ -205,23 +213,18 @@ internal static class MailEndpoints
         }
     }
 
-    /// <summary>POST /api/sessions/{sessionId}/message — a direct message to one session from the human user.</summary>
+    /// <summary>POST {prefix}/sessions/{sessionId}/message — a direct message to one session from the human user.</summary>
     private static async Task<Results<Ok<AgentMessageDto>, NotFound<ProblemDetails>, BadRequest<ProblemDetails>>> SendSessionMessageAsync(
         string sessionId,
         [FromBody] SendSessionMessageRequest body,
         IMessageService messages,
-        IAgentSessionStore sessions,
-        IHubContext<NodeHub> hub,
+        INativeApiRealtimeGateway realtime,
         CancellationToken cancellationToken)
     {
         if (body.ProjectId == Guid.Empty || body.RequestId == Guid.Empty || string.IsNullOrWhiteSpace(body.BodyMarkdown))
         {
             return TypedResults.BadRequest(Problem("Invalid request", "ProjectId, RequestId, and BodyMarkdown are required."));
         }
-
-        var importance = string.Equals(body.Importance, "high", StringComparison.OrdinalIgnoreCase)
-            ? MessageImportance.High
-            : MessageImportance.Normal;
 
         try
         {
@@ -233,10 +236,10 @@ internal static class MailEndpoints
                 [sessionId],
                 string.IsNullOrWhiteSpace(body.Subject) ? $"[message] {body.RequestId}" : body.Subject,
                 body.BodyMarkdown,
-                importance,
+                ParseImportance(body.Importance),
                 body.AckRequired), cancellationToken);
 
-            await LiveRouteAsync(hub, delivered, cancellationToken);
+            await realtime.RouteMailAsync(delivered, cancellationToken);
             return TypedResults.Ok(delivered);
         }
         catch (MailSessionNotFoundException ex)
@@ -250,15 +253,16 @@ internal static class MailEndpoints
     }
 
     /// <summary>
-    /// POST /api/sessions/{sessionId}/cancel — dispatches a real cancellation command to the
+    /// POST {prefix}/sessions/{sessionId}/cancel — dispatches a real cancellation command to the
     /// node currently running the session (SPEC §23.2). The session's projection is updated
     /// only by the node's actual <c>session.cancelled</c> event, never synthesized here.
     /// </summary>
     private static async Task<Results<Accepted<SessionCancellationResponse>, NotFound<ProblemDetails>>> CancelSessionAsync(
         string sessionId,
-        [FromBody] CancelSessionRequest? body,
+        CancelSessionRequest? body,
         IAgentSessionStore sessions,
-        IHubContext<NodeHub> hub,
+        INativeApiRealtimeGateway realtime,
+        string locationPrefix,
         CancellationToken cancellationToken)
     {
         var existing = await sessions.GetAsync(sessionId, cancellationToken);
@@ -267,13 +271,17 @@ internal static class MailEndpoints
             return TypedResults.NotFound(Problem("Session not found", $"No session '{sessionId}' exists."));
         }
 
-        var reason = string.IsNullOrWhiteSpace(body?.Reason) ? "cancelled-by-user" : body!.Reason!;
-        await hub.Clients.Group(NodeHub.SessionGroup(sessionId))
-            .SendAsync("CancelSession", new CancelSessionCommand(sessionId, reason), cancellationToken);
-        return TypedResults.Accepted($"/api/sessions/{sessionId}", new SessionCancellationResponse(sessionId, reason));
+        var reason = body?.Reason;
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            reason = "cancelled-by-user";
+        }
+
+        await realtime.CancelSessionAsync(sessionId, reason, cancellationToken);
+        return TypedResults.Accepted($"{locationPrefix}/sessions/{sessionId}", new SessionCancellationResponse(sessionId, reason));
     }
 
-    /// <summary>POST /api/messages/{messageId}/acknowledge</summary>
+    /// <summary>POST {prefix}/messages/{messageId}/acknowledge</summary>
     private static async Task<Results<Ok<AgentMessageDto>, NotFound<ProblemDetails>, Conflict<ProblemDetails>, BadRequest<ProblemDetails>>> AcknowledgeAsync(
         string messageId,
         [FromBody] AcknowledgeMessageRequest body,
@@ -304,28 +312,24 @@ internal static class MailEndpoints
         }
     }
 
-    /// <summary>Live-routes a browser-originated message to recipients with an active node connection.</summary>
-    private static async Task LiveRouteAsync(IHubContext<NodeHub> hub, AgentMessageDto delivered, CancellationToken cancellationToken)
-    {
-        foreach (var recipient in delivered.Recipients)
-        {
-            await hub.Clients.Group(NodeHub.SessionGroup(recipient.SessionId))
-                .SendAsync("ReceiveMail", NodeHub.ToTransport(delivered, recipient), cancellationToken);
-        }
-    }
+    /// <summary>"high" (case-insensitive) is high importance; anything else, including null, is normal.</summary>
+    private static MessageImportance ParseImportance(string? importance) =>
+        string.Equals(importance, "high", StringComparison.OrdinalIgnoreCase)
+            ? MessageImportance.High
+            : MessageImportance.Normal;
 
-    private static ProblemDetails Problem(string title, string detail) => new()
-    {
-        Status = StatusCodes.Status400BadRequest,
-        Title = title,
-        Detail = detail,
-    };
+    /// <summary>
+    /// Mail problem bodies always carry <c>Status = 400</c> regardless of the HTTP status, matching
+    /// the envelope the legacy <c>/api</c> routes have always produced.
+    /// </summary>
+    private static ProblemDetails Problem(string title, string detail) =>
+        ApiProblems.Problem(StatusCodes.Status400BadRequest, title, detail);
 }
 
-/// <summary>Response envelope for <c>GET /api/requests/{requestId}/messages</c>.</summary>
+/// <summary>Response envelope for <c>GET {prefix}/requests/{requestId}/messages</c>.</summary>
 public sealed record MessageListResponse(IReadOnlyList<AgentMessageDto> Messages);
 
-/// <summary>Request body for <c>POST /api/requests/{requestId}/messages</c>.</summary>
+/// <summary>Request body for <c>POST {prefix}/requests/{requestId}/messages</c>.</summary>
 internal sealed record SendAgentMessageRequest(
     Guid ProjectId,
     string? SenderSessionId,
@@ -373,7 +377,16 @@ internal sealed record SendAgentMessageRequest(
     }
 }
 
-/// <summary>Request body for <c>POST /api/requests/{requestId}/guidance</c>.</summary>
+/// <summary>Request body for <c>POST {prefix}/requests/{requestId}/reply</c>.</summary>
+internal sealed record ReplyAgentMessageRequest(
+    Guid ProjectId,
+    string SenderSessionId,
+    string BodyMarkdown,
+    string? Importance,
+    bool AckRequired,
+    string? ThreadId);
+
+/// <summary>Request body for <c>POST {prefix}/requests/{requestId}/guidance</c>.</summary>
 internal sealed record SendGuidanceRequest(
     Guid ProjectId,
     string Target,
@@ -381,7 +394,10 @@ internal sealed record SendGuidanceRequest(
     string BodyMarkdown,
     string? ThreadId);
 
-/// <summary>Request body for <c>POST /api/sessions/{sessionId}/message</c>.</summary>
+/// <summary>Response for <c>POST {prefix}/requests/{requestId}/guidance</c>.</summary>
+public sealed record GuidanceDeliveryResponse(string MessageId, string ThreadId, IReadOnlyList<string> Recipients);
+
+/// <summary>Request body for <c>POST {prefix}/sessions/{sessionId}/message</c>.</summary>
 internal sealed record SendSessionMessageRequest(
     Guid ProjectId,
     Guid RequestId,
@@ -391,22 +407,11 @@ internal sealed record SendSessionMessageRequest(
     bool AckRequired,
     string? ThreadId);
 
-/// <summary>Request body for <c>POST /api/sessions/{sessionId}/cancel</c>.</summary>
+/// <summary>Request body for <c>POST {prefix}/sessions/{sessionId}/cancel</c>.</summary>
 public sealed record CancelSessionRequest(string? Reason);
 
-/// <summary>Response for <c>POST /api/sessions/{sessionId}/cancel</c>: the command was dispatched.</summary>
+/// <summary>Response for <c>POST {prefix}/sessions/{sessionId}/cancel</c>: the command was dispatched.</summary>
 public sealed record SessionCancellationResponse(string SessionId, string Reason);
 
-/// <summary>Request body for <c>POST /api/messages/{messageId}/acknowledge</c>.</summary>
+/// <summary>Request body for <c>POST {prefix}/messages/{messageId}/acknowledge</c>.</summary>
 internal sealed record AcknowledgeMessageRequest(string SessionId);
-
-/// <summary>Response for <c>POST /api/requests/{requestId}/guidance</c>.</summary>
-public sealed record GuidanceDeliveryResponse(string MessageId, string ThreadId, IReadOnlyList<string> Recipients);
-/// <summary>Request body for <c>POST /api/requests/{requestId}/reply</c>.</summary>
-internal sealed record ReplyAgentMessageRequest(
-    Guid ProjectId,
-    string SenderSessionId,
-    string BodyMarkdown,
-    string? Importance,
-    bool AckRequired,
-    string? ThreadId);

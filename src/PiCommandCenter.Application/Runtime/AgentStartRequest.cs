@@ -21,7 +21,8 @@ public sealed record AgentStartRequest
         AgentRuntimeMode mode,
         string runtimeProfile,
         AgentRuntimeAuthorizationContext? authorization = null,
-        bool createRequestCommit = false)
+        bool createRequestCommit = false,
+        string? model = null)
     {
         SessionId = Require(sessionId, nameof(sessionId));
         ProjectId = projectId;
@@ -35,6 +36,7 @@ public sealed record AgentStartRequest
         RuntimeProfile = Require(runtimeProfile, nameof(runtimeProfile));
         Authorization = authorization;
         CreateRequestCommit = createRequestCommit;
+        Model = Optional(model, nameof(model));
     }
 
     /// <summary>Orchestrator-assigned session id (the projection identity).</summary>
@@ -66,6 +68,9 @@ public sealed record AgentStartRequest
 
     /// <summary>Runtime profile per SPEC §15.1.</summary>
     public string RuntimeProfile { get; }
+    /// <summary>Optional provider-native model selected by the trusted node route.</summary>
+    public string? Model { get; }
+
 
     /// <summary>
     /// Successful reservation grant for reserved-write Claude. Null for read-only starts.

@@ -3,24 +3,23 @@ using Microsoft.AspNetCore.Mvc;
 using PiCommandCenter.Application.Projects;
 using PiCommandCenter.Application.Requests;
 using PiCommandCenter.Domain;
+using static PiCommandCenter.Api.ApiProblems;
 
-namespace PiCommandCenter.ControlPlane.Api;
+namespace PiCommandCenter.Api;
 
 /// <summary>
-/// Milestone 1 request endpoints: enqueue and list a project's persisted work requests,
+/// Request endpoints: enqueue and list a project's persisted work requests,
 /// ordered by priority descending then creation time ascending by the application layer.
 /// </summary>
 internal static class RequestsEndpoints
 {
-    public static RouteGroupBuilder MapRequestsEndpoints(this IEndpointRouteBuilder routes)
+    /// <param name="group">Route group the endpoints are mapped under (<c>/api</c> or <c>/api/v1</c>).</param>
+    /// <param name="locationPrefix">Prefix for <c>Location</c> headers; equals the group prefix.</param>
+    public static void MapRequestsEndpoints(this RouteGroupBuilder group, string locationPrefix)
     {
-        var group = routes.MapGroup("/api/projects/{projectId:guid}/requests")
-            .WithTags("Requests");
-
-        group.MapGet("/", ListAsync);
-        group.MapPost("/", EnqueueAsync);
-
-        return group;
+        group.MapGet("/projects/{projectId:guid}/requests", ListAsync).WithTags("Requests");
+        group.MapPost("/projects/{projectId:guid}/requests", (Guid projectId, [FromBody] QueueWorkRequestCommand command, IRequestQueue queue, CancellationToken cancellationToken) =>
+            EnqueueAsync(projectId, command, queue, locationPrefix, cancellationToken)).WithTags("Requests");
     }
 
     private static async Task<Results<Ok<WorkRequestListResponse>, NotFound<ProblemDetails>>> ListAsync(
@@ -35,30 +34,25 @@ internal static class RequestsEndpoints
         }
         catch (ProjectNotFoundException)
         {
-            return TypedResults.NotFound(Problem(
-                StatusCodes.Status404NotFound,
-                "Project not found",
-                $"No project with id '{projectId}' is registered."));
+            return TypedResults.NotFound(ProjectNotFound(projectId));
         }
     }
 
     private static async Task<Results<Created<WorkRequestDto>, NotFound<ProblemDetails>, BadRequest<ProblemDetails>>> EnqueueAsync(
         Guid projectId,
-        [FromBody] QueueWorkRequestCommand command,
+        QueueWorkRequestCommand command,
         IRequestQueue queue,
+        string locationPrefix,
         CancellationToken cancellationToken)
     {
         try
         {
             var request = await queue.EnqueueAsync(new ProjectId(projectId), command, cancellationToken);
-            return TypedResults.Created($"/api/projects/{projectId}/requests/{request.Id}", request);
+            return TypedResults.Created($"{locationPrefix}/projects/{projectId}/requests/{request.Id}", request);
         }
         catch (ProjectNotFoundException)
         {
-            return TypedResults.NotFound(Problem(
-                StatusCodes.Status404NotFound,
-                "Project not found",
-                $"No project with id '{projectId}' is registered."));
+            return TypedResults.NotFound(ProjectNotFound(projectId));
         }
         catch (ArgumentException ex)
         {
@@ -68,14 +62,7 @@ internal static class RequestsEndpoints
                 ex.Message));
         }
     }
-
-    private static ProblemDetails Problem(int status, string title, string detail) => new()
-    {
-        Status = status,
-        Title = title,
-        Detail = detail,
-    };
 }
 
-/// <summary>Response envelope for <c>GET /api/projects/{projectId}/requests</c>.</summary>
+/// <summary>Response envelope for <c>GET {prefix}/projects/{projectId}/requests</c>.</summary>
 internal sealed record WorkRequestListResponse(IReadOnlyList<WorkRequestDto> Requests);

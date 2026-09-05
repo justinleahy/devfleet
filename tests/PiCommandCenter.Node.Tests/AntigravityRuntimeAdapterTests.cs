@@ -114,14 +114,18 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         var cwd = Directory.CreateDirectory(Path.Combine(_root, "ws")).FullName;
         var dump = Path.Combine(cwd, "launch.json");
         var adapter = CreateAdapter(cwd, dump);
-        var handle = await adapter.StartAsync(MakeRequest(cwd, "google-personal"), CancellationToken.None);
+        var handle = await adapter.StartAsync(
+            MakeRequest(cwd, "google-personal", model: "agy-role-model"),
+            CancellationToken.None);
         Assert.Equal("agy-conv-1", handle.ProviderSessionId);
         Assert.Equal(AgentRuntimeKinds.Antigravity, handle.RuntimeKind);
         Assert.True(adapter.GetProcessId(handle.SessionId) is > 0);
 
         using var dumpJson = JsonDocument.Parse(await File.ReadAllTextAsync(dump));
         var argv = dumpJson.RootElement.GetProperty("argv").EnumerateArray().Select(e => e.GetString()!).ToArray();
-        Assert.Equal(["--input-format", "stream-json", "--output-format", "stream-json"], argv);
+        Assert.Equal(
+            ["--input-format", "stream-json", "--output-format", "stream-json", "--model", "agy-role-model"],
+            argv);
         Assert.Equal(cwd, dumpJson.RootElement.GetProperty("cwd").GetString());
 
         await adapter.CancelAsync(handle.SessionId, CancellationToken.None);
@@ -316,7 +320,11 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
             NullLogger<AntigravityRuntimeAdapter>.Instance);
     }
 
-    private static AgentStartRequest MakeRequest(string cwd, string profile, string? sessionId = null)
+    private static AgentStartRequest MakeRequest(
+        string cwd,
+        string profile,
+        string? sessionId = null,
+        string? model = null)
         => new(
             sessionId ?? "agy-session-1",
             new ProjectId(Guid.NewGuid()),
@@ -327,7 +335,8 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
             cwd,
             "Review the change",
             AgentRuntimeMode.Child,
-            profile);
+            profile,
+            model: model);
 
     private static async Task<List<Domain.Sessions.NormalizedAgentEvent>> CollectUntilAsync(
         AntigravityRuntimeAdapter adapter,

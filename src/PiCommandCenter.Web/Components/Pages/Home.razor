@@ -26,11 +26,12 @@
 <FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
 
     <header class="page-head">
-        <FluentStack Orientation="Orientation.Horizontal"
+        <FluentStack Class="page-head-row"
+                     Orientation="Orientation.Horizontal"
                      VerticalAlignment="VerticalAlignment.Bottom"
                      HorizontalGap="16"
                      Width="100%">
-            <FluentStack Orientation="Orientation.Vertical" VerticalGap="4" Width="auto">
+            <FluentStack Class="page-head-copy" Orientation="Orientation.Vertical" VerticalGap="4" Width="auto">
                 <h1>Fleet dashboard</h1>
                 <p class="page-lead">
                     Registered projects and their queued work, read straight from the control-plane
@@ -38,7 +39,7 @@
                 </p>
             </FluentStack>
             <FluentSpacer />
-            <FluentButton Appearance="Appearance.Accent" OnClick="OpenRegistration">
+            <FluentButton Class="page-head-action" Appearance="Appearance.Accent" OnClick="OpenRegistration">
                 Register project
             </FluentButton>
         </FluentStack>

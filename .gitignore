@@ -22,3 +22,6 @@ node_modules/
 # Machine-local Docker Compose settings
 .env
 .DS_Store
+
+# Ideas
+TODO.md

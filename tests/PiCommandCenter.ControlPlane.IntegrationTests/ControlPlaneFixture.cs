@@ -1,10 +1,14 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.Http.Connections.Client;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.AspNetCore.TestHost;
@@ -22,6 +26,9 @@ namespace PiCommandCenter.ControlPlane.IntegrationTests;
 /// </summary>
 public sealed class ControlPlaneFixture : IDisposable
 {
+    public const string NativeApiLoginPath = "/api/v1/auth/login";
+    public const string NativeApiRefreshPath = "/api/v1/auth/refresh";
+
     private readonly string _tempRoot;
 
     public ControlPlaneFixture()
@@ -36,13 +43,10 @@ public sealed class ControlPlaneFixture : IDisposable
         }
 
         (PasswordFile, CredentialFile) = AuthTestMaterial.WriteTo(Path.Combine(_tempRoot, "auth"));
+        DataProtectionKeysDirectory = Path.Combine(_tempRoot, "data-protection-keys");
+        PrivateFileAccess.CreatePrivateDirectory(DataProtectionKeysDirectory);
 
-        Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
-        {
-            builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={SqlitePath}");
-            builder.UseSetting("Projects:ApprovedRoots:0", ApprovedRoot);
-            builder.UseTestAuthFiles(PasswordFile, CredentialFile);
-        });
+        Factory = CreateIndependentHost();
 
         using var scope = Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
@@ -58,10 +62,24 @@ public sealed class ControlPlaneFixture : IDisposable
     public string PasswordFile { get; }
 
     public string CredentialFile { get; }
+    public string DataProtectionKeysDirectory { get; }
 
     public string NodeTokenHex => AuthTestMaterial.NodeTokenHex;
 
     public HttpClient CreateClient() => CreateAuthenticatedClient();
+
+    public WebApplicationFactory<Program> CreateIndependentHost()
+    {
+        return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={SqlitePath}");
+            builder.UseSetting("Projects:ApprovedRoots:0", ApprovedRoot);
+            builder.UseTestAuthFiles(
+                PasswordFile,
+                CredentialFile,
+                dataProtectionKeysDirectory: DataProtectionKeysDirectory);
+        });
+    }
 
     public HttpClient CreateAnonymousClient() => Factory.CreateClient(new WebApplicationFactoryClientOptions
     {
@@ -79,16 +97,17 @@ public sealed class ControlPlaneFixture : IDisposable
             AllowAutoRedirect = false,
             HandleCookies = true,
         });
-        AttachAntiforgery(client, factory);
+        AttachAntiforgery(client, factory, asAdmin: true);
         Login(client);
         return client;
     }
 
-    public void AttachAntiforgery(HttpClient client) => AttachAntiforgery(client, Factory);
+    public void AttachAntiforgery(HttpClient client, bool asAdmin = false) => AttachAntiforgery(client, Factory, asAdmin);
 
-    public void AttachAntiforgery(HttpClient client, WebApplicationFactory<Program> factory)
+    public void AttachAntiforgery(HttpClient client, WebApplicationFactory<Program> factory, bool asAdmin = false)
     {
-        var (cookie, token) = IssueAntiforgery(factory);
+        ArgumentNullException.ThrowIfNull(client);
+        var (cookie, token) = IssueAntiforgery(factory, asAdmin);
         if (!string.IsNullOrEmpty(cookie))
         {
             client.DefaultRequestHeaders.Remove("Cookie");
@@ -97,6 +116,62 @@ public sealed class ControlPlaneFixture : IDisposable
 
         client.DefaultRequestHeaders.Remove("RequestVerificationToken");
         client.DefaultRequestHeaders.Add("RequestVerificationToken", token);
+    }
+
+    /// <summary>
+    /// Creates a client that never stores cookies or follows redirects, so every request exercises
+    /// the native <c>/api/v1</c> bearer contract exactly as an external client would.
+    /// </summary>
+    public HttpClient CreateNativeClient() => Factory.CreateClient(new WebApplicationFactoryClientOptions
+    {
+        AllowAutoRedirect = false,
+        HandleCookies = false,
+    });
+
+    /// <summary>Creates a cookie-free client whose default headers carry a freshly issued bearer token.</summary>
+    public async Task<HttpClient> CreateNativeAuthenticatedClientAsync()
+    {
+        var client = CreateNativeClient();
+        var tokens = await NativeLoginAsync(client);
+        UseBearer(client, tokens);
+        return client;
+    }
+
+    /// <summary>Posts JSON credentials to <c>/api/v1/auth/login</c> and returns the opaque token pair.</summary>
+    public static async Task<NativeTokenResponse> NativeLoginAsync(HttpClient client)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        using var response = await client.PostAsJsonAsync(
+            NativeApiLoginPath,
+            new { username = AuthTestMaterial.Username, password = AuthTestMaterial.Password });
+        return await ReadNativeTokensAsync(response);
+    }
+
+    /// <summary>Posts a refresh token to <c>/api/v1/auth/refresh</c> and returns the reissued token pair.</summary>
+    public static async Task<NativeTokenResponse> NativeRefreshAsync(HttpClient client, string refreshToken)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        using var response = await client.PostAsJsonAsync(NativeApiRefreshPath, new { refreshToken });
+        return await ReadNativeTokensAsync(response);
+    }
+
+    public static void UseBearer(HttpClient client, NativeTokenResponse tokens)
+    {
+        ArgumentNullException.ThrowIfNull(client);
+        ArgumentNullException.ThrowIfNull(tokens);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(tokens.TokenType, tokens.AccessToken);
+    }
+
+    private static async Task<NativeTokenResponse> ReadNativeTokensAsync(HttpResponseMessage response)
+    {
+        if (response.StatusCode != HttpStatusCode.OK)
+        {
+            throw new InvalidOperationException(
+                $"Native token request failed with {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
+        }
+
+        return await response.Content.ReadFromJsonAsync<NativeTokenResponse>()
+            ?? throw new InvalidOperationException("Native token response body was empty.");
     }
 
     public void ConfigureNodeHub(HttpConnectionOptions options)
@@ -124,18 +199,42 @@ public sealed class ControlPlaneFixture : IDisposable
         return path;
     }
 
-    public (string CookieHeader, string RequestToken) IssueAntiforgery() => IssueAntiforgery(Factory);
+    public (string CookieHeader, string RequestToken) IssueAntiforgery(bool asAdmin = false) => IssueAntiforgery(Factory, asAdmin);
 
-    public (string CookieHeader, string RequestToken) IssueAntiforgery(WebApplicationFactory<Program> factory)
+    /// <summary>
+    /// Issues an antiforgery cookie/token pair from <paramref name="factory"/>. Antiforgery binds the
+    /// request token to the caller's claim UID, so tokens for a cookie-authenticated client must be
+    /// generated as the synchronized admin (<paramref name="asAdmin"/>) and anonymous ones as nobody.
+    /// </summary>
+    public (string CookieHeader, string RequestToken) IssueAntiforgery(WebApplicationFactory<Program> factory, bool asAdmin = false)
     {
+        ArgumentNullException.ThrowIfNull(factory);
         using var scope = factory.Services.CreateScope();
         var antiforgery = scope.ServiceProvider.GetRequiredService<IAntiforgery>();
         var httpContext = new DefaultHttpContext { RequestServices = scope.ServiceProvider };
         httpContext.Request.Scheme = "http";
         httpContext.Request.Host = new HostString("localhost");
+        if (asAdmin)
+        {
+            httpContext.User = CreateAdminPrincipalAsync(scope.ServiceProvider).GetAwaiter().GetResult();
+        }
+
         var tokens = antiforgery.GetAndStoreTokens(httpContext);
         var setCookie = httpContext.Response.Headers.SetCookie.ToString();
         return (setCookie, tokens.RequestToken ?? string.Empty);
+    }
+
+    /// <summary>
+    /// Builds the same Identity principal the cookie login stores, from the admin account the host
+    /// synchronized at startup, so its claim UID matches the one antiforgery reads off the auth cookie.
+    /// </summary>
+    private static async Task<ClaimsPrincipal> CreateAdminPrincipalAsync(IServiceProvider services)
+    {
+        var userManager = services.GetRequiredService<UserManager<IdentityUser>>();
+        var admin = await userManager.FindByNameAsync(AuthTestMaterial.Username)
+            ?? throw new InvalidOperationException(
+                $"Admin account '{AuthTestMaterial.Username}' was not synchronized into the test host.");
+        return await services.GetRequiredService<SignInManager<IdentityUser>>().CreateUserPrincipalAsync(admin);
     }
 
     private void Login(HttpClient client)
@@ -188,3 +287,6 @@ public sealed class ControlPlaneFixture : IDisposable
         }
     }
 }
+
+/// <summary>Opaque bearer token pair returned by the native <c>/api/v1/auth</c> endpoints.</summary>
+public sealed record NativeTokenResponse(string TokenType, string AccessToken, long ExpiresIn, string RefreshToken);

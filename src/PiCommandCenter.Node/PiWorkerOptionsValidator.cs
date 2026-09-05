@@ -59,6 +59,45 @@ public sealed class PiWorkerOptionsValidator : IValidateOptions<PiWorkerOptions>
             failures.Add($"'{nameof(options.AllowedRuntimeProfiles)}' must contain at least one profile.");
         }
 
+        foreach (var role in options.AllowedChildRoles)
+        {
+            if (!options.RoleRoutes.TryGetValue(role, out var candidates) || candidates.Length == 0)
+            {
+                failures.Add($"'Pi:RoleRoutes:{role}' must contain at least one candidate.");
+                continue;
+            }
+
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var candidate in candidates)
+            {
+                if (candidate is null || string.IsNullOrWhiteSpace(candidate.RuntimeProfile))
+                {
+                    failures.Add($"Every candidate in 'Pi:RoleRoutes:{role}' must name a runtime profile.");
+                    continue;
+                }
+
+                if (!options.AllowedRuntimeProfiles.Contains(candidate.RuntimeProfile, StringComparer.Ordinal))
+                {
+                    failures.Add(
+                        $"Runtime profile '{candidate.RuntimeProfile}' in 'Pi:RoleRoutes:{role}' "
+                        + $"is not present in '{nameof(options.AllowedRuntimeProfiles)}'.");
+                }
+
+                if (candidate.Model is not null && string.IsNullOrWhiteSpace(candidate.Model))
+                {
+                    failures.Add($"Models in 'Pi:RoleRoutes:{role}' must be null or non-empty.");
+                }
+
+                var key = candidate.RuntimeProfile + "\0" + candidate.Model;
+                if (!seen.Add(key))
+                {
+                    failures.Add(
+                        $"'Pi:RoleRoutes:{role}' contains duplicate runtime/model candidate "
+                        + $"'{candidate.RuntimeProfile}/{candidate.Model ?? "<default>"}'.");
+                }
+            }
+        }
+
         if (options.RequestTimeoutSeconds <= 0)
         {
             failures.Add($"'{nameof(options.RequestTimeoutSeconds)}' must be positive.");

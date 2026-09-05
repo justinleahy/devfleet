@@ -63,7 +63,8 @@ public class RuntimeContractTests
             workingDirectory: "/repo",
             prompt: "Ship it",
             mode: AgentRuntimeMode.Root,
-            runtimeProfile: "root-readonly");
+            runtimeProfile: "root-readonly",
+            model: " provider/model ");
 
         Assert.Equal("session-1", request.SessionId);
         Assert.Equal(projectId, request.ProjectId);
@@ -71,6 +72,7 @@ public class RuntimeContractTests
         Assert.Null(request.ParentSessionId);
         Assert.Equal(AgentRuntimeMode.Root, request.Mode);
         Assert.Equal("root-readonly", request.RuntimeProfile);
+        Assert.Equal("provider/model", request.Model);
         Assert.Null(request.Authorization);
     }
 
@@ -87,6 +89,10 @@ public class RuntimeContractTests
         Assert.Throws<ArgumentException>(() => new AgentStartRequest(
             "s", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), "",
             "root", "root", "/repo", "prompt", AgentRuntimeMode.Root, "default"));
+        Assert.Throws<ArgumentException>(() => new AgentStartRequest(
+            "s", new ProjectId(Guid.NewGuid()), WorkRequestId.New(), null,
+            "root", "root", "/repo", "prompt", AgentRuntimeMode.Root, "default",
+            model: " "));
     }
 
     [Fact]

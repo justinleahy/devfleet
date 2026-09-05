@@ -11,13 +11,13 @@
                          VerticalAlignment="VerticalAlignment.Center"
                          HorizontalGap="16"
                          Width="100%">
-                <FluentStack Orientation="Orientation.Vertical" VerticalGap="0" Width="auto">
+                <FluentStack Class="brand-block" Orientation="Orientation.Vertical" VerticalGap="0" Width="auto">
                     <span class="brand">DevFleet</span>
                     <span class="brand-sub">Local development fleet control plane</span>
                 </FluentStack>
                 <FluentSpacer />
-                <FluentBadge Appearance="Appearance.Neutral">Interactive Server</FluentBadge>
-                <FluentBadge Appearance="Appearance.Neutral">
+                <FluentBadge Class="header-badge" Appearance="Appearance.Neutral">Interactive Server</FluentBadge>
+                <FluentBadge Class="header-badge" Appearance="Appearance.Neutral">
                     Protocol v@(PiCommandCenter.Contracts.ProtocolVersion.Current)
                 </FluentBadge>
                 <AuthorizeView>
@@ -37,6 +37,8 @@
                 <FluentNavMenu Width="240" Title="Command center sections">
                     <FluentNavLink Href="/" Match="NavLinkMatch.All">Fleet</FluentNavLink>
                     <FluentNavLink Href="/attention" Match="NavLinkMatch.Prefix">Attention</FluentNavLink>
+                    <FluentNavLink Href="/routing" Match="NavLinkMatch.Prefix">Routing</FluentNavLink>
+                    <FluentNavLink Href="/usage" Match="NavLinkMatch.Prefix">Usage</FluentNavLink>
                 </FluentNavMenu>
             </nav>
 

@@ -9,6 +9,7 @@ using PiCommandCenter.Node.Child;
 using PiCommandCenter.Node.Runtime;
 using PiCommandCenter.Node.Runtime.Antigravity;
 using PiCommandCenter.Node.Runtime.Claude;
+using PiCommandCenter.Node.RuntimeRouting;
 
 using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Verification;
@@ -55,6 +56,7 @@ public class PiChildSessionSupervisorTests : IDisposable
             AgentDataDirectory = Path.Combine(_root, "agent-data"),
             RequestTimeoutSeconds = 1,
             MaxChildAgentsPerRequest = 2,
+            RoleRoutes = TestRoleRoutes(),
         };
         _supervisor = CreateSupervisor(worker);
     }
@@ -70,6 +72,16 @@ public class PiChildSessionSupervisorTests : IDisposable
         {
         }
     }
+
+    private static Dictionary<string, AgentRoleRouteCandidate[]> TestRoleRoutes()
+        => new(StringComparer.Ordinal)
+        {
+            ["root"] = [new() { RuntimeProfile = AgentRuntimeProfiles.LocalPi }],
+            ["architect"] = [new() { RuntimeProfile = AgentRuntimeProfiles.LocalPi }],
+            ["implementer"] = [new() { RuntimeProfile = AgentRuntimeProfiles.LocalPi }],
+            ["reviewer"] = [new() { RuntimeProfile = AgentRuntimeProfiles.LocalPi }],
+            ["verifier"] = [new() { RuntimeProfile = AgentRuntimeProfiles.LocalPi }],
+        };
 
     private PiOrchestrationContext RootContext(string requestId)
         => new(
@@ -139,7 +151,6 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "implementer-1",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "Do the work",
                 requestedWriteScopes = new[] { new { kind = "directory", path = "src/Feature" } },
             }),
@@ -187,31 +198,27 @@ public class PiChildSessionSupervisorTests : IDisposable
         var childContext = context with { SessionId = "pi-child-x", ParentSessionId = context.SessionId };
 
         var response = Invoke(_supervisor, childContext, "agent.spawn",
-            new { agentName = "nested", role = "implementer", runtimeProfile = "local-pi", prompt = "p" });
+            new { agentName = "nested", role = "implementer", prompt = "p" });
 
         Assert.False(response.Ok);
         Assert.Equal("spawn_not_from_root", response.ErrorCode);
     }
 
     [Fact]
-    public async Task Spawn_rejects_roles_and_profiles_outside_the_allowlist()
+    public async Task Unknown_roles_are_rejected_and_agent_runtime_fields_are_ignored()
     {
         var context = RootContext(Guid.NewGuid().ToString("D"));
 
         var badRole = Invoke(_supervisor, context, "agent.spawn",
-            new { agentName = "a", role = "shadow-admin", runtimeProfile = "local-pi", prompt = "p" });
-        Assert.Equal("role_not_allowed", Result(badRole.Result)["error"] is Dictionary<string, object?> e1
-            ? e1["code"]
+            new { agentName = "a", role = "shadow-admin", prompt = "p" });
+        Assert.Equal("role_not_allowed", Result(badRole.Result)["error"] is Dictionary<string, object?> error
+            ? error["code"]
             : null);
 
-        var badProfile = Invoke(_supervisor, context, "agent.spawn",
+        var routed = Invoke(_supervisor, context, "agent.spawn",
             new { agentName = "b", role = "implementer", runtimeProfile = "unrestricted", prompt = "p" });
-        Assert.Equal("runtime_profile_not_allowed", Result(badProfile.Result)["error"] is Dictionary<string, object?> e2
-            ? e2["code"]
-            : null);
-
-        Assert.Empty(_reservations.Acquires);
-        Assert.Empty(_parentEvents);
+        Assert.Equal(AgentRuntimeProfiles.LocalPi, Result(routed.Result)["runtimeProfile"]);
+        await _supervisor.CancelSessionAsync(ExpectChildSessionId(routed), "test cleanup");
     }
 
     [Fact]
@@ -226,7 +233,6 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "child-a",
                 role = "reviewer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -239,7 +245,6 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "child-a",
                 role = "reviewer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -255,7 +260,6 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "child-b",
                 role = "reviewer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -268,7 +272,6 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "child-c",
                 role = "reviewer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -287,7 +290,6 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "worker",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -338,7 +340,6 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "doomed",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -396,34 +397,123 @@ public class PiChildSessionSupervisorTests : IDisposable
     }
 
     [Fact]
-    public void Arbitrary_runtime_profiles_are_rejected()
+    public async Task Ordered_route_falls_back_to_the_next_candidate()
     {
+        var options = new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-fallback"),
+            RoleRoutes = new(StringComparer.Ordinal)
+            {
+                ["implementer"] =
+                [
+                    new() { RuntimeProfile = AgentRuntimeProfiles.ClaudeReservedWrite, Model = "claude-primary" },
+                    new() { RuntimeProfile = AgentRuntimeProfiles.ClaudeReservedWrite, Model = "claude-secondary" },
+                    new() { RuntimeProfile = AgentRuntimeProfiles.LocalPi, Model = "pi-final" },
+                ],
+            },
+        };
+        await using var supervisor = CreateSupervisor(options);
         var context = RootContext(Guid.NewGuid().ToString("D"));
-        var response = Invoke(_supervisor, context, "agent.spawn",
-            new { agentName = "x", role = "implementer", runtimeProfile = "agent-picked-bin", prompt = "p" });
-        Assert.Equal("runtime_profile_not_allowed", Result(response.Result)["error"] is Dictionary<string, object?> e
-            ? e["code"]
-            : null);
-    }
 
-    [Fact]
-    public async Task Claude_reserved_write_without_a_lease_is_refused()
-    {
-        var context = RootContext(Guid.NewGuid().ToString("D"));
-        var spawn = await _supervisor.HandleAsync(
+        var spawn = await supervisor.HandleAsync(
             context,
             "agent.spawn",
             JsonSerializer.SerializeToElement(new
             {
                 agentName = "writer",
                 role = "implementer",
-                runtimeProfile = AgentRuntimeProfiles.ClaudeReservedWrite,
                 prompt = "p",
             }),
             CancellationToken.None);
-        Assert.Equal("reservation_required", Result(spawn.Result)["error"] is Dictionary<string, object?> e
-            ? e["code"]
-            : spawn.ErrorCode);
+
+        Assert.Equal(AgentRuntimeProfiles.LocalPi, Result(spawn.Result)["runtimeProfile"]);
+        Assert.Equal("pi-final", Result(spawn.Result)["model"]);
+        var status = Invoke(supervisor, context, "agent.status", new { agentName = "writer" });
+        var statusView = Assert.Single(Assert.IsType<Dictionary<string, object?>[]>(status.Result));
+        Assert.Equal("pi-final", statusView["model"]);
+        var attemptedModels = _parentEvents
+            .Where(entry => entry.Type == "child.requested")
+            .Select(entry => entry.Payload["model"] as string)
+            .ToArray();
+        Assert.Collection(
+            attemptedModels,
+            model => Assert.Equal("claude-primary", model),
+            model => Assert.Equal("claude-secondary", model),
+            model => Assert.Equal("pi-final", model));
+        await supervisor.CancelSessionAsync(ExpectChildSessionId(spawn), "test cleanup");
+    }
+
+    [Fact]
+    public async Task Saved_route_is_used_by_the_next_child_spawn_without_restart()
+    {
+        NodeRuntimeRoutingStore? routing = null;
+        var options = new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-live-routing"),
+        };
+        await using var supervisor = CreateSupervisor(options, routingCreated: store => routing = store);
+        Assert.NotNull(routing);
+        var routes = routing.Current.AllowedRoles.Select(role => new RuntimeRoleRouteMessage(
+            role,
+            [new RuntimeRouteCandidateMessage(
+                AgentRuntimeProfiles.LocalPi,
+                role == "reviewer" ? "local/reviewer-live" : null)])).ToArray();
+        await routing.UpdateAsync(new UpdateNodeRuntimeConfigurationMessage(routes));
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+
+        var spawn = await supervisor.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "live-reviewer",
+                role = "reviewer",
+                prompt = "p",
+            }),
+            CancellationToken.None);
+
+        Assert.Equal(AgentRuntimeProfiles.LocalPi, Result(spawn.Result)["runtimeProfile"]);
+        Assert.Equal("local/reviewer-live", Result(spawn.Result)["model"]);
+        await supervisor.CancelSessionAsync(ExpectChildSessionId(spawn), "test cleanup");
+    }
+
+    [Fact]
+    public async Task Exhausted_ordered_route_reports_every_candidate()
+    {
+        var options = new PiWorkerOptions
+        {
+            NodeExecutable = "node",
+            WorkerPath = Path.Combine(AppContext.BaseDirectory, "TestData", "fake-pi-worker.mjs"),
+            AgentDataDirectory = Path.Combine(_root, "agent-data-exhausted"),
+            RoleRoutes = new(StringComparer.Ordinal)
+            {
+                ["implementer"] =
+                [
+                    new() { RuntimeProfile = AgentRuntimeProfiles.ClaudeReservedWrite, Model = "only-choice" },
+                ],
+            },
+        };
+        await using var supervisor = CreateSupervisor(options);
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+
+        var spawn = await supervisor.HandleAsync(
+            context,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "writer",
+                role = "implementer",
+                prompt = "p",
+            }),
+            CancellationToken.None);
+
+        var error = Assert.IsType<Dictionary<string, object?>>(Result(spawn.Result)["error"]);
+        Assert.Equal("runtime_route_exhausted", error["code"]);
+        Assert.Contains("claude-reserved-write/only-choice", Assert.IsType<string>(error["message"]));
     }
 
     [Fact]
@@ -550,7 +640,6 @@ public class PiChildSessionSupervisorTests : IDisposable
             {
                 agentName = "doomed2",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
                 requestedWriteScopes = new[] { new { kind = "directory", path = "src" } },
             }),
@@ -563,8 +652,10 @@ public class PiChildSessionSupervisorTests : IDisposable
             CancellationToken.None);
         Assert.NotEmpty(_crash.Owners);
     }
-
-    private PiChildSessionSupervisor CreateSupervisor(PiWorkerOptions worker, FakeMailGateway? mail = null)
+    private PiChildSessionSupervisor CreateSupervisor(
+        PiWorkerOptions worker,
+        FakeMailGateway? mail = null,
+        Action<NodeRuntimeRoutingStore>? routingCreated = null)
     {
         var inner = new NoopInnerHandler();
         var node = Options.Create(new NodeOptions { Id = Guid.NewGuid() });
@@ -590,8 +681,11 @@ public class PiChildSessionSupervisorTests : IDisposable
             TimeProvider.System,
             NullLogger<AntigravityRuntimeAdapter>.Instance);
         var registry = new AgentRuntimeRegistry(pi, claude, antigravity);
+        var routing = new NodeRuntimeRoutingStore(node, Options.Create(worker));
+        routingCreated?.Invoke(routing);
         return new PiChildSessionSupervisor(
             Options.Create(worker),
+            routing,
             inner,
             _reservations,
             mail ?? new FakeMailGateway(),
@@ -627,7 +721,6 @@ var completing = CreateSupervisor(new PiWorkerOptions
             {
                 agentName = "finisher",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -666,7 +759,6 @@ var completing = CreateSupervisor(new PiWorkerOptions
             {
                 agentName = "needs-login",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -689,7 +781,6 @@ var completing = CreateSupervisor(new PiWorkerOptions
             {
                 agentName = "documented",
                 role = "reviewer",
-                runtimeProfile = PiCommandCenter.Application.Runtime.AgentRuntimeProfiles.LocalPi,
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -719,7 +810,6 @@ var completing = CreateSupervisor(new PiWorkerOptions
             {
                 agentName = "identified",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -759,7 +849,6 @@ var completing = CreateSupervisor(new PiWorkerOptions
             {
                 agentName = "implementer",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -792,7 +881,6 @@ var renewing = CreateSupervisor(new PiWorkerOptions
             {
                 agentName = "renewed",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
                 requestedWriteScopes = new[] { new { kind = "file", path = "src/Renew.txt" } },
             }),
@@ -831,7 +919,6 @@ var renewing = CreateSupervisor(new PiWorkerOptions
             {
                 agentName = "retrying-writer",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
                 requestedWriteScopes = new[] { new { kind = "file", path = "src/Retry.txt" } },
             }),
@@ -868,7 +955,6 @@ var renewing = CreateSupervisor(new PiWorkerOptions
             {
                 agentName = "late-writer",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);
@@ -976,7 +1062,6 @@ var supervisor = CreateSupervisor(new PiWorkerOptions
             {
                 agentName = "remote-stopped",
                 role = "implementer",
-                runtimeProfile = "local-pi",
                 prompt = "p",
             }),
             CancellationToken.None);

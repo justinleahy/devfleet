@@ -199,7 +199,19 @@ RUN_REAL_PI_TESTS=1 RUN_REAL_CLAUDE_TESTS=1 RUN_REAL_ANTIGRAVITY_TESTS=1 dotnet 
 | `Admin:Username` / `Admin:PasswordFile` | Cookie admin |
 | `NodeAuthentication:CredentialFile` / `Header` / `Scheme` | Node hub |
 | `Node:ControlPlaneUrl`, `Id`, `DisplayName`, `HeartbeatSeconds`, `ClaimLeaseSeconds`, `EventSpoolPath`, `RequireCleanStart`, `AllowUntrackedFiles` | Node worker |
-| `Pi:*` | Worker path, node executable, agent data dir, timeouts, child caps |
+| `Pi:*` | Worker path, node executable, agent data dir, timeouts, child caps, allowed roles/profiles, and ordered `RoleRoutes` |
 | `Claude:*` | `Executable` (`claude`), `SettingsPath`, timeouts, line caps |
 | `Antigravity:*` | `Executable` (`agy`), timeouts, line caps |
 | `Verification:Profiles` | Trusted command lists (agents cannot supply executables) |
+
+`Pi:RoleRoutes:<role>` is an ordered list of `{ RuntimeProfile, Model }` candidates.
+The node—not the root agent—tries them in order until a runtime starts. `Model` may
+be omitted or `null` to use that provider's default, and the same runtime profile may
+appear repeatedly with different models. See `deploy/appsettings.Node.example.json`.
+
+Authenticated operators can edit these routes at `/routing`. The page talks to the
+selected online node over the existing SignalR connection; updates take effect for the
+next child spawn and are persisted as `role-routes.json` under `Pi:AgentDataDirectory`.
+**Refresh models** queries the node's authenticated Pi catalog and `agy models`.
+Claude Code does not expose a model-list command, so Claude routes keep a free-text
+model field and may use `null` for the provider default.

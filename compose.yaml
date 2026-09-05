@@ -16,6 +16,7 @@ services:
       NodeAuthentication__CredentialFile: /data/node.token
       ControlPlane__BaseUrl: http://control-plane:5057
       ConnectionStrings__ControlPlane: Data Source=/data/controlplane.db;Cache=Shared
+      DataProtection__KeysDirectory: /data/data-protection-keys
     ports:
       - ${DEVFLEET_BIND_ADDRESS:-127.0.0.1}:5057:5057
     volumes:
@@ -50,6 +51,8 @@ services:
       Pi__WorkerPath: /app/runtime/pi-worker/src/index.ts
       Claude__Executable: /usr/local/bin/claude
       Antigravity__Executable: /usr/local/bin/agy
+      SubscriptionUsage__PiCredentialPath: /provider-auth/pi/auth.json
+      SubscriptionUsage__ClaudeCredentialPath: /home/node/.claude/.credentials.json
     cap_add:
       - ALL
     security_opt:
@@ -61,3 +64,5 @@ services:
       - ${HOME}/.local/bin/agy:/usr/local/bin/agy:ro,z
       - ${HOME}/.claude:/home/node/.claude:rw,z
       - ${HOME}/.claude.json:/home/node/.claude.json:rw,z
+      - ${HOME}/.pi/agent:/provider-auth/pi:rw,z
+      - ${HOME}/.gemini:/home/node/.gemini:rw,z

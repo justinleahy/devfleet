@@ -1,6 +1,13 @@
 using PiCommandCenter.Application.Runtime;
 
 namespace PiCommandCenter.Node;
+/// <summary>One trusted runtime/model candidate in an ordered node-owned role route.</summary>
+public sealed class AgentRoleRouteCandidate
+{
+    public string RuntimeProfile { get; set; } = string.Empty;
+    public string? Model { get; set; }
+}
+
 
 /// <summary>
 /// Configuration for the Pi worker runtime, bound from the "Pi" configuration section.
@@ -57,4 +64,39 @@ public sealed class PiWorkerOptions
     public string[] AllowedRuntimeProfiles { get; set; } =
         [AgentRuntimeProfiles.LocalPi, AgentRuntimeProfiles.ClaudeReadOnly,
             AgentRuntimeProfiles.ClaudeReservedWrite, AgentRuntimeProfiles.AntigravityReadOnly];
+
+    /// <summary>
+    /// Ordered runtime/model candidates for each role. The node tries candidates in order;
+    /// agent-generated spawn requests cannot override this routing policy.
+    /// </summary>
+    public Dictionary<string, AgentRoleRouteCandidate[]> RoleRoutes { get; set; } =
+        new(StringComparer.Ordinal)
+        {
+            ["root"] = [Candidate(AgentRuntimeProfiles.LocalPi)],
+            ["architect"] =
+            [
+                Candidate(AgentRuntimeProfiles.ClaudeReadOnly),
+                Candidate(AgentRuntimeProfiles.AntigravityReadOnly),
+                Candidate(AgentRuntimeProfiles.LocalPi),
+            ],
+            ["implementer"] =
+            [
+                Candidate(AgentRuntimeProfiles.LocalPi),
+                Candidate(AgentRuntimeProfiles.ClaudeReservedWrite),
+            ],
+            ["reviewer"] =
+            [
+                Candidate(AgentRuntimeProfiles.AntigravityReadOnly),
+                Candidate(AgentRuntimeProfiles.ClaudeReadOnly),
+                Candidate(AgentRuntimeProfiles.LocalPi),
+            ],
+            ["verifier"] =
+            [
+                Candidate(AgentRuntimeProfiles.LocalPi),
+                Candidate(AgentRuntimeProfiles.ClaudeReadOnly),
+            ],
+        };
+
+    private static AgentRoleRouteCandidate Candidate(string runtimeProfile)
+        => new() { RuntimeProfile = runtimeProfile };
 }

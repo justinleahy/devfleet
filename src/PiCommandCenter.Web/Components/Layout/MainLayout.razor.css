@@ -19,9 +19,31 @@
     opacity: 0.85;
 }
 
+/* The header is a single non-wrapping flex line inside a fixed 72px band, so at
+   narrow widths something must yield. The brand and the account name are the
+   elastic parts: they get `min-width: 0` plus truncation, while the sign-out
+   control keeps its intrinsic width so it is never clipped or squeezed. */
+.app-shell ::deep .brand-block {
+    flex: 0 1 auto;
+    min-width: 0;
+}
+
+.app-shell ::deep .header-badge,
+.app-shell ::deep .logout-button {
+    flex: 0 0 auto;
+}
+
+.brand {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 /* Signed-in administrator, right of the badges in the header */
 .user-block {
     display: flex;
+    flex: 0 1 auto;
+    min-width: 0;
     flex-direction: column;
     line-height: 1.2;
     text-align: end;
@@ -35,8 +57,11 @@
 }
 
 .user-name {
+    overflow: hidden;
     font-size: var(--type-ramp-minus-1-font-size);
     font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 /* Body row: navigation rail beside scrolling content */
@@ -99,9 +124,18 @@
     }
 }
 
-/* Phones: the header keeps its fixed height, so the account block sheds its
-   caption and the brand tagline yields the room instead of overflowing. */
+/* Phones: the header keeps its fixed height and cannot wrap, and its intrinsic
+   row was wider than the viewport — a 390px screen scrolled to 472px and pushed
+   the sign-out button entirely past the right edge, onto the unpainted strip.
+   The two environment badges are non-interactive desktop diagnostics with fixed,
+   unbreakable widths, so they are what the row sheds first; the tagline and the
+   account caption follow, and the name keeps a hard cap so a long display name
+   cannot crowd out the brand or the button at 320px. */
 @media (max-width: 560px) {
+    .app-shell ::deep .header-badge {
+        display: none;
+    }
+
     .brand-sub {
         display: none;
     }
@@ -111,10 +145,6 @@
     }
 
     .user-name {
-        display: block;
-        max-width: 14ch;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        max-width: 11ch;
     }
 }

@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using PiCommandCenter.Application.Nodes;
-using PiCommandCenter.ControlPlane.Api;
+using PiCommandCenter.Api;
 using PiCommandCenter.Domain.Mail;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http.Connections;
@@ -197,6 +197,57 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
 
         await recipientConnection.DisposeAsync();
         Assert.Equal(_childSession, live.RecipientSessionId);
+    }
+
+    [Fact]
+    public async Task Browser_direct_send_routes_ReceiveMail_live_exactly_once_and_only_after_persistence()
+    {
+        await SeedAsync();
+        var recipientConnection = new HubConnectionBuilder()
+            .WithUrl(new Uri(_fixture.Factory.Server.BaseAddress, "nodeHub"), _fixture.ConfigureNodeHub)
+            .Build();
+        await recipientConnection.StartAsync();
+
+        var pushed = new List<AgentMailMessage>();
+        var firstPush = new TaskCompletionSource<AgentMailMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        recipientConnection.On<AgentMailMessage>("ReceiveMail", message =>
+        {
+            lock (pushed)
+            {
+                pushed.Add(message);
+            }
+            firstPush.TrySetResult(message);
+        });
+
+        var liveNodeId = Guid.NewGuid();
+        await recipientConnection.InvokeAsync<NodeDto>("Register",
+            new NodeRegistrationMessage(liveNodeId, "mail-http-live-node", "1.0.0", "{}"));
+        await recipientConnection.InvokeAsync<NodeDto>("Heartbeat",
+            new NodeHeartbeatMessage(liveNodeId, [_childSession]));
+
+        // A recipient list containing an unknown session fails before persistence, so the
+        // connected recipient must not receive anything for it.
+        var rejected = await _client.PostAsJsonAsync($"/api/requests/{_requestId}/messages",
+            new { projectId = _projectId, senderSessionId = _rootSession, recipients = new[] { _childSession, NewSession() },
+                subject = "Never persisted", bodyMarkdown = "Should not route.", importance = "normal", ackRequired = false });
+        Assert.Equal(HttpStatusCode.NotFound, rejected.StatusCode);
+
+        var sent = await PostAsync<AgentMessageDto>($"/api/requests/{_requestId}/messages",
+            new { projectId = _projectId, senderSessionId = _rootSession, recipients = new[] { _childSession },
+                subject = "Live from browser", bodyMarkdown = "Delivered in real time.", importance = "high", ackRequired = false });
+
+        var live = await firstPush.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(sent.Id, live.MessageId);
+        Assert.Equal(_childSession, live.RecipientSessionId);
+
+        // Allow any stray duplicate push to arrive before asserting exactly-once delivery.
+        await Task.Delay(TimeSpan.FromMilliseconds(500));
+        await recipientConnection.DisposeAsync();
+        lock (pushed)
+        {
+            var only = Assert.Single(pushed);
+            Assert.Equal(sent.Id, only.MessageId);
+        }
     }
 
     [Fact]

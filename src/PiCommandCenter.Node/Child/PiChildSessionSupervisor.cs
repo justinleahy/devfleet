@@ -15,6 +15,7 @@ using PiCommandCenter.Domain.Verification;
 using PiCommandCenter.Node.Repository;
 using PiCommandCenter.Node.Security;
 
+using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.Verification;
 
 namespace PiCommandCenter.Node.Child;
@@ -46,6 +47,7 @@ public static class ChildAgentStatus
 public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, IAsyncDisposable
 {
     private readonly PiWorkerOptions _workerOptions;
+    private readonly INodeRuntimeRoutingStore _routing;
     private readonly Lazy<IAgentRuntimeRegistry> _runtimes;
     private readonly IPiOrchestrationRequestHandler _inner;
     private readonly INodeReservationGateway _reservations;
@@ -73,6 +75,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
     public PiChildSessionSupervisor(
         IOptions<PiWorkerOptions> workerOptions,
+        INodeRuntimeRoutingStore routing,
         IPiOrchestrationRequestHandler inner,
         INodeReservationGateway reservations,
         INodeMailGateway mail,
@@ -88,6 +91,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         RequestWorkspaceTracker workspace)
     {
         ArgumentNullException.ThrowIfNull(workerOptions);
+        ArgumentNullException.ThrowIfNull(routing);
         ArgumentNullException.ThrowIfNull(inner);
         ArgumentNullException.ThrowIfNull(reservations);
         ArgumentNullException.ThrowIfNull(mail);
@@ -102,6 +106,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         ArgumentNullException.ThrowIfNull(completion);
         ArgumentNullException.ThrowIfNull(workspace);
         _workerOptions = workerOptions.Value;
+        _routing = routing;
         _inner = inner;
         _reservations = reservations;
         _mail = mail;
@@ -558,22 +563,75 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         SpawnSpec spec,
         CancellationToken cancellationToken)
     {
-        if (!_workerOptions.AllowedChildRoles.Contains(spec.Role))
+        var routing = _routing.Current;
+        if (!routing.AllowedRoles.Contains(spec.Role, StringComparer.Ordinal))
         {
             return SpawnFailure("role_not_allowed", $"Role '{spec.Role}' is not in the role allowlist.");
         }
 
-        if (!_workerOptions.AllowedRuntimeProfiles.Contains(spec.RuntimeProfile))
+        var candidates = routing.RoleRoutes.FirstOrDefault(
+            route => string.Equals(route.Role, spec.Role, StringComparison.Ordinal))?.Candidates;
+        if (candidates is null || candidates.Count == 0)
+        {
+            return SpawnFailure(
+                "role_route_not_configured",
+                $"Role '{spec.Role}' has no configured runtime/model route.");
+        }
+
+        var failures = new List<string>(candidates.Count);
+        foreach (var candidate in candidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var result = await SpawnCandidateAsync(
+                context,
+                children,
+                spec,
+                candidate,
+                cancellationToken).ConfigureAwait(false);
+            if (result is not Dictionary<string, object?> envelope
+                || !envelope.TryGetValue("error", out var errorValue)
+                || errorValue is not Dictionary<string, object?> error)
+            {
+                return result;
+            }
+
+            var code = error.GetValueOrDefault("code") as string;
+            var message = error.GetValueOrDefault("message") as string ?? "candidate failed";
+            if (code is not ("child_start_failed" or "reservation_required"))
+            {
+                return result;
+            }
+
+            failures.Add(
+                $"{candidate.RuntimeProfile}/{candidate.Model ?? "<default>"}: {message}");
+        }
+
+        return SpawnFailure(
+            "runtime_route_exhausted",
+            $"Every configured candidate for role '{spec.Role}' failed in order: "
+            + string.Join("; ", failures));
+    }
+
+    private async Task<object?> SpawnCandidateAsync(
+        PiOrchestrationContext context,
+        ConcurrentDictionary<string, ChildAgent> children,
+        SpawnSpec spec,
+        RuntimeRouteCandidateMessage candidate,
+        CancellationToken cancellationToken)
+    {
+        var runtimeProfile = candidate.RuntimeProfile;
+
+        if (!_routing.Current.AllowedRuntimeProfiles.Contains(runtimeProfile, StringComparer.Ordinal))
         {
             return SpawnFailure(
                 "runtime_profile_not_allowed",
-                $"Runtime profile '{spec.RuntimeProfile}' is not in the profile allowlist.");
+                $"Runtime profile '{runtimeProfile}' is not in the profile allowlist.");
         }
 
         IAgentRuntimeAdapter adapter;
         try
         {
-            adapter = _runtimes.Value.Resolve(spec.RuntimeProfile);
+            adapter = _runtimes.Value.Resolve(runtimeProfile);
         }
         catch (Exception ex)
         {
@@ -596,7 +654,8 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             sessionId,
             agentName,
             spec.Role,
-            spec.RuntimeProfile,
+            runtimeProfile,
+            candidate.Model,
             adapter.RuntimeKind,
             context.SessionId,
             context.RequestId,
@@ -631,7 +690,8 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 ["childSessionId"] = sessionId,
                 ["agentName"] = agentName,
                 ["role"] = spec.Role,
-                ["runtimeProfile"] = spec.RuntimeProfile,
+                ["runtimeProfile"] = runtimeProfile,
+                ["model"] = candidate.Model,
                 ["parentSessionId"] = context.SessionId,
                 ["requestedWriteScopes"] = spec.RequestedWriteScopes,
             },
@@ -665,7 +725,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         }
 
 
-        if (spec.RuntimeProfile == AgentRuntimeProfiles.ClaudeReservedWrite
+        if (runtimeProfile == AgentRuntimeProfiles.ClaudeReservedWrite
             && leaseResult?.Lease is null)
         {
             children.TryRemove(agentName, out _);
@@ -706,8 +766,9 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 context.RepositoryRoot!,
                 spec.Prompt,
                 AgentRuntimeMode.Child,
-                spec.RuntimeProfile,
-                authorization);
+                runtimeProfile,
+                authorization,
+                model: candidate.Model);
             handle = await adapter.StartAsync(start, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -715,6 +776,18 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             children.TryRemove(agentName, out _);
             _childrenBySession.TryRemove(sessionId, out _);
             await _identities.ReleaseAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            if (leaseResult?.Lease is { } failedLease)
+            {
+                await _reservations.ReleaseAsync(
+                    failedLease.LeaseId,
+                    Guid.Parse(context.ProjectId),
+                    sessionId,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            if (ex is OperationCanceledException && cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
             await AppendChildEventAsync(
                 child,
                 "child.failed",
@@ -745,7 +818,8 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 ["providerSessionId"] = handle.ProviderSessionId,
                 ["agentName"] = agentName,
                 ["role"] = spec.Role,
-                ["runtimeProfile"] = spec.RuntimeProfile,
+                ["runtimeProfile"] = runtimeProfile,
+                ["model"] = candidate.Model,
                 ["runtime"] = adapter.RuntimeKind,
                 ["parentSessionId"] = context.SessionId,
                 ["leaseId"] = leaseResult?.Lease?.LeaseId,
@@ -760,7 +834,8 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             ["childSessionId"] = sessionId,
             ["parentSessionId"] = context.SessionId,
             ["role"] = spec.Role,
-            ["runtimeProfile"] = spec.RuntimeProfile,
+            ["runtimeProfile"] = runtimeProfile,
+            ["model"] = candidate.Model,
             ["runtime"] = adapter.RuntimeKind,
             ["leaseId"] = leaseResult?.Lease?.LeaseId,
             ["fencingToken"] = leaseResult?.Lease?.FencingToken,
@@ -1608,6 +1683,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             ["agentName"] = child.AgentName,
             ["role"] = child.Role,
             ["runtimeProfile"] = child.RuntimeProfile,
+            ["model"] = child.Model,
         };
         var message = new NodeEventMessage(
             EventId: $"{child.SessionId}-{sequence}-{type}",
@@ -1670,6 +1746,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         ["childSessionId"] = child.SessionId,
         ["role"] = child.Role,
         ["runtimeProfile"] = child.RuntimeProfile,
+        ["model"] = child.Model,
         ["parentSessionId"] = child.ParentSessionId,
         ["status"] = child.Status,
         ["startedAt"] = child.StartedAt,
@@ -1739,7 +1816,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
     {
         error = null;
         spec = null!;
-        foreach (var field in new[] { "agentName", "role", "runtimeProfile", "prompt" })
+        foreach (var field in new[] { "agentName", "role", "prompt" })
         {
             if (string.IsNullOrWhiteSpace(element.GetStringProperty(field)))
             {
@@ -1776,7 +1853,6 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         spec = new SpawnSpec(
             element.GetStringProperty("agentName")!,
             element.GetStringProperty("role")!,
-            element.GetStringProperty("runtimeProfile")!,
             element.GetStringProperty("prompt")!,
             scopeList);
         return true;
@@ -1886,6 +1962,5 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 public sealed record SpawnSpec(
     string AgentName,
     string Role,
-    string RuntimeProfile,
     string Prompt,
     IReadOnlyList<ReservationScopeSpec> RequestedWriteScopes);

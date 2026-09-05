@@ -1,0 +1,226 @@
+.page-head {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+}
+
+.page-head h1 {
+    margin: 0;
+    font-size: var(--type-ramp-plus-4-font-size);
+    line-height: var(--type-ramp-plus-4-line-height);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+}
+
+h2 {
+    margin: 0 0 calc(var(--design-unit) * 3px);
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
+    font-weight: 600;
+    letter-spacing: -0.015em;
+}
+
+.page-lead {
+    margin: 0;
+    max-width: 78ch;
+    color: var(--neutral-foreground-hint);
+}
+
+.state-block {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--design-unit) * 3px);
+    padding-block: calc(var(--design-unit) * 6px);
+    color: var(--neutral-foreground-hint);
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+.panel {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 4px);
+    padding: calc(var(--design-unit) * 5px);
+}
+
+.panel-lead {
+    margin: 0 0 calc(var(--design-unit) * 2px);
+    max-width: 72ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.panel-empty {
+    margin: 0;
+    padding-block: calc(var(--design-unit) * 3px);
+    max-width: 72ch;
+    color: var(--neutral-foreground-hint);
+}
+
+.node-name {
+    font-weight: 600;
+}
+
+.node-missing {
+    color: var(--neutral-foreground-hint);
+}
+
+.node-seen {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Node picker: selector on the left, its two fetch actions trailing it. */
+.node-picker {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
+}
+
+.node-picker ::deep .field {
+    min-width: 260px;
+}
+
+.node-picker ::deep .node-picker-actions {
+    flex-shrink: 0;
+}
+
+.node-status {
+    margin: calc(var(--design-unit) * 2px) 0 0;
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+}
+
+/* Model catalogs: one dense row per runtime profile. */
+.catalog-list {
+    display: flex;
+    flex-direction: column;
+    margin: calc(var(--design-unit) * 2px) 0 0;
+    padding: 0;
+    list-style: none;
+    border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.catalog-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+    padding-block: calc(var(--design-unit) * 2px);
+    border-block-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.catalog-sample,
+.catalog-error {
+    min-width: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    overflow-wrap: anywhere;
+}
+
+.catalog-sample {
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+}
+
+/* Ordered candidates: rank gutter, field cluster, row actions. */
+.candidate-list {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.candidate-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: start;
+    gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
+    padding: calc(var(--design-unit) * 3px);
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--control-corner-radius) * 1px);
+    background: var(--neutral-layer-2);
+}
+
+.candidate-rank {
+    margin-block-start: calc(var(--design-unit) * 5px);
+    min-width: 2ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-plus-1-font-size);
+    font-variant-numeric: tabular-nums;
+    text-align: center;
+}
+
+.candidate-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    align-items: end;
+    gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
+}
+
+.candidate-fields ::deep .field {
+    width: 100%;
+}
+
+.candidate-note {
+    margin: 0 0 calc(var(--design-unit) * 1px);
+    align-self: end;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.candidate-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: calc(var(--design-unit) * 1px);
+    margin-block-start: calc(var(--design-unit) * 4px);
+}
+
+.save-bar {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+    padding-block-start: calc(var(--design-unit) * 2px);
+    border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+@media (max-width: 720px) {
+    /* Narrow widths cannot hold the rank gutter and the action column beside the
+       fields; stack the row and let the actions sit under their inputs. */
+    .candidate-row {
+        grid-template-columns: 1fr;
+    }
+
+    .candidate-rank {
+        margin-block-start: 0;
+        text-align: start;
+    }
+
+    .candidate-actions {
+        margin-block-start: 0;
+    }
+
+    .candidate-fields {
+        grid-template-columns: 1fr;
+    }
+
+    .node-picker ::deep .field {
+        min-width: 0;
+        width: 100%;
+    }
+}

@@ -2,8 +2,12 @@ using System.Net;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.FluentUI.AspNetCore.Components;
 using PiCommandCenter.Application;
+using PiCommandCenter.Application.Runtime;
+using PiCommandCenter.Api;
 using PiCommandCenter.ControlPlane.Api;
 using PiCommandCenter.ControlPlane.Security;
+using PiCommandCenter.ControlPlane.RuntimeRouting;
+using PiCommandCenter.ControlPlane.SubscriptionUsage;
 using PiCommandCenter.Infrastructure;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Security;
@@ -76,6 +80,10 @@ builder.Services.AddSignalR(options => options.EnableDetailedErrors = builder.En
 builder.Services.Configure<NodeLivenessOptions>(
     builder.Configuration.GetSection(NodeLivenessOptions.SectionName));
 builder.Services.AddHostedService<NodeLivenessService>();
+builder.Services.AddSingleton<NodeConnectionDirectory>();
+builder.Services.AddSingleton<INodeRuntimeConfigurationGateway, NodeRuntimeConfigurationGateway>();
+builder.Services.AddSingleton<INodeSubscriptionUsageGateway, NodeSubscriptionUsageGateway>();
+builder.Services.AddSingleton<INativeApiRealtimeGateway, NativeApiRealtimeGateway>();
 
 builder.Services.AddSingleton<IClock, SystemClock>();
 builder.Services.AddHealthChecks();
@@ -87,6 +95,7 @@ builder.Services.AddHealthChecks();
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddControlPlaneAuthentication(builder.Configuration, builder.Environment);
 builder.Services.AddAgentMail();
+builder.Services.AddPiCommandCenterApi();
 
 var app = builder.Build();
 
@@ -132,13 +141,9 @@ app.MapHealthChecks("/health")
     });
 
 app.MapAccountEndpoints();
-app.MapProjectsEndpoints();
-app.MapRequestsEndpoints();
+app.MapPiCommandCenterApi();
 app.MapHub<NodeHub>("/nodeHub").RequireAuthorization(AuthPolicies.Node);
 
-app.MapMailEndpoints();
-app.MapReservationsEndpoints();
-app.MapRequestResultEndpoints();
 app.Run();
 
 /// <summary>Exposed for WebApplicationFactory-based integration tests.</summary>

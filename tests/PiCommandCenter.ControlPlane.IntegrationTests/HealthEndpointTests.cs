@@ -33,7 +33,7 @@ public class HealthEndpointTests : IClassFixture<ControlPlaneFixture>
         var html = await response.Content.ReadAsStringAsync();
 
         Assert.True(response.IsSuccessStatusCode, $"status {(int)response.StatusCode}: {html}");
-        Assert.Contains("Pi Command Center", html);
+        Assert.Contains("DevFleet", html);
         Assert.Contains("Fleet dashboard", html);
         Assert.Contains("Active projects", html);
         Assert.Contains("Queued requests", html);

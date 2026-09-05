@@ -4,23 +4,23 @@ using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Requests;
 using PiCommandCenter.Application.Sessions;
 using PiCommandCenter.Domain.Requests;
+using static PiCommandCenter.Api.ApiProblems;
 
-namespace PiCommandCenter.ControlPlane.Api;
+namespace PiCommandCenter.Api;
 
 /// <summary>
-/// Browser-facing request result and event timeline (GET /api/requests/{id}/result|events).
+/// Request result and event timeline (<c>GET {prefix}/requests/{id}/result|events</c>).
 /// </summary>
 internal static class RequestResultEndpoints
 {
-    public static RouteGroupBuilder MapRequestResultEndpoints(this IEndpointRouteBuilder routes)
+    /// <param name="group">Route group the endpoints are mapped under (<c>/api</c> or <c>/api/v1</c>).</param>
+    /// <param name="locationPrefix">Prefix for <c>Location</c> headers; no endpoint here emits one, kept for mapper uniformity.</param>
+    public static void MapRequestResultEndpoints(this RouteGroupBuilder group, string locationPrefix)
     {
-        var group = routes.MapGroup("/api/requests/{requestId:guid}").WithTags("Requests");
-        group.MapGet("/result", GetResultAsync);
-        group.MapGet("/events", ListEventsAsync);
-        return group;
+        group.MapGet("/requests/{requestId:guid}/result", GetResultAsync).WithTags("Requests");
+        group.MapGet("/requests/{requestId:guid}/events", ListEventsAsync).WithTags("Requests");
     }
 
-    /// <summary>GET /api/requests/{requestId}/result</summary>
     private static async Task<Results<Ok<RequestResultDto>, NotFound<ProblemDetails>>> GetResultAsync(
         Guid requestId,
         ICompletionGateService gate,
@@ -48,7 +48,6 @@ internal static class RequestResultEndpoints
         }
     }
 
-    /// <summary>GET /api/requests/{requestId}/events</summary>
     private static async Task<Results<Ok<SessionEventListResponse>, NotFound<ProblemDetails>>> ListEventsAsync(
         Guid requestId,
         IAgentSessionStore sessions,
@@ -57,14 +56,7 @@ internal static class RequestResultEndpoints
         var events = await sessions.ListEventsAsync(new WorkRequestId(requestId), cancellationToken);
         return TypedResults.Ok(new SessionEventListResponse(events));
     }
-
-    private static ProblemDetails Problem(int status, string title, string detail) => new()
-    {
-        Status = status,
-        Title = title,
-        Detail = detail,
-    };
 }
 
-/// <summary>Response envelope for <c>GET /api/requests/{requestId}/events</c>.</summary>
+/// <summary>Response envelope for <c>GET {prefix}/requests/{requestId}/events</c>.</summary>
 internal sealed record SessionEventListResponse(IReadOnlyList<SessionEventDto> Events);

@@ -1,7 +1,7 @@
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
-using Microsoft.AspNetCore.Hosting;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Security;
 
@@ -21,6 +21,14 @@ public static class ControlPlaneAuthExtensions
 
         services.Configure<AdminOptions>(configuration.GetSection(AdminOptions.SectionName));
         services.Configure<NodeAuthenticationOptions>(configuration.GetSection(NodeAuthenticationOptions.SectionName));
+
+        var keysPath = configuration["DataProtection:KeysDirectory"];
+        ArgumentException.ThrowIfNullOrWhiteSpace(keysPath);
+        var keysDirectory = Path.GetFullPath(PrivateFileAccess.ExpandPath(keysPath));
+        PrivateFileAccess.CreatePrivateDirectory(keysDirectory);
+        services.AddDataProtection()
+            .SetApplicationName("PiCommandCenter.ControlPlane")
+            .PersistKeysToFileSystem(new DirectoryInfo(keysDirectory));
 
         services.AddSingleton(sp =>
         {
@@ -88,14 +96,24 @@ public static class ControlPlaneAuthExtensions
     }
 
     /// <summary>Applies deterministic file-backed auth settings used by test hosts. Production is unchanged.</summary>
-    public static void UseTestAuthFiles(this IWebHostBuilder builder, string passwordFile, string credentialFile, string username = "admin")
+    public static void UseTestAuthFiles(
+        this IWebHostBuilder builder,
+        string passwordFile,
+        string credentialFile,
+        string username = "admin",
+        string? dataProtectionKeysDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
+        var passwordDirectory = Path.GetDirectoryName(Path.GetFullPath(passwordFile))
+            ?? throw new ArgumentException("Password file must have a parent directory.", nameof(passwordFile));
         builder.UseEnvironment("Testing");
         builder.UseSetting("Admin:Username", username);
         builder.UseSetting("Admin:PasswordFile", passwordFile);
         builder.UseSetting("NodeAuthentication:CredentialFile", credentialFile);
         builder.UseSetting("NodeAuthentication:Header", NodeAuthenticationOptions.DefaultHeader);
         builder.UseSetting("NodeAuthentication:Scheme", NodeAuthenticationOptions.DefaultScheme);
+        builder.UseSetting(
+            "DataProtection:KeysDirectory",
+            dataProtectionKeysDirectory ?? Path.Combine(passwordDirectory, "data-protection-keys"));
     }
 }

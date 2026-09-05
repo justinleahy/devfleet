@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 using PiCommandCenter.Infrastructure.Security;
+using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace PiCommandCenter.ControlPlane.IntegrationTests;
 
@@ -79,6 +80,44 @@ public sealed class AuthenticationTests : IClassFixture<ControlPlaneFixture>
     }
 
     [Fact]
+    public async Task Auth_cookie_from_disposed_host_authorizes_independent_host_sharing_keys()
+    {
+        string? authCookie;
+        using (var hostA = _fixture.CreateIndependentHost())
+        {
+            using var clientA = hostA.CreateClient(new WebApplicationFactoryClientOptions
+            {
+                AllowAutoRedirect = false,
+                HandleCookies = true,
+            });
+            _fixture.AttachAntiforgery(clientA, hostA);
+            using var login = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["username"] = AuthTestMaterial.Username,
+                ["password"] = AuthTestMaterial.Password,
+                ["returnUrl"] = "/",
+            });
+            var succeeded = await clientA.PostAsync("/account/login", login);
+            Assert.Equal(HttpStatusCode.Redirect, succeeded.StatusCode);
+            Assert.True(succeeded.Headers.TryGetValues("Set-Cookie", out var setCookies));
+            authCookie = setCookies.FirstOrDefault(static cookie =>
+                cookie.StartsWith("pcc.admin=", StringComparison.Ordinal));
+            Assert.False(string.IsNullOrEmpty(authCookie));
+            authCookie = authCookie.Split(';', 2)[0];
+        }
+
+        using var hostB = _fixture.CreateIndependentHost();
+        using var clientB = hostB.CreateClient(new WebApplicationFactoryClientOptions
+        {
+            AllowAutoRedirect = false,
+            HandleCookies = false,
+        });
+        clientB.DefaultRequestHeaders.Add("Cookie", authCookie);
+        var api = await clientB.GetAsync("/api/projects");
+        Assert.True(api.IsSuccessStatusCode, await api.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task State_changing_post_without_antiforgery_is_rejected()
     {
         using var client = _fixture.CreateAuthenticatedClient();
@@ -124,6 +163,8 @@ public sealed class AuthenticationTests : IClassFixture<ControlPlaneFixture>
         var tokenMode = File.GetUnixFileMode(_fixture.CredentialFile);
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, passwordMode);
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, tokenMode);
+        var keysMode = File.GetUnixFileMode(_fixture.DataProtectionKeysDirectory);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, keysMode);
     }
 
     [Fact]

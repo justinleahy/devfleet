@@ -2,26 +2,25 @@ using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using PiCommandCenter.Application.Projects;
 using PiCommandCenter.Domain;
+using static PiCommandCenter.Api.ApiProblems;
 
-namespace PiCommandCenter.ControlPlane.Api;
+namespace PiCommandCenter.Api;
 
 /// <summary>
-/// Milestone 1 project endpoints: list, register, get, and validate.
+/// Project endpoints: list, register, get, and validate, mapped relative to the supplied group.
 /// Error mapping follows SPEC section 30: 400 validation, 404 missing, 409 duplicates.
 /// </summary>
 internal static class ProjectsEndpoints
 {
-    public static RouteGroupBuilder MapProjectsEndpoints(this IEndpointRouteBuilder routes)
+    /// <param name="group">Route group the endpoints are mapped under (<c>/api</c> or <c>/api/v1</c>).</param>
+    /// <param name="locationPrefix">Prefix for <c>Location</c> headers; equals the group prefix.</param>
+    public static void MapProjectsEndpoints(this RouteGroupBuilder group, string locationPrefix)
     {
-        var group = routes.MapGroup("/api/projects")
-            .WithTags("Projects");
-
-        group.MapGet("/", ListAsync);
-        group.MapPost("/", RegisterAsync);
-        group.MapGet("/{projectId:guid}", GetAsync);
-        group.MapPost("/{projectId:guid}/validate", ValidateAsync);
-
-        return group;
+        group.MapGet("/projects", ListAsync).WithTags("Projects");
+        group.MapPost("/projects", ([FromBody] RegisterProjectCommand command, IProjectCatalog catalog, CancellationToken cancellationToken) =>
+            RegisterAsync(command, catalog, locationPrefix, cancellationToken)).WithTags("Projects");
+        group.MapGet("/projects/{projectId:guid}", GetAsync).WithTags("Projects");
+        group.MapPost("/projects/{projectId:guid}/validate", ValidateAsync).WithTags("Projects");
     }
 
     private static async Task<Ok<ProjectListResponse>> ListAsync(
@@ -33,14 +32,15 @@ internal static class ProjectsEndpoints
     }
 
     private static async Task<Results<Created<ProjectDto>, Conflict<ProblemDetails>, BadRequest<ProblemDetails>>> RegisterAsync(
-        [FromBody] RegisterProjectCommand command,
+        RegisterProjectCommand command,
         IProjectCatalog catalog,
+        string locationPrefix,
         CancellationToken cancellationToken)
     {
         try
         {
             var project = await catalog.RegisterAsync(command, cancellationToken);
-            return TypedResults.Created($"/api/projects/{project.Id}", project);
+            return TypedResults.Created($"{locationPrefix}/projects/{project.Id}", project);
         }
         catch (ProjectValidationException ex)
         {
@@ -70,10 +70,7 @@ internal static class ProjectsEndpoints
         }
         catch (ProjectNotFoundException)
         {
-            return TypedResults.NotFound(Problem(
-                StatusCodes.Status404NotFound,
-                "Project not found",
-                $"No project with id '{projectId}' is registered."));
+            return TypedResults.NotFound(ProjectNotFound(projectId));
         }
     }
 
@@ -102,20 +99,10 @@ internal static class ProjectsEndpoints
         }
         catch (ProjectNotFoundException)
         {
-            return TypedResults.NotFound(Problem(
-                StatusCodes.Status404NotFound,
-                "Project not found",
-                $"No project with id '{projectId}' is registered."));
+            return TypedResults.NotFound(ProjectNotFound(projectId));
         }
     }
-
-    private static ProblemDetails Problem(int status, string title, string detail) => new()
-    {
-        Status = status,
-        Title = title,
-        Detail = detail,
-    };
 }
 
-/// <summary>Response envelope for <c>GET /api/projects</c>.</summary>
+/// <summary>Response envelope for <c>GET {prefix}/projects</c>.</summary>
 internal sealed record ProjectListResponse(IReadOnlyList<ProjectDto> Projects);

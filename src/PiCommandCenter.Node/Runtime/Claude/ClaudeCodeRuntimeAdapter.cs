@@ -115,7 +115,7 @@ public sealed class ClaudeCodeRuntimeAdapter : IAgentRuntimeAdapter
             settingsPath = _options.SettingsPath;
         }
 
-        var arguments = new[]
+        var arguments = new List<string>
         {
             "-p",
             request.Prompt,
@@ -129,6 +129,11 @@ public sealed class ClaudeCodeRuntimeAdapter : IAgentRuntimeAdapter
             "--permission-mode",
             "dontAsk",
         };
+        if (request.Model is not null)
+        {
+            arguments.Add("--model");
+            arguments.Add(request.Model);
+        }
 
         var process = _processFactory.Start(new OfficialProcessStartRequest(
             _options.Executable,
