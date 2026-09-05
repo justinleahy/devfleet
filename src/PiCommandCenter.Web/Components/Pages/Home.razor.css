@@ -362,29 +362,95 @@ h2 {
     overflow-wrap: anywhere;
 }
 
-/* Registration dialog */
+/* Registration dialog.
+   The surface is the web component's own `control` part, sized from
+   --dialog-width/--dialog-height. Styling only the light-DOM shell left the
+   content wider than that surface, so the size is declared on the host (where
+   the component's defaults live, and where it inherits into the shadow tree)
+   and the part is bound to it. */
+.dialog-host ::deep fluent-dialog.register-dialog {
+    --dialog-width: min(680px, calc(100vw - calc(var(--design-unit) * 12px))) !important;
+    --dialog-height: auto;
+    --dialog-max-block-size: calc(100vh - calc(var(--design-unit) * 12px));
+}
+
+.dialog-host ::deep fluent-dialog.register-dialog::part(control) {
+    display: flex;
+    flex-direction: column;
+    width: var(--dialog-width);
+    max-width: var(--dialog-width);
+    height: var(--dialog-height);
+    max-height: var(--dialog-max-block-size);
+    padding: 0;
+    overflow: hidden;
+}
+
 .dialog-shell {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 4px);
-    padding: calc(var(--design-unit) * 6px);
-    min-width: min(620px, 88vw);
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 0;
+}
+
+.dialog-header {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    padding: calc(var(--design-unit) * 6px) calc(var(--design-unit) * 6px) calc(var(--design-unit) * 4px);
+    border-block-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
 }
 
 .dialog-lead {
     margin: 0;
     max-width: 60ch;
     color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-base-line-height);
+}
+
+/* Only the middle band scrolls, so the heading and the actions stay put when a
+   message bar appears. */
+.dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 5px);
+    padding: calc(var(--design-unit) * 5px) calc(var(--design-unit) * 6px);
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.form-section {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
+}
+
+.form-section-title,
+.switch-set legend {
+    margin: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
 }
 
 .form-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: calc(var(--design-unit) * 4px);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
+}
+
+.form-grid-compact {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .dialog-shell ::deep .field {
     width: 100%;
+    min-width: 0;
 }
 
 .dialog-shell ::deep .field-wide {
@@ -392,21 +458,41 @@ h2 {
 }
 
 .switch-set {
-    display: flex;
-    flex-wrap: wrap;
-    gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 6px);
+    /* A fieldset stays a block so the browser keeps rendering the legend in its
+       border notch; the switch grid inside handles the layout. */
+    display: block;
     margin: 0;
+    min-width: 0;
     padding: calc(var(--design-unit) * 4px);
     border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
     border-radius: calc(var(--control-corner-radius) * 1px);
+    background-color: var(--neutral-layer-2);
 }
 
 .switch-set legend {
     padding-inline: calc(var(--design-unit) * 1px);
-    color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-minus-1-font-size);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+}
+
+.switch-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 4px);
+}
+
+/* The actions sit on their own band so the primary path reads first and Cancel
+   stays anchored opposite it at every width the surface can take. */
+.dialog-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: calc(var(--design-unit) * 2px);
+    padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 6px);
+    border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    background-color: var(--neutral-layer-1);
+}
+
+.dialog-actions ::deep .action-cancel {
+    margin-inline-start: auto;
 }
 
 .error-list {
@@ -415,12 +501,39 @@ h2 {
 }
 
 @media (max-width: 620px) {
-    .dialog-shell {
-        padding: calc(var(--design-unit) * 4px);
+    /* Phone widths: the surface takes the viewport it can get, the bands lose a
+       step of inline padding, and every grid collapses to one column. */
+    .dialog-host ::deep fluent-dialog.register-dialog {
+        --dialog-width: calc(100vw - calc(var(--design-unit) * 4px)) !important;
+        --dialog-max-block-size: calc(100vh - calc(var(--design-unit) * 6px));
     }
 
-    .form-grid {
+    .dialog-header,
+    .dialog-body,
+    .dialog-actions {
+        padding-inline: calc(var(--design-unit) * 4px);
+    }
+
+    .form-grid,
+    .form-grid-compact,
+    .switch-grid {
         grid-template-columns: 1fr;
+    }
+
+    /* Stacked buttons: full width, primary first, and no auto margin stranding
+       Cancel on a line of its own. */
+    .dialog-actions {
+        flex-direction: column;
+        align-items: stretch;
+    }
+
+    .dialog-actions ::deep .action-cancel {
+        margin-inline-start: 0;
+    }
+
+    .dialog-actions ::deep fluent-button,
+    .dialog-actions ::deep fluent-button::part(control) {
+        width: 100%;
     }
 
     /* Phone widths cannot hold heading + action side by side: stack them.

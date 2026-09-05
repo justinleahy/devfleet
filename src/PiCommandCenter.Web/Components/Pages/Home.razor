@@ -288,107 +288,121 @@
     </section>
 </FluentStack>
 
-<FluentDialog @bind-Hidden="_registrationHidden"
-              Modal="true"
-              TrapFocus="true"
-              PreventScroll="true"
-              AriaLabelledby="register-heading">
-    <div class="dialog-shell">
-        <h2 id="register-heading">Register project</h2>
-        <p class="dialog-lead">
-            The repository path is validated on this node before anything is written. Registration
-            binds the project to this control plane's node identity.
-        </p>
+<div class="dialog-host">
+    <FluentDialog @bind-Hidden="_registrationHidden"
+                  Modal="true"
+                  TrapFocus="true"
+                  PreventScroll="true"
+                  Class="register-dialog"
+                  AriaLabelledby="register-heading">
+        <div class="dialog-shell">
+            <header class="dialog-header">
+                <h2 id="register-heading">Register project</h2>
+                <p class="dialog-lead">
+                    The repository path is validated on this node before anything is written. Registration
+                    binds the project to this control plane's node identity.
+                </p>
+            </header>
 
-        @if (_registrationErrors.Count > 0)
-        {
-            <FluentMessageBar Intent="MessageIntent.Error"
-                              Title="Registration failed"
-                              AllowDismiss="false">
-                @if (_registrationErrors.Count == 1)
+            <div class="dialog-body">
+                @if (_registrationErrors.Count > 0)
                 {
-                    @_registrationErrors[0]
-                }
-                else
-                {
-                    <ul class="error-list">
-                        @foreach (var error in _registrationErrors)
+                    <FluentMessageBar Intent="MessageIntent.Error"
+                                      Title="Registration failed"
+                                      AllowDismiss="false">
+                        @if (_registrationErrors.Count == 1)
                         {
-                            <li>@error</li>
+                            @_registrationErrors[0]
                         }
-                    </ul>
+                        else
+                        {
+                            <ul class="error-list">
+                                @foreach (var error in _registrationErrors)
+                                {
+                                    <li>@error</li>
+                                }
+                            </ul>
+                        }
+                    </FluentMessageBar>
                 }
-            </FluentMessageBar>
-        }
 
-        @if (_validationPassed)
-        {
-            <FluentMessageBar Intent="MessageIntent.Success"
-                              Title="Validation passed"
-                              AllowDismiss="false">
-                The repository path and branch satisfy every registration rule.
-            </FluentMessageBar>
-        }
+                @if (_validationPassed)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Success"
+                                      Title="Validation passed"
+                                      AllowDismiss="false">
+                        The repository path and branch satisfy every registration rule.
+                    </FluentMessageBar>
+                }
 
-        <div class="form-grid">
-            <FluentTextField @bind-Value="_form.DisplayName"
-                             Label="Display name"
-                             Required="true"
-                             Placeholder="Agent Command Center"
-                             Class="field" />
-            <FluentTextField @bind-Value="_form.RepositoryPath"
-                             Label="Repository path"
-                             Required="true"
-                             Placeholder="/home/user/Developer/project"
-                             Class="field field-wide" />
-            <FluentTextField @bind-Value="_form.DefaultBranch"
-                             Label="Default branch"
-                             Required="true"
-                             Placeholder="main"
-                             Class="field" />
-            <FluentNumberField @bind-Value="_form.MaxActiveWriteRequests"
-                               Label="Write slots"
-                               Min="0"
-                               Max="512"
-                               Class="field" />
-            <FluentNumberField @bind-Value="_form.MaxReadOnlyRequests"
-                               Label="Read-only slots"
-                               Min="0"
-                               Max="512"
-                               Class="field" />
-            <FluentNumberField @bind-Value="_form.MaxChildAgentsPerRequest"
-                               Label="Child agents per request"
-                               Min="0"
-                               Max="512"
-                               Class="field" />
+                <section class="form-section" aria-labelledby="register-identity-heading">
+                    <h3 class="form-section-title" id="register-identity-heading">Repository</h3>
+                    <div class="form-grid">
+                        <FluentTextField @bind-Value="_form.DisplayName"
+                                         Label="Display name"
+                                         Required="true"
+                                         Placeholder="Agent Command Center"
+                                         Class="field" />
+                        <FluentTextField @bind-Value="_form.DefaultBranch"
+                                         Label="Default branch"
+                                         Required="true"
+                                         Placeholder="main"
+                                         Class="field" />
+                        <FluentTextField @bind-Value="_form.RepositoryPath"
+                                         Label="Repository path"
+                                         Required="true"
+                                         Placeholder="/home/user/Developer/project"
+                                         Class="field field-wide" />
+                    </div>
+                </section>
+
+                <section class="form-section" aria-labelledby="register-limits-heading">
+                    <h3 class="form-section-title" id="register-limits-heading">Concurrency limits</h3>
+                    <div class="form-grid form-grid-compact">
+                        <FluentNumberField @bind-Value="_form.MaxActiveWriteRequests"
+                                           Label="Write slots"
+                                           Min="0"
+                                           Max="512"
+                                           Class="field" />
+                        <FluentNumberField @bind-Value="_form.MaxReadOnlyRequests"
+                                           Label="Read-only slots"
+                                           Min="0"
+                                           Max="512"
+                                           Class="field" />
+                        <FluentNumberField @bind-Value="_form.MaxChildAgentsPerRequest"
+                                           Label="Child agents per request"
+                                           Min="0"
+                                           Max="512"
+                                           Class="field" />
+                    </div>
+                </section>
+
+                <fieldset class="switch-set">
+                    <legend>Repository policy</legend>
+                    <div class="switch-grid">
+                        <FluentSwitch @bind-Value="_form.Enabled" Label="Enabled" />
+                        <FluentSwitch @bind-Value="_form.RequireCleanStart" Label="Require clean start" />
+                        <FluentSwitch @bind-Value="_form.CreateRequestBranch" Label="Create request branch" />
+                        <FluentSwitch @bind-Value="_form.CreateRequestCommit" Label="Create request commit" />
+                        <FluentSwitch @bind-Value="_form.AutoMerge" Label="Auto merge" />
+                    </div>
+                </fieldset>
+            </div>
+
+            <footer class="dialog-actions">
+                <FluentButton Appearance="Appearance.Accent" OnClick="RegisterAsync" Loading="@_submitting">
+                    Register project
+                </FluentButton>
+                <FluentButton Appearance="Appearance.Outline" OnClick="ValidateAsync" Disabled="@_submitting">
+                    Validate path
+                </FluentButton>
+                <FluentButton Appearance="Appearance.Stealth" OnClick="CloseRegistration" Disabled="@_submitting" Class="action-cancel">
+                    Cancel
+                </FluentButton>
+            </footer>
         </div>
-
-        <fieldset class="switch-set">
-            <legend>Repository policy</legend>
-            <FluentSwitch @bind-Value="_form.Enabled" Label="Enabled" />
-            <FluentSwitch @bind-Value="_form.RequireCleanStart" Label="Require clean start" />
-            <FluentSwitch @bind-Value="_form.CreateRequestBranch" Label="Create request branch" />
-            <FluentSwitch @bind-Value="_form.CreateRequestCommit" Label="Create request commit" />
-            <FluentSwitch @bind-Value="_form.AutoMerge" Label="Auto merge" />
-        </fieldset>
-
-        <FluentStack Class="dialog-actions"
-                     Orientation="Orientation.Horizontal"
-                     HorizontalGap="8"
-                     Width="100%">
-            <FluentButton Appearance="Appearance.Accent" OnClick="RegisterAsync" Loading="@_submitting">
-                Register project
-            </FluentButton>
-            <FluentButton Appearance="Appearance.Outline" OnClick="ValidateAsync" Disabled="@_submitting">
-                Validate path
-            </FluentButton>
-            <FluentSpacer />
-            <FluentButton Appearance="Appearance.Stealth" OnClick="CloseRegistration" Disabled="@_submitting">
-                Cancel
-            </FluentButton>
-        </FluentStack>
-    </div>
-</FluentDialog>
+    </FluentDialog>
+</div>
 
 @code {
     private readonly RegistrationForm _form = new();
