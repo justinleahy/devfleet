@@ -6,6 +6,7 @@ using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Node.Runtime.Muse;
 using PiCommandCenter.Node.RuntimeRouting;
+using PiCommandCenter.Node.Verification;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -21,14 +22,14 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
     public void Routing_revision_normalizes_role_order_and_preserves_candidate_priority()
     {
         using var firstProvider = CreateProvider(new StubRoutingStore(
-            Route("reviewer", "claude-code/default", "codex/default"),
-            Route("implementer", "muse/default")));
+            Route("reviewer", "claude-code/fable-5-1", "codex/gpt-5.6-sol"),
+            Route("implementer", "muse/muse-spark-1.3")));
         using var reorderedRolesProvider = CreateProvider(new StubRoutingStore(
-            Route("implementer", "muse/default"),
-            Route("reviewer", "claude-code/default", "codex/default")));
+            Route("implementer", "muse/muse-spark-1.3"),
+            Route("reviewer", "claude-code/fable-5-1", "codex/gpt-5.6-sol")));
         using var reorderedCandidatesProvider = CreateProvider(new StubRoutingStore(
-            Route("implementer", "muse/default"),
-            Route("reviewer", "codex/default", "claude-code/default")));
+            Route("implementer", "muse/muse-spark-1.3"),
+            Route("reviewer", "codex/gpt-5.6-sol", "claude-code/fable-5-1")));
 
         var first = firstProvider.Capture([]);
         var reorderedRoles = reorderedRolesProvider.Capture([]);
@@ -43,8 +44,8 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
     public void Candidates_are_unknown_until_a_native_probe_observes_the_current_revision()
     {
         using var provider = CreateProvider(new StubRoutingStore(
-            Route("reviewer", "claude-code/default", "codex/gpt-5.6-sol"),
-            Route("architect", "antigravity/default", "muse/default")));
+            Route("reviewer", "claude-code/fable-5-1", "codex/gpt-5.6-sol"),
+            Route("architect", "antigravity/gemini-3-pro", "muse/muse-spark-1.3")));
 
         var snapshot = provider.Capture([]);
 
@@ -52,11 +53,11 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
         Assert.Equal(TimeSpan.Zero, snapshot.ObservedAt.Offset);
         Assert.Equal(
             [
-                ("architect", "antigravity/default"),
-                ("architect", "muse/default"),
-                ("reviewer", "claude-code/default"),
+                ("architect", "antigravity/gemini-3-pro"),
+                ("architect", "muse/muse-spark-1.3"),
+                ("reviewer", "claude-code/fable-5-1"),
                 ("reviewer", "codex/gpt-5.6-sol"),
-                ("root", "codex/default"),
+                ("root", "codex/gpt-5.6-sol"),
             ],
             snapshot.Routes.Select(route => (route.Role, route.CanonicalModel)));
         Assert.All(snapshot.Routes, route =>
@@ -72,11 +73,267 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
     }
 
     [Fact]
+    public void Capture_includes_baseline_only_verification_policy_when_no_profiles_are_configured()
+    {
+        using var provider = CreateProvider(new StubRoutingStore(Route("reviewer", "codex/gpt-5.6-sol")));
+
+        var snapshot = provider.Capture([]);
+
+        var policy = snapshot.VerificationPolicy;
+        Assert.NotNull(policy);
+        Assert.Equal(TimeSpan.Zero, policy.ObservedAt.Offset);
+        Assert.True(policy.BaselineAvailable);
+        Assert.Equal(VerificationBaselineIds.Version, policy.BaselineVersion);
+        Assert.Empty(policy.Profiles);
+    }
+
+    [Fact]
+    public void Catalog_projects_only_safe_profile_metadata_and_fails_closed_on_invalid_entries()
+    {
+        var options = new VerificationOptions
+        {
+            Profiles =
+            {
+                ["dotnet"] = new VerificationProfileOptions
+                {
+                    Id = "dotnet",
+                    DisplayLabel = "Dotnet checks",
+                    Commands =
+                    [
+                        new VerificationCommandOptions
+                        {
+                            Id = "test",
+                            DisplayLabel = "dotnet test",
+                            Executable = "/usr/bin/dotnet",
+                            Arguments = ["test"],
+                            WorkingDirectory = "src",
+                            TimeoutSeconds = 120,
+                            Mandatory = true,
+                        },
+                    ],
+                },
+                ["dup"] = new VerificationProfileOptions
+                {
+                    Id = "dotnet",
+                    Commands =
+                    [
+                        new VerificationCommandOptions { Id = "other", Executable = "echo", TimeoutSeconds = 5 },
+                    ],
+                },
+                ["bad"] = new VerificationProfileOptions
+                {
+                    Id = new string('x', 129),
+                    Commands =
+                    [
+                        new VerificationCommandOptions { Id = "x", Executable = "echo", TimeoutSeconds = 5 },
+                    ],
+                },
+                ["reserved"] = new VerificationProfileOptions
+                {
+                    Id = "reserved",
+                    Commands =
+                    [
+                        new VerificationCommandOptions
+                        {
+                            Id = $" {VerificationBaselineIds.WhitespaceCommandId} ",
+                            Executable = "dotnet",
+                            TimeoutSeconds = 5,
+                            Mandatory = true,
+                        },
+                    ],
+                },
+                ["empty"] = new VerificationProfileOptions { Id = "empty", Commands = [] },
+            },
+        };
+        var catalog = new VerificationPolicyCatalogProvider(
+            Options.Create(options),
+            new FixedTimeProvider(LocalObservedAt));
+
+        var captured = catalog.Capture();
+
+        var profile = Assert.Single(captured.Profiles);
+        Assert.Equal("dotnet", profile.Id);
+        Assert.Equal("Dotnet checks", profile.DisplayLabel);
+        Assert.Matches("^[0-9a-f]{64}$", profile.Revision);
+        var command = Assert.Single(profile.Commands);
+        Assert.Equal("test", command.Id);
+        Assert.Equal("dotnet test", command.DisplayLabel);
+        Assert.Equal("src", command.WorkingDirectoryLabel);
+        Assert.True(command.Mandatory);
+        Assert.Equal(120, command.TimeoutSeconds);
+        var json = JsonSerializer.Serialize(captured);
+        Assert.DoesNotContain("/usr/bin/dotnet", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("Arguments", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("Executable", json, StringComparison.Ordinal);
+
+        var projectId = Guid.NewGuid();
+        var bindingId = Guid.NewGuid();
+        var accepted = catalog.ValidateSelection(new VerificationProfileSelectionRequestMessage(
+            projectId,
+            bindingId,
+            3,
+            profile.Id,
+            profile.Revision));
+        Assert.True(accepted.Accepted);
+        Assert.Equal(VerificationPolicySelectionCodes.Accepted, accepted.Code);
+
+        var stale = catalog.ValidateSelection(new VerificationProfileSelectionRequestMessage(
+            projectId,
+            bindingId,
+            3,
+            profile.Id,
+            "not-the-revision"));
+        Assert.False(stale.Accepted);
+        Assert.Equal(VerificationPolicySelectionCodes.Stale, stale.Code);
+
+        var missing = catalog.ValidateSelection(new VerificationProfileSelectionRequestMessage(
+            projectId,
+            bindingId,
+            3,
+            "unknown",
+            profile.Revision));
+        Assert.False(missing.Accepted);
+        Assert.Equal(VerificationPolicySelectionCodes.Missing, missing.Code);
+
+        var cleared = catalog.ValidateSelection(new VerificationProfileSelectionRequestMessage(
+            projectId,
+            bindingId,
+            3,
+            null,
+            null));
+        Assert.True(cleared.Accepted);
+        Assert.Equal(VerificationPolicySelectionCodes.Cleared, cleared.Code);
+
+        var malformed = catalog.ValidateSelection(new VerificationProfileSelectionRequestMessage(
+            Guid.Empty,
+            bindingId,
+            3,
+            profile.Id,
+            profile.Revision));
+        Assert.False(malformed.Accepted);
+        Assert.Equal(VerificationPolicySelectionCodes.Malformed, malformed.Code);
+    }
+
+    [Fact]
+    public void Fallback_catalog_revision_changes_with_execution_affecting_fields()
+    {
+        var baseline = CaptureProfile(Command());
+        Assert.Matches("^[0-9a-f]{64}$", baseline.Revision);
+        Assert.DoesNotContain("/usr/bin/dotnet", JsonSerializer.Serialize(baseline), StringComparison.Ordinal);
+
+        Assert.NotEqual(baseline.Revision, CaptureProfile(Command(executable: "/usr/bin/dotnet-preview")).Revision);
+        Assert.NotEqual(baseline.Revision, CaptureProfile(Command(arguments: ["test", "--filter", "x"])).Revision);
+        Assert.NotEqual(baseline.Revision, CaptureProfile(Command(workingDirectory: "tests")).Revision);
+        Assert.NotEqual(baseline.Revision, CaptureProfile(Command(timeoutSeconds: 30)).Revision);
+        Assert.NotEqual(baseline.Revision, CaptureProfile(Command(mandatory: false)).Revision);
+        Assert.Equal(baseline.Revision, CaptureProfile(Command()).Revision);
+    }
+
+    [Fact]
+    public void Explicit_profile_revision_is_honored_in_the_catalog()
+    {
+        var options = new VerificationOptions
+        {
+            Profiles =
+            {
+                ["dotnet"] = new VerificationProfileOptions
+                {
+                    Id = "dotnet",
+                    Revision = "pinned-revision-1",
+                    Commands = [Command()],
+                },
+            },
+        };
+
+        var profile = Assert.Single(CaptureCatalog(options).Profiles);
+
+        Assert.Equal("pinned-revision-1", profile.Revision);
+        Assert.DoesNotContain("/usr/bin/dotnet", JsonSerializer.Serialize(profile), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Catalog_omits_profiles_that_cannot_fit_assignment_policy_revision()
+    {
+        var compositeBudget = 128 - "baseline:1+".Length - 1;
+        var fitId = new string('a', 50);
+        var fitRevision = new string('r', compositeBudget - 50);
+        var overId = new string('b', 51);
+        var overRevision = new string('r', compositeBudget - 50);
+
+        var options = new VerificationOptions
+        {
+            Profiles =
+            {
+                [fitId] = new VerificationProfileOptions
+                {
+                    Id = fitId,
+                    Revision = fitRevision,
+                    Commands = [Command()],
+                },
+                [overId] = new VerificationProfileOptions
+                {
+                    Id = overId,
+                    Revision = overRevision,
+                    Commands = [Command()],
+                },
+            },
+        };
+
+        var captured = CaptureCatalog(options);
+        var profile = Assert.Single(captured.Profiles);
+        Assert.Equal(fitId, profile.Id);
+        Assert.Equal(128, $"baseline:1+{profile.Id}@{profile.Revision}".Length);
+
+        var catalog = new VerificationPolicyCatalogProvider(
+            Options.Create(options),
+            new FixedTimeProvider(LocalObservedAt));
+        var missing = catalog.ValidateSelection(new VerificationProfileSelectionRequestMessage(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            1,
+            overId,
+            overRevision));
+        Assert.False(missing.Accepted);
+        Assert.Equal(VerificationPolicySelectionCodes.Missing, missing.Code);
+    }
+
+    [Fact]
+    public void Catalog_omits_profiles_whose_mandatory_command_json_exceeds_4096()
+    {
+        var fit = new VerificationProfileOptions
+        {
+            Id = "fit-mandatory",
+            Revision = "r1",
+            Commands = MandatoryCommands(31, idLength: 128),
+        };
+        var over = new VerificationProfileOptions
+        {
+            Id = "over-mandatory",
+            Revision = "r1",
+            Commands = MandatoryCommands(32, idLength: 128),
+        };
+        var options = new VerificationOptions
+        {
+            Profiles =
+            {
+                ["fit-mandatory"] = fit,
+                ["over-mandatory"] = over,
+            },
+        };
+
+        var captured = CaptureCatalog(options);
+        var profile = Assert.Single(captured.Profiles);
+        Assert.Equal("fit-mandatory", profile.Id);
+    }
+
+
+
+    [Fact]
     public async Task Routing_change_invalidates_observations_until_the_new_revision_is_probed()
     {
         var routing = new StubRoutingStore(
-            Route("root", "codex/default"),
-            Route("reviewer", "codex/default"));
+            Route("root", "codex/gpt-5.6-sol"),
+            Route("reviewer", "codex/gpt-5.6-sol"));
         using var provider = CreateProvider(routing);
         await provider.RefreshAsync(CancellationToken.None);
         Assert.All(
@@ -85,8 +342,8 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
 
         await routing.UpdateAsync(new UpdateNodeRuntimeConfigurationMessage(
             [
-                Route("root", "codex/default"),
-                Route("reviewer", "codex/gpt-5.6-sol"),
+                Route("root", "codex/gpt-5.6-sol"),
+                Route("reviewer", "codex/gpt-reviewer"),
             ]));
 
         var changed = provider.Capture([]).Routes.Single(route => route.Role == "reviewer");
@@ -108,7 +365,7 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
         var second = Guid.NewGuid();
         var third = Guid.NewGuid();
         using var provider = CreateProvider(
-            new StubRoutingStore(Route("root", "codex/default")),
+            new StubRoutingStore(Route("root", "codex/gpt-5.6-sol")),
             maxConcurrentRequests: 2);
 
         var snapshot = provider.Capture([first, first, second, third]);
@@ -144,12 +401,11 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
                 new MuseModelCatalogResult(["muse/muse-spark-1.3"], ["muse/muse-spark-1.3"], null)));
         using var provider = CreateProvider(
             new StubRoutingStore(
-                Route("root", "codex/default"),
+                Route("root", "codex/gpt-5.6-sol"),
                 Route("architect", "zai/glm-4.7", "claude-code/sonnet"),
                 Route(
                     "reviewer",
                     "antigravity/gemini-3-pro",
-                    "muse/default",
                     "muse/muse-spark-1.3")),
             probe: probe);
 
@@ -159,7 +415,6 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
         var unknown = new HashSet<string>(StringComparer.Ordinal)
         {
             "antigravity/gemini-3-pro",
-            "muse/default",
             "muse/muse-spark-1.3",
         };
         Assert.All(snapshot.Routes, route =>
@@ -195,7 +450,7 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
         var runner = new FakeModelRunner
         {
             Handler = (executable, _) => executable == "node-test"
-                ? Ok("""[{"id":"codex/default-model","authStatus":"ready"}]""")
+                ? Ok("""[{"id":"codex/gpt-5.6-sol","authStatus":"ready"}]""")
                 : throw new InvalidOperationException(
                     "Muse readiness must not invoke a model command."),
         };
@@ -207,10 +462,9 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
             new StubMuseCatalogReader(catalog));
         using var provider = CreateProvider(
             new StubRoutingStore(
-                Route("root", "codex/default"),
+                Route("root", "codex/gpt-5.6-sol"),
                 Route(
                     "reviewer",
-                    "muse/default",
                     "muse/muse-spark-1.3")),
             probe: probe);
 
@@ -218,11 +472,8 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
         var routes = provider.Capture([]).Routes;
 
         Assert.Equal(
-            RuntimeReadinessStatuses.Ready,
-            routes.Single(route => route.Role == "root").Readiness);
-        Assert.All(
-            routes.Where(route => route.Role == "reviewer"),
-            route => Assert.Equal(RuntimeReadinessStatuses.Unknown, route.Readiness));
+            RuntimeReadinessStatuses.Unknown,
+            routes.Single(route => route.Role == "reviewer").Readiness);
     }
 
     [Fact]
@@ -280,9 +531,9 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
                 "Muse model discovery requires local login.")));
         using var provider = CreateProvider(
             new StubRoutingStore(
-                Route("root", "codex/default"),
-                Route("architect", "claude-code/default"),
-                Route("reviewer", "antigravity/default", "muse/default")),
+                Route("root", "codex/gpt-5.6-sol"),
+                Route("architect", "claude-code/fable-5-1"),
+                Route("reviewer", "antigravity/gemini-3-pro", "muse/muse-spark-1.3")),
             probe: probe);
 
         await provider.RefreshAsync(CancellationToken.None);
@@ -354,10 +605,73 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
         };
     }
 
+    private static VerificationCommandOptions Command(
+        string executable = "/usr/bin/dotnet",
+        string[]? arguments = null,
+        string workingDirectory = "src",
+        int timeoutSeconds = 120,
+        bool mandatory = true) =>
+        new()
+        {
+            Id = "test",
+            DisplayLabel = "dotnet test",
+            Executable = executable,
+            Arguments = arguments ?? ["test"],
+            WorkingDirectory = workingDirectory,
+            TimeoutSeconds = timeoutSeconds,
+            Mandatory = mandatory,
+        };
+
+    private static List<VerificationCommandOptions> MandatoryCommands(int count, int idLength)
+    {
+        var commands = new List<VerificationCommandOptions>(count);
+        for (var index = 0; index < count; index++)
+        {
+            var suffix = index.ToString("x2");
+            var id = new string('c', idLength - suffix.Length) + suffix;
+            commands.Add(new VerificationCommandOptions
+            {
+                Id = id,
+                DisplayLabel = id,
+                Executable = "/usr/bin/dotnet",
+                Arguments = ["test"],
+                WorkingDirectory = "src",
+                TimeoutSeconds = 120,
+                Mandatory = true,
+            });
+        }
+
+        return commands;
+    }
+
+
+    private static VerificationPolicyCatalogMessage CaptureCatalog(VerificationOptions options) =>
+        new VerificationPolicyCatalogProvider(
+            Options.Create(options),
+            new FixedTimeProvider(LocalObservedAt)).Capture();
+
+    private static VerificationPolicyProfileMessage CaptureProfile(VerificationCommandOptions command)
+    {
+        var options = new VerificationOptions
+        {
+            Profiles =
+            {
+                ["dotnet"] = new VerificationProfileOptions
+                {
+                    Id = "dotnet",
+                    DisplayLabel = "Dotnet checks",
+                    Commands = [command],
+                },
+            },
+        };
+        return Assert.Single(CaptureCatalog(options).Profiles);
+    }
+
     private static RuntimeReadinessProvider CreateProvider(
         INodeRuntimeRoutingStore routing,
         int maxConcurrentRequests = 4,
-        IRuntimeReadinessProbe? probe = null)
+        IRuntimeReadinessProbe? probe = null,
+        IVerificationPolicyCatalog? verificationPolicies = null)
         => new(
             Options.Create(new NodeOptions
             {
@@ -368,7 +682,8 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
             routing,
             probe ?? new StubReadinessProbe(),
             new FixedTimeProvider(LocalObservedAt),
-            NullLogger<RuntimeReadinessProvider>.Instance);
+            NullLogger<RuntimeReadinessProvider>.Instance,
+            verificationPolicies ?? new EmptyVerificationPolicyCatalog(LocalObservedAt));
 
     private static RuntimeRoleRouteMessage Route(string role, params string[] candidates)
         => new(
@@ -433,6 +748,20 @@ public sealed class RuntimeReadinessProviderTests : IDisposable
     {
         public Task<MuseModelCatalogResult> ReadAsync(CancellationToken cancellationToken)
             => Task.FromResult(result);
+    }
+
+    private sealed class EmptyVerificationPolicyCatalog(DateTimeOffset observedAt) : IVerificationPolicyCatalog
+    {
+        public VerificationPolicyCatalogMessage Capture() =>
+            new(
+                observedAt.ToUniversalTime(),
+                BaselineAvailable: true,
+                VerificationBaselineIds.Version,
+                []);
+
+        public VerificationProfileSelectionResultMessage ValidateSelection(
+            VerificationProfileSelectionRequestMessage request)
+            => throw new NotSupportedException();
     }
 
     private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider

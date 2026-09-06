@@ -32,12 +32,14 @@ public class RequestQueueTests
     private static QueueWorkRequestCommand EnqueueCommand(
         RequestPriority priority,
         string title = "Do work",
-        WorkRequestKind kind = WorkRequestKind.Development) => new(
+        WorkRequestKind kind = WorkRequestKind.Development,
+        Guid? originalRequestId = null) => new(
         Kind: kind,
         Priority: priority,
         RiskLevel: RiskLevel.Standard,
         Title: title,
-        Prompt: "Fix the thing");
+        Prompt: "Fix the thing",
+        OriginalRequestId: originalRequestId);
 
     private static async Task<TestWorld> CreateWorldAsync()
     {
@@ -201,6 +203,96 @@ public class RequestQueueTests
     }
 
     [Fact]
+    public async Task Linked_retry_persists_original_request_id_without_execution_ownership()
+    {
+        var world = await CreateWorldAsync();
+        using var context = world.Context;
+        var project = new ProjectId(world.ProjectId);
+
+        var original = await world.Queue.EnqueueAsync(
+            project,
+            EnqueueCommand(RequestPriority.Normal, title: "original"));
+        world.Clock.Advance(TimeSpan.FromMinutes(1));
+        var retry = await world.Queue.EnqueueAsync(
+            project,
+            EnqueueCommand(RequestPriority.Normal, title: "retry", originalRequestId: original.Id));
+
+        Assert.Null(original.OriginalRequestId);
+        Assert.Equal(original.Id, retry.OriginalRequestId);
+        Assert.Equal((int)WorkRequestStatus.Queued, retry.Status);
+        Assert.Null(retry.Assignment);
+
+        var fetched = await world.Queue.GetAsync(new WorkRequestId(retry.Id));
+        Assert.Equal(original.Id, fetched.OriginalRequestId);
+        Assert.Null(fetched.Assignment);
+
+        var persisted = await context.WorkRequests.AsNoTracking().SingleAsync(
+            candidate => candidate.Id == new WorkRequestId(retry.Id));
+        Assert.Equal(new WorkRequestId(original.Id), persisted.OriginalRequestId);
+        Assert.Empty(context.ExecutionAssignments.Where(a => a.RequestId == persisted.Id));
+    }
+
+    [Fact]
+    public async Task Linked_retry_queues_behind_an_older_equal_priority_request()
+    {
+        var world = await CreateWorldAsync();
+        using var context = world.Context;
+        var project = new ProjectId(world.ProjectId);
+
+        var older = await world.Queue.EnqueueAsync(
+            project,
+            EnqueueCommand(RequestPriority.Normal, title: "older"));
+        world.Clock.Advance(TimeSpan.FromSeconds(30));
+        var original = await world.Queue.EnqueueAsync(
+            project,
+            EnqueueCommand(RequestPriority.High, title: "original"));
+        world.Clock.Advance(TimeSpan.FromSeconds(30));
+        var retry = await world.Queue.EnqueueAsync(
+            project,
+            EnqueueCommand(RequestPriority.Normal, title: "retry", originalRequestId: original.Id));
+
+        var ordered = await world.Queue.ListAsync(project);
+        Assert.Equal(
+            new[] { "original", "older", "retry" },
+            ordered.Select(request => request.Title).ToArray());
+        Assert.True(retry.CreatedAt > older.CreatedAt);
+        Assert.Equal(older.Priority, retry.Priority);
+        Assert.Null(retry.Assignment);
+    }
+
+    [Fact]
+    public async Task Enqueue_rejects_a_missing_original_request()
+    {
+        var world = await CreateWorldAsync();
+        using var context = world.Context;
+        var missing = Guid.NewGuid();
+
+        var ex = await Assert.ThrowsAsync<RequestNotFoundException>(() => world.Queue.EnqueueAsync(
+            new ProjectId(world.ProjectId),
+            EnqueueCommand(RequestPriority.Normal, originalRequestId: missing)));
+        Assert.Equal(new WorkRequestId(missing), ex.Id);
+        Assert.Empty(context.WorkRequests);
+    }
+
+    [Fact]
+    public async Task Enqueue_rejects_a_cross_project_original_request()
+    {
+        var world = await CreateWorldAsync();
+        using var context = world.Context;
+        var catalog = new ProjectCatalog(world.Clock, context, new ProjectionNotifier());
+        var other = await catalog.RegisterAsync(RegisterCommand() with { DisplayName = "Other" });
+        var original = await world.Queue.EnqueueAsync(
+            new ProjectId(world.ProjectId),
+            EnqueueCommand(RequestPriority.Normal, title: "original"));
+
+        var ex = await Assert.ThrowsAsync<ArgumentException>(() => world.Queue.EnqueueAsync(
+            new ProjectId(other.Id),
+            EnqueueCommand(RequestPriority.Normal, title: "retry", originalRequestId: original.Id)));
+        Assert.Contains("same project", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, context.WorkRequests.Count());
+    }
+
+    [Fact]
     public async Task Queue_operations_fail_deterministically_for_a_missing_project()
     {
         using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
@@ -299,7 +391,7 @@ public class RequestQueueTests
             [
                 new RuntimeRouteReadinessDto(
                     "root",
-                    "codex/default",
+                    "codex/gpt-5.6-sol",
                     "ready",
                     "native-auth",
                     now,

@@ -38,10 +38,11 @@ public sealed class NodeRuntimeRoutingStore : INodeRuntimeRoutingStore, IDisposa
         if (File.Exists(_path))
         {
             using var document = JsonDocument.Parse(File.ReadAllText(_path));
-            if (ContainsRuntimeProfile(document.RootElement))
+            if (ContainsRuntimeProfile(document.RootElement)
+                || ContainsDeprecatedDefaultSelector(document.RootElement))
             {
-                // Pre-selector routes named runtime profiles; they cannot be mapped onto
-                // '<runtime>/<model>' selectors, so the configured routes take over.
+                // Pre-selector routes and provider-selected defaults cannot name the
+                // concrete model to run, so the configured routes take over.
                 File.Delete(_path);
             }
             else
@@ -170,6 +171,27 @@ public sealed class NodeRuntimeRoutingStore : INodeRuntimeRoutingStore, IDisposa
         JsonValueKind.Array => element.EnumerateArray().Any(ContainsRuntimeProfile),
         _ => false,
     };
+
+    private static bool ContainsDeprecatedDefaultSelector(JsonElement element) => element.ValueKind switch
+    {
+        JsonValueKind.Object => element.EnumerateObject().Any(property =>
+            IsDeprecatedDefaultSelector(property) || ContainsDeprecatedDefaultSelector(property.Value)),
+        JsonValueKind.Array => element.EnumerateArray().Any(ContainsDeprecatedDefaultSelector),
+        _ => false,
+    };
+
+    private static bool IsDeprecatedDefaultSelector(JsonProperty property)
+    {
+        if (!string.Equals(property.Name, "model", StringComparison.OrdinalIgnoreCase)
+            || property.Value.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var selector = property.Value.GetString()!.Trim();
+        var separator = selector.IndexOf('/');
+        return separator > 0 && selector[(separator + 1)..] == "default";
+    }
 
     private static void RestrictOwnerOnly(string path)
     {

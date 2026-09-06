@@ -6,7 +6,8 @@ namespace PiCommandCenter.Node.Child;
 
 /// <summary>
 /// Production <see cref="INodeCompletionGateway"/>: hub methods
-/// <c>RecordVerificationRun</c>, <c>BeginTerminalization</c>, and <c>ConfirmTerminalization</c>.
+/// <c>RecordVerificationRun</c>, <c>ListVerificationRuns</c>, <c>BeginTerminalization</c>,
+/// and <c>ConfirmTerminalization</c>.
 /// </summary>
 public sealed class NodeTransportCompletionGateway : INodeCompletionGateway
 {
@@ -32,6 +33,22 @@ public sealed class NodeTransportCompletionGateway : INodeCompletionGateway
         return _transport.RecordVerificationRunAsync(
             run,
             credential.ProjectId,
+            credential.ClaimToken,
+            sessionId,
+            cancellationToken);
+    }
+
+    public Task<IReadOnlyList<VerificationRunDto>> ListVerificationRunsAsync(
+        string sessionId,
+        Guid projectId,
+        Guid requestId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        var credential = RequireCredential(requestId, projectId);
+        return _transport.ListVerificationRunsAsync(
+            projectId,
+            requestId,
             credential.ClaimToken,
             sessionId,
             cancellationToken);

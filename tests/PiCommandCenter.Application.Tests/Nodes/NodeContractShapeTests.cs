@@ -85,7 +85,12 @@ public class NodeContractShapeTests
             WorkRequestKind.Development,
             RiskLevel.Standard,
             CreateRequestBranch: true,
-            CreateRequestCommit: false);
+            CreateRequestCommit: false,
+            VerificationPolicyRevision: null,
+            BaselineVersion: null,
+            TrustedVerificationProfileId: null,
+            TrustedVerificationProfileRevision: null,
+            MandatoryCommandIdsJson: null);
 
         Assert.Equal(requestId, dto.RequestId);
         Assert.Equal(projectId, dto.ProjectId);
@@ -104,6 +109,11 @@ public class NodeContractShapeTests
         Assert.Equal(RiskLevel.Standard, dto.RequestRiskLevel);
         Assert.True(dto.CreateRequestBranch);
         Assert.False(dto.CreateRequestCommit);
+        Assert.Null(dto.VerificationPolicyRevision);
+        Assert.Null(dto.BaselineVersion);
+        Assert.Null(dto.TrustedVerificationProfileId);
+        Assert.Null(dto.TrustedVerificationProfileRevision);
+        Assert.Null(dto.MandatoryCommandIdsJson);
     }
 
     [Fact]

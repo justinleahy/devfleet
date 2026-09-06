@@ -26,7 +26,12 @@ public sealed record ExecutionAssignmentDto(
     WorkRequestKind RequestKind,
     RiskLevel RequestRiskLevel,
     bool CreateRequestBranch,
-    bool CreateRequestCommit);
+    bool CreateRequestCommit,
+    string? VerificationPolicyRevision,
+    string? BaselineVersion,
+    string? TrustedVerificationProfileId,
+    string? TrustedVerificationProfileRevision,
+    string? MandatoryCommandIdsJson);
 
 /// <summary>One durable node inventory entry with its current local execution evidence.</summary>
 public sealed record ExecutionAssignmentInventoryDto(

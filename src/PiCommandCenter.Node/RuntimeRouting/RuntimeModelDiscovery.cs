@@ -165,8 +165,7 @@ public sealed partial class RuntimeModelDiscovery : BackgroundService, IRuntimeM
     // sync with https://code.claude.com/docs/en/model-config when Anthropic adds an option.
     private static readonly RuntimeModelMessage[] ClaudeCodeModels =
     [
-        new("claude-code/default", "Default (account setting)", AgentModelSelector.ClaudeCode),
-        new("claude-code/fable", "Fable (latest)", AgentModelSelector.ClaudeCode),
+        new("claude-code/fable-5-1", "Fable 5.1", AgentModelSelector.ClaudeCode),
         new("claude-code/sonnet", "Sonnet (latest)", AgentModelSelector.ClaudeCode),
         new("claude-code/opus", "Opus (latest)", AgentModelSelector.ClaudeCode),
         new("claude-code/haiku", "Haiku (latest)", AgentModelSelector.ClaudeCode),
@@ -336,7 +335,7 @@ public sealed partial class RuntimeModelDiscovery : BackgroundService, IRuntimeM
     /// <summary>
     /// Reads the local Muse host's model list, which the reader already reports as canonical
     /// <c>muse/&lt;id&gt;</c> selectors. Fails closed: a reader error is surfaced as-is, and a
-    /// read that yields no usable non-default selector is an error rather than an empty catalog.
+    /// read that yields no usable selector is an error rather than an empty catalog.
     /// </summary>
     private async Task<RuntimeModelCatalogMessage> DiscoverMuseAsync(CancellationToken cancellationToken)
     {
@@ -348,7 +347,7 @@ public sealed partial class RuntimeModelDiscovery : BackgroundService, IRuntimeM
         var models = new List<RuntimeModelMessage>(result.Models.Count);
         foreach (var id in result.Models)
         {
-            if (AgentModelSelector.TryParse(id, out var selector) && !selector.IsProviderDefault)
+            if (AgentModelSelector.TryParse(id, out var selector))
             {
                 models.Add(new RuntimeModelMessage(selector.Value, selector.Value, AgentModelSelector.Muse));
             }

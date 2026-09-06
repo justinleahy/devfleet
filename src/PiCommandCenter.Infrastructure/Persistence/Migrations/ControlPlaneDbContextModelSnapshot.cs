@@ -304,6 +304,14 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.Property<bool>("RequireCleanStart")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("TrustedVerificationProfileId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TrustedVerificationProfileRevision")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("UpdatedAt")
                         .HasColumnType("INTEGER");
 
@@ -367,6 +375,10 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("ProjectId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_WorkspaceBindings_ProjectId");
+
                     b.HasIndex("NodeId", "CanonicalRepositoryPath")
                         .IsUnique()
                         .HasDatabaseName("IX_WorkspaceBindings_NodeId_CanonicalRepositoryPath");
@@ -374,10 +386,6 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.HasIndex("NodeId", "RepositoryPath")
                         .IsUnique()
                         .HasDatabaseName("IX_WorkspaceBindings_NodeId_RepositoryPath");
-
-                    b.HasIndex("ProjectId")
-                        .IsUnique()
-                        .HasDatabaseName("IX_WorkspaceBindings_ProjectId");
 
                     b.ToTable("WorkspaceBindings", (string)null);
                 });
@@ -389,6 +397,10 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
 
                     b.Property<long>("AssignedAt")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("BaselineVersion")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
 
                     b.Property<long>("BindingValidationRevisionSnapshot")
                         .HasColumnType("INTEGER");
@@ -417,6 +429,10 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.Property<long>("LeaseExpiresAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("MandatoryCommandIdsJson")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
                     b.Property<Guid>("NodeIdSnapshot")
                         .HasColumnType("TEXT");
 
@@ -431,6 +447,18 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.Property<long?>("TerminalAt")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("TrustedVerificationProfileId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TrustedVerificationProfileRevision")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("VerificationPolicyRevision")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
                         .HasColumnType("INTEGER");
@@ -440,14 +468,14 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
 
                     b.HasKey("RequestId");
 
+                    b.HasIndex("WorkspaceBindingId")
+                        .HasDatabaseName("IX_ExecutionAssignments_WorkspaceBindingId");
+
                     b.HasIndex("NodeIdSnapshot", "State")
                         .HasDatabaseName("IX_ExecutionAssignments_NodeIdSnapshot_State");
 
                     b.HasIndex("ProjectId", "State")
                         .HasDatabaseName("IX_ExecutionAssignments_ProjectId_State");
-
-                    b.HasIndex("WorkspaceBindingId")
-                        .HasDatabaseName("IX_ExecutionAssignments_WorkspaceBindingId");
 
                     b.ToTable("ExecutionAssignments", (string)null);
                 });
@@ -467,6 +495,9 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("OriginalRequestId")
                         .HasColumnType("TEXT");
 
                     b.Property<int>("Priority")
@@ -506,6 +537,9 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("ProjectId")
                         .HasDatabaseName("IX_WorkRequests_ProjectId");
+
+                    b.HasIndex("OriginalRequestId")
+                        .HasDatabaseName("IX_WorkRequests_OriginalRequestId");
 
                     b.HasIndex("Priority", "CreatedAt")
                         .HasDatabaseName("IX_WorkRequests_Priority_CreatedAt");
@@ -550,6 +584,57 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
 
                     b.ToTable("RequestResults", (string)null);
                 });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Completion.PendingTerminalizationRow", b =>
+                {
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("AcceptedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ClaimToken")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CompletionEvidenceJson")
+                        .HasMaxLength(16384)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Intent")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("NodeId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RootSessionId")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("RequestId");
+
+                    b.HasIndex("NodeId")
+                        .HasDatabaseName("IX_PendingTerminalizations_NodeId");
+
+                    b.HasIndex("ProjectId");
+
+                    b.ToTable("PendingTerminalizations", (string)null);
+                });
+
 
             modelBuilder.Entity("PiCommandCenter.Infrastructure.Mail.MailAgentIdentityRow", b =>
                 {
@@ -805,6 +890,254 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.ToTable("SessionEvents", (string)null);
                 });
 
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryAuditFactRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Actor")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("AtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PayloadJson")
+                        .HasMaxLength(16384)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OperationId", "AtUtcTicks")
+                        .HasDatabaseName("IX_RecoveryAuditFacts_OperationId_At");
+
+                    b.ToTable("RecoveryAuditFacts", (string)null);
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryHoldRow", b =>
+                {
+                    b.Property<Guid>("ProjectId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("EstablishedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("ProjectId");
+
+                    b.HasIndex("OperationId");
+
+                    b.ToTable("RecoveryHolds", (string)null);
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryIdempotencyRow", b =>
+                {
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Action")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Key")
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CreatedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("InputHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("OperationId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("ProjectId", "Action", "Key");
+
+                    b.HasIndex("OperationId");
+
+                    b.ToTable("RecoveryIdempotencyKeys", (string)null);
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryOperationRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Actor")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Attempt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("BlockerCodesJson")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("CompletedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("DeadlineUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EvidenceJson")
+                        .HasMaxLength(16384)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("InventoryRevision")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("LastProgressUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Stage")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProjectId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_RecoveryOperations_ProjectId_Unresolved")
+                        .HasFilter("\"Status\" <> 'Recovered'");
+
+                    b.HasIndex("ProjectId", "CreatedAtUtcTicks")
+                        .HasDatabaseName("IX_RecoveryOperations_ProjectId_CreatedAt");
+
+                    b.ToTable("RecoveryOperations", (string)null);
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryReservationTargetRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CapturedState")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CapturedVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EvidenceJson")
+                        .HasMaxLength(16384)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("LeaseId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Outcome")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OperationId", "LeaseId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_RecoveryReservationTargets_OperationId_LeaseId");
+
+                    b.ToTable("RecoveryReservationTargets", (string)null);
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryTargetRow", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("BindingRevision")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CapturedState")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("CapturedVersion")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("EvidenceJson")
+                        .HasMaxLength(16384)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("OperationId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Outcome")
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("OperationId", "RequestId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_RecoveryTargets_OperationId_RequestId");
+
+                    b.ToTable("RecoveryTargets", (string)null);
+                });
+
             modelBuilder.Entity("PiCommandCenter.Infrastructure.Reservations.ProjectFencingTokenRow", b =>
                 {
                     b.Property<Guid>("ProjectId")
@@ -948,6 +1281,9 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid>("AttemptId")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("CommandId")
                         .IsRequired()
                         .HasMaxLength(128)
@@ -958,6 +1294,11 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
 
                     b.Property<int?>("ExitCode")
                         .HasColumnType("INTEGER");
+
+                    b.Property<string>("Fingerprint")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
 
                     b.Property<bool>("Mandatory")
                         .HasColumnType("INTEGER");
@@ -970,12 +1311,22 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                         .HasMaxLength(16384)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("PolicyRevision")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("ProfileId")
                         .IsRequired()
                         .HasMaxLength(128)
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("RequestId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RunKind")
+                        .IsRequired()
+                        .HasMaxLength(32)
                         .HasColumnType("TEXT");
 
                     b.Property<long>("StartedAtUtcTicks")
@@ -991,7 +1342,44 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.HasIndex("RequestId")
                         .HasDatabaseName("IX_VerificationRuns_RequestId");
 
+                    b.HasIndex("RequestId", "Fingerprint", "PolicyRevision", "ProfileId", "CommandId", "RunKind")
+                        .IsUnique()
+                        .HasDatabaseName("IX_VerificationRuns_FinalIdentity")
+                        .HasFilter("\"RunKind\" <> 'Intermediate'");
+
                     b.ToTable("VerificationRuns", (string)null);
+                });
+
+            modelBuilder.Entity("VerificationPolicyUpgradeAuditRow", b =>
+                {
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("MigratedAtUtcTicks")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ProfileId")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ProfileRevision")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("ProjectId");
+
+                    b.HasIndex("ProjectId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_VerificationPolicyUpgradeAudits_ProjectId");
+
+                    b.ToTable("VerificationPolicyUpgradeAudits", (string)null);
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
@@ -1088,7 +1476,28 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                         .HasForeignKey("ProjectId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
+
+                    b.HasOne("PiCommandCenter.Domain.Requests.WorkRequest", null)
+                        .WithMany()
+                        .HasForeignKey("OriginalRequestId")
+                        .OnDelete(DeleteBehavior.Restrict);
                 });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Completion.PendingTerminalizationRow", b =>
+                {
+                    b.HasOne("PiCommandCenter.Domain.Projects.Project", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PiCommandCenter.Domain.Requests.WorkRequest", null)
+                        .WithMany()
+                        .HasForeignKey("RequestId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
 
             modelBuilder.Entity("PiCommandCenter.Infrastructure.Mail.MailRecipientRow", b =>
                 {
@@ -1099,6 +1508,50 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                         .IsRequired();
 
                     b.Navigation("Message");
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryAuditFactRow", b =>
+                {
+                    b.HasOne("PiCommandCenter.Infrastructure.Recovery.RecoveryOperationRow", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryHoldRow", b =>
+                {
+                    b.HasOne("PiCommandCenter.Infrastructure.Recovery.RecoveryOperationRow", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryIdempotencyRow", b =>
+                {
+                    b.HasOne("PiCommandCenter.Infrastructure.Recovery.RecoveryOperationRow", null)
+                        .WithMany()
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryReservationTargetRow", b =>
+                {
+                    b.HasOne("PiCommandCenter.Infrastructure.Recovery.RecoveryOperationRow", null)
+                        .WithMany("ReservationTargets")
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryTargetRow", b =>
+                {
+                    b.HasOne("PiCommandCenter.Infrastructure.Recovery.RecoveryOperationRow", null)
+                        .WithMany("AssignmentTargets")
+                        .HasForeignKey("OperationId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("PiCommandCenter.Infrastructure.Reservations.ReservationScopeRow", b =>
@@ -1113,6 +1566,13 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("PiCommandCenter.Infrastructure.Mail.MailMessageRow", b =>
                 {
                     b.Navigation("Recipients");
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Infrastructure.Recovery.RecoveryOperationRow", b =>
+                {
+                    b.Navigation("AssignmentTargets");
+
+                    b.Navigation("ReservationTargets");
                 });
 
             modelBuilder.Entity("PiCommandCenter.Infrastructure.Reservations.ReservationLeaseRow", b =>

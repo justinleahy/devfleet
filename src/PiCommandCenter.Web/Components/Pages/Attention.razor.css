@@ -103,6 +103,35 @@
     min-width: 0;
 }
 
+/* A recovery item carries one extra action under its evidence; it stays attached to the
+   callout above it and keeps a thumb-sized target on a phone. */
+.signal-item {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
+}
+
+.signal-recovery {
+    margin: 0;
+    padding-inline-start: calc(var(--design-unit) * 2px);
+}
+
+.recovery-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    color: var(--accent-foreground-rest);
+    font-size: var(--type-ramp-minus-1-font-size);
+    font-weight: 600;
+    text-decoration: underline;
+}
+
+.recovery-link:focus-visible {
+    outline: calc(var(--focus-stroke-width) * 1px) solid var(--focus-stroke-outer);
+    outline-offset: 2px;
+}
+
 .error-list {
     margin: 0;
     padding-inline-start: calc(var(--design-unit) * 4px);

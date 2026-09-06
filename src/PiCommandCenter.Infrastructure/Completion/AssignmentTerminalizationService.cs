@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -11,6 +12,7 @@ using PiCommandCenter.Domain.Completion;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Reservations;
 using PiCommandCenter.Domain.Sessions;
+using PiCommandCenter.Domain.Verification;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Reservations;
 
@@ -30,6 +32,12 @@ public sealed class AssignmentTerminalizationService(
     ILogger<AssignmentTerminalizationService>? logger = null) : IAssignmentTerminalizationService
 {
     private readonly ILogger _logger = logger ?? NullLogger<AssignmentTerminalizationService>.Instance;
+    private static readonly JsonSerializerOptions PendingEvidenceJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        MaxDepth = 8,
+        AllowTrailingCommas = false,
+    };
+
 
     public async Task<CompletionGateDecision> BeginAsync(
         NodeId nodeId,
@@ -55,7 +63,7 @@ public sealed class AssignmentTerminalizationService(
             return terminal;
         }
 
-        var missing = await ValidateIntentAsync(requestId, intent, evidence, reason, cancellationToken)
+        var missing = await ValidateIntentAsync(assignment, requestId, intent, evidence, reason, cancellationToken)
             .ConfigureAwait(false);
         if (missing.Count > 0)
         {
@@ -101,6 +109,19 @@ public sealed class AssignmentTerminalizationService(
                 assignment.BeginFinalizing(now);
             }
         }
+        await PersistPendingTerminalizationAsync(
+                nodeId,
+                projectId,
+                requestId,
+                claimToken,
+                rootSessionId,
+                intent,
+                evidence,
+                reason,
+                now,
+                cancellationToken)
+            .ConfigureAwait(false);
+
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         notifier.Publish(ProjectionChange.Request(projectId.Value, requestId.Value));
@@ -137,7 +158,7 @@ public sealed class AssignmentTerminalizationService(
         var missing = ValidateProof(proof);
         if (missing.Count == 0)
         {
-            missing = await ValidateIntentAsync(requestId, intent, evidence, reason, cancellationToken)
+            missing = await ValidateIntentAsync(assignment, requestId, intent, evidence, reason, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -178,6 +199,8 @@ public sealed class AssignmentTerminalizationService(
                 assignment.Cancel(now);
                 break;
         }
+        await RemovePendingTerminalizationAsync(requestId, cancellationToken).ConfigureAwait(false);
+
 
         await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         notifier.Publish(ProjectionChange.Request(projectId.Value, requestId.Value));
@@ -328,6 +351,7 @@ public sealed class AssignmentTerminalizationService(
     /// preflight; Fail/Cancel require a reason.
     /// </summary>
     private async Task<List<string>> ValidateIntentAsync(
+        ExecutionAssignment assignment,
         WorkRequestId requestId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
@@ -338,7 +362,7 @@ public sealed class AssignmentTerminalizationService(
         {
             return evidence is null
                 ? [CompletionRequirements.CompletionEvidence]
-                : await EvaluateCompletionCriteriaAsync(requestId, evidence, cancellationToken)
+                : await EvaluateCompletionCriteriaAsync(assignment, requestId, evidence, cancellationToken)
                     .ConfigureAwait(false);
         }
 
@@ -390,6 +414,7 @@ public sealed class AssignmentTerminalizationService(
 
     /// <summary>Objective completion criteria over sessions, events, reservations, and verification.</summary>
     private async Task<List<string>> EvaluateCompletionCriteriaAsync(
+        ExecutionAssignment assignment,
         WorkRequestId requestId,
         CompletionEvidence evidence,
         CancellationToken cancellationToken)
@@ -442,7 +467,7 @@ public sealed class AssignmentTerminalizationService(
 
         var reviewers = sessions
             .Where(s => s.ParentSessionId is not null
-                && RoleIs(s.Role, "reviewer")
+                && (RoleIs(s.Role, "reviewer") || RoleIs(s.Role, "verifier"))
                 && string.Equals(s.WorkState, nameof(AgentWorkState.Completed), StringComparison.Ordinal)
                 && implementers.All(i => !string.Equals(i.Id, s.Id, StringComparison.Ordinal)))
             .ToList();
@@ -475,20 +500,114 @@ public sealed class AssignmentTerminalizationService(
             missing.Add(CompletionRequirements.OwnershipKnown);
         }
 
-        var runs = await db.VerificationRuns
+        await AddVerificationRequirementsAsync(
+                assignment,
+                requestId,
+                evidence,
+                missing,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return missing;
+    }
+
+    private async Task AddVerificationRequirementsAsync(
+        ExecutionAssignment assignment,
+        WorkRequestId requestId,
+        CompletionEvidence evidence,
+        List<string> missing,
+        CancellationToken cancellationToken)
+    {
+        var mandatoryCommandIds = ParseMandatoryCommandIds(assignment.MandatoryCommandIdsJson);
+        if (!assignment.HasCapturedVerificationPolicy || mandatoryCommandIds is null)
+        {
+            missing.Add(CompletionRequirements.VerificationEvidence);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(evidence.VerificationFingerprint)
+            || string.IsNullOrWhiteSpace(evidence.VerificationPolicyRevision))
+        {
+            missing.Add(CompletionRequirements.VerificationEvidence);
+            return;
+        }
+
+        if (!string.Equals(
+                evidence.VerificationPolicyRevision.Trim(),
+                assignment.VerificationPolicyRevision,
+                StringComparison.Ordinal))
+        {
+            missing.Add(CompletionRequirements.VerificationStale);
+            return;
+        }
+
+        var fingerprint = evidence.VerificationFingerprint.Trim();
+        var policyRevision = evidence.VerificationPolicyRevision.Trim();
+        var finalRuns = await db.VerificationRuns
             .AsNoTracking()
-            .Where(r => r.RequestId == requestId.Value)
+            .Where(r => r.RequestId == requestId.Value
+                && r.Fingerprint == fingerprint
+                && r.PolicyRevision == policyRevision
+                && (r.RunKind == nameof(VerificationRunKind.Baseline)
+                    || r.RunKind == nameof(VerificationRunKind.ProjectCheck)))
             .ToListAsync(cancellationToken)
             .ConfigureAwait(false);
 
-        var mandatory = runs.Where(r => r.Mandatory).ToList();
-        if (mandatory.Count == 0
-            || mandatory.Any(r => !string.Equals(r.Status, nameof(Domain.Verification.VerificationRunStatus.Passed), StringComparison.Ordinal)))
+        foreach (var commandId in mandatoryCommandIds)
         {
-            missing.Add(CompletionRequirements.MandatoryVerification);
+            var commandWasRecorded = false;
+            var commandPassed = false;
+            foreach (var run in finalRuns)
+            {
+                if (!string.Equals(run.CommandId, commandId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                commandWasRecorded = true;
+                commandPassed |= string.Equals(
+                    run.Status,
+                    nameof(VerificationRunStatus.Passed),
+                    StringComparison.Ordinal);
+            }
+
+            if (!commandWasRecorded)
+            {
+                missing.Add(CompletionRequirements.VerificationNotRun(commandId));
+            }
+            else if (!commandPassed)
+            {
+                missing.Add(CompletionRequirements.VerificationFailed(commandId));
+            }
+        }
+    }
+
+    private static IReadOnlyList<string>? ParseMandatoryCommandIds(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
         }
 
-        return missing;
+        try
+        {
+            var commandIds = JsonSerializer.Deserialize<string[]>(json);
+            if (commandIds is null
+                || commandIds.Length == 0
+                || commandIds.Any(string.IsNullOrWhiteSpace))
+            {
+                return null;
+            }
+
+            return commandIds
+                .Select(commandId => commandId.Trim())
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private void PersistResult(WorkRequestId requestId, CompletionEvidence evidence, DateTimeOffset now)
@@ -607,5 +726,73 @@ public sealed class AssignmentTerminalizationService(
         }
 
         return true;
+    }
+
+    private async Task PersistPendingTerminalizationAsync(
+        NodeId nodeId,
+        ProjectId projectId,
+        WorkRequestId requestId,
+        string claimToken,
+        string? rootSessionId,
+        TerminalizationIntent intent,
+        CompletionEvidence? evidence,
+        string? reason,
+        DateTimeOffset acceptedAt,
+        CancellationToken cancellationToken)
+    {
+        var existing = await db.PendingTerminalizations
+            .SingleOrDefaultAsync(row => row.RequestId == requestId, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (intent == TerminalizationIntent.Cancel)
+        {
+            if (existing is not null)
+            {
+                db.PendingTerminalizations.Remove(existing);
+            }
+
+            return;
+        }
+
+        var evidenceJson = evidence is null
+            ? null
+            : JsonSerializer.Serialize(evidence, PendingEvidenceJsonOptions);
+        if (evidenceJson is not null && evidenceJson.Length > PendingTerminalizationRow.MaxCompletionEvidenceJsonLength)
+        {
+            throw new InvalidOperationException("Serialized completion evidence exceeds the pending terminalization limit.");
+        }
+
+        var nextVersion = existing is null ? 1L : existing.Version + 1L;
+        if (existing is not null)
+        {
+            db.PendingTerminalizations.Remove(existing);
+        }
+
+        db.PendingTerminalizations.Add(new PendingTerminalizationRow
+        {
+            RequestId = requestId,
+            ProjectId = projectId,
+            NodeId = nodeId,
+            ClaimToken = claimToken,
+            RootSessionId = rootSessionId,
+            Intent = intent.ToString(),
+            CompletionEvidenceJson = evidenceJson,
+            Reason = reason,
+            AcceptedAtUtcTicks = acceptedAt.UtcTicks,
+            Version = nextVersion,
+        });
+    }
+
+    private async Task RemovePendingTerminalizationAsync(
+        WorkRequestId requestId,
+        CancellationToken cancellationToken)
+    {
+        var existing = await db.PendingTerminalizations
+            .SingleOrDefaultAsync(row => row.RequestId == requestId, cancellationToken)
+            .ConfigureAwait(false);
+        if (existing is not null)
+        {
+            db.PendingTerminalizations.Remove(existing);
+        }
     }
 }

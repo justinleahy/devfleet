@@ -48,12 +48,13 @@ public static class BoundedProcessRunner
 
         var started = DateTime.UtcNow;
         Process? process = null;
+        OwnedProcess? ownedProcess = null;
         try
         {
             try
             {
-                process = Process.Start(startInfo)
-                    ?? throw new InvalidOperationException($"Failed to start '{executable}'.");
+                ownedProcess = await OwnedProcess.StartAsync(startInfo).ConfigureAwait(false);
+                process = ownedProcess.Process;
             }
             catch (Exception ex) when (ex is not InvalidOperationException)
             {
@@ -83,7 +84,7 @@ public static class BoundedProcessRunner
 
             try
             {
-                await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
+                await ownedProcess.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
                 exitCode = process.HasExited ? process.ExitCode : null;
                 if (exitCode is null)
                 {
@@ -97,7 +98,7 @@ public static class BoundedProcessRunner
                 TryKillTree(process);
                 try
                 {
-                    await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+                    await ownedProcess.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
@@ -133,7 +134,7 @@ public static class BoundedProcessRunner
         }
         finally
         {
-            process?.Dispose();
+            ownedProcess?.Dispose();
             VerificationProcessEnvironment.TryDeleteSandbox(sandbox);
         }
     }

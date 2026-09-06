@@ -95,7 +95,24 @@
         <section class="signal-stack" aria-label="Attention items">
             @foreach (var signal in _signals)
             {
-                <AttentionCallout Signal="signal" Now="_snapshot" ShowRequestLink="true" />
+                @* A recovery-required item is resolved on its project, not on the request, so
+                   the durable recovery panel is offered alongside the lease evidence. *@
+                @if (signal.Kind == AttentionKind.RecoveryRequired)
+                {
+                    <div class="signal-item">
+                        <AttentionCallout Signal="signal" Now="_snapshot" ShowRequestLink="true" />
+                        <p class="signal-recovery">
+                            <a class="recovery-link"
+                               href="@($"/projects/{signal.ProjectId}#project-recovery")">
+                                Recover @signal.ProjectName
+                            </a>
+                        </p>
+                    </div>
+                }
+                else
+                {
+                    <AttentionCallout Signal="signal" Now="_snapshot" ShowRequestLink="true" />
+                }
             }
         </section>
     }
@@ -251,7 +268,8 @@
             leases,
             runs,
             RequestInsightsReader.Read(events),
-            _snapshot == default ? Clock.UtcNow : _snapshot);
+            _snapshot == default ? Clock.UtcNow : _snapshot,
+            events);
     }
 
     /// <summary>Errors first, then newest evidence first: the triage order of SPEC §31.6.</summary>

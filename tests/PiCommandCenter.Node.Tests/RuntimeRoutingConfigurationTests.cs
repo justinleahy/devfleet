@@ -4,6 +4,7 @@ using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Node.Runtime.Muse;
 using PiCommandCenter.Node.RuntimeRouting;
+using PiCommandCenter.Node.Verification;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -21,7 +22,7 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
         var replacement = new UpdateNodeRuntimeConfigurationMessage(
             store.Current.AllowedRoles.Select(role => new RuntimeRoleRouteMessage(
                 role,
-                [new RuntimeRouteCandidateMessage(role == "reviewer" ? " codex/gpt-reviewer " : "codex/default")]))
+                [new RuntimeRouteCandidateMessage(role == "reviewer" ? " codex/gpt-reviewer " : "codex/gpt-5.6-sol")]))
             .ToArray());
 
         var saved = await store.UpdateAsync(replacement);
@@ -42,6 +43,7 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
     }
 
     [Theory]
+    [InlineData("codex/default")]
     [InlineData("pi/default")]
     [InlineData("opus")]
     [InlineData("")]
@@ -69,12 +71,12 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
         var duplicate = new UpdateNodeRuntimeConfigurationMessage(
             store.Current.AllowedRoles.Select(role => new RuntimeRoleRouteMessage(
                 role,
-                [new RuntimeRouteCandidateMessage("claude-code/default"), new RuntimeRouteCandidateMessage(" claude-code/default")]))
+                [new RuntimeRouteCandidateMessage("claude-code/fable-5-1"), new RuntimeRouteCandidateMessage(" claude-code/fable-5-1 ")]))
             .ToArray());
 
         var error = await Assert.ThrowsAsync<ArgumentException>(() => store.UpdateAsync(duplicate));
 
-        Assert.Contains("duplicate candidate 'claude-code/default'", error.Message, StringComparison.Ordinal);
+        Assert.Contains("duplicate candidate 'claude-code/fable-5-1'", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -91,6 +93,32 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
               {"role":"implementer","candidates":[{"runtimeProfile":"claude","model":"opus"}]},
               {"role":"reviewer","candidates":[{"runtimeProfile":"provider","model":"reviewer"}]},
               {"role":"verifier","candidates":[{"runtimeProfile":"codex","model":null}]}
+            ]}
+            """);
+
+        using var store = new NodeRuntimeRoutingStore(
+            Options.Create(new NodeOptions { Id = Guid.NewGuid() }), Options.Create(worker));
+
+        Assert.False(File.Exists(path));
+        Assert.Equal(
+            worker.RoleRoutes.SelectMany(pair => pair.Value.Select(candidate => (pair.Key, candidate.Model))),
+            store.Current.RoleRoutes.SelectMany(route => route.Candidates.Select(candidate => (route.Role, candidate.Model))));
+    }
+
+    [Fact]
+    public void Provider_default_routes_file_is_discarded_for_configured_selectors()
+    {
+        var worker = Worker();
+        worker.RoleRoutes["reviewer"] = [new AgentRoleRouteCandidate { Model = "claude-code/fable-5-1" }];
+        var path = Path.Combine(worker.AgentDataDirectory, "role-routes.json");
+        Directory.CreateDirectory(worker.AgentDataDirectory);
+        File.WriteAllText(path, """
+            {"roleRoutes":[
+              {"role":"root","candidates":[{"model":"codex/gpt-overridden"}]},
+              {"role":"architect","candidates":[{"model":"claude-code/fable-overridden"}]},
+              {"role":"implementer","candidates":[{"model":"codex/default"}]},
+              {"role":"reviewer","candidates":[{"model":"antigravity/gemini-overridden"}]},
+              {"role":"verifier","candidates":[{"model":"muse/muse-overridden"}]}
             ]}
             """);
 
@@ -126,7 +154,7 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
         worker.AllowedChildRoles = ["reviewer"];
         worker.RoleRoutes = new(StringComparer.Ordinal)
         {
-            ["reviewer"] = [new AgentRoleRouteCandidate { Model = "antigravity/default" }],
+            ["reviewer"] = [new AgentRoleRouteCandidate { Model = "antigravity/gemini-3-pro" }],
         };
         using var store = new NodeRuntimeRoutingStore(
             Options.Create(new NodeOptions { Id = Guid.NewGuid() }),
@@ -138,7 +166,10 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
             store,
             probe,
             TimeProvider.System,
-            NullLogger<RuntimeReadinessProvider>.Instance);
+            NullLogger<RuntimeReadinessProvider>.Instance,
+            new VerificationPolicyCatalogProvider(
+                Options.Create(new VerificationOptions()),
+                TimeProvider.System));
 
         await provider.RefreshAsync(CancellationToken.None);
         var snapshot = provider.Capture([]);
@@ -160,7 +191,7 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
         worker.RoleRoutes["reviewer"] =
         [
             new AgentRoleRouteCandidate { Model = "claude-code/claude-opus-test" },
-            new AgentRoleRouteCandidate { Model = "claude-code/default" },
+            new AgentRoleRouteCandidate { Model = "claude-code/fable-5-1" },
             new AgentRoleRouteCandidate { Model = "codex/gpt-test" },
         ];
         using var store = new NodeRuntimeRoutingStore(
@@ -194,8 +225,7 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
         Assert.Equal(
             [
                 "claude-code/claude-opus-test",
-                "claude-code/default",
-                "claude-code/fable",
+                "claude-code/fable-5-1",
                 "claude-code/haiku",
                 "claude-code/opus",
                 "claude-code/sonnet",

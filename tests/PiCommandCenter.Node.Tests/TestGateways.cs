@@ -281,12 +281,20 @@ public sealed class FakeIdentityRegistry : IAgentIdentityRegistry
 /// inspection, crash recovery, completion gate, runtime registry); the child supervisor tests
 /// never exercise those tool paths.
 /// </summary>
-public sealed class NoopVerificationRunner : PiCommandCenter.Node.Verification.IVerificationCommandRunner
+public sealed class NoopVerificationCoordinator : PiCommandCenter.Node.Verification.IRequestVerificationCoordinator
 {
-    public Task<PiCommandCenter.Node.Verification.VerificationProfileRunResult> RunAsync(
-        PiCommandCenter.Node.Verification.VerificationRunContext context,
-        string profileId,
-        string? commandId,
+    public Task<PiCommandCenter.Node.Verification.RequestVerificationDecision> VerifyFinalAsync(
+        PiCommandCenter.Node.Verification.RequestVerificationContext context,
+        CancellationToken cancellationToken)
+        => throw new NotSupportedException("Not exercised by these tests.");
+
+    public Task<PiCommandCenter.Node.Verification.RequestVerificationDecision> VerifyIntermediateAsync(
+        PiCommandCenter.Node.Verification.RequestVerificationContext context,
+        CancellationToken cancellationToken)
+        => throw new NotSupportedException("Not exercised by these tests.");
+
+    public Task<string> CaptureFingerprintAsync(
+        PiCommandCenter.Node.Verification.RequestVerificationContext context,
         CancellationToken cancellationToken)
         => throw new NotSupportedException("Not exercised by these tests.");
 }
@@ -326,6 +334,13 @@ public sealed class NoopCompletionGateway : PiCommandCenter.Node.Child.INodeComp
         PiCommandCenter.Application.Verification.VerificationRunDto run,
         CancellationToken cancellationToken)
         => Task.CompletedTask;
+
+    public Task<IReadOnlyList<PiCommandCenter.Application.Verification.VerificationRunDto>> ListVerificationRunsAsync(
+        string sessionId,
+        Guid projectId,
+        Guid requestId,
+        CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<PiCommandCenter.Application.Verification.VerificationRunDto>>([]);
 
     public Task<PiCommandCenter.Application.Completion.CompletionGateDecision> BeginTerminalizationAsync(
         Guid projectId,

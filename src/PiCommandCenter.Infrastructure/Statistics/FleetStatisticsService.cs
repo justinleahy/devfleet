@@ -116,7 +116,8 @@ public sealed class FleetStatisticsService(ControlPlaneDbContext db) : IFleetSta
             EstimatedCostUsd: fleet.EstimatedCostUsd,
             IgnoredTelemetryEvents: ignored,
             LatestTelemetryAt: latestTelemetryAt,
-            Runtimes: runtimeGroups);
+            Runtimes: runtimeGroups,
+            Providers: BuildProviderRows(sessions, accumulators));
     }
 
     private static RuntimeStatisticsDto BuildRuntimeRow(
@@ -133,6 +134,54 @@ public sealed class FleetStatisticsService(ControlPlaneDbContext db) : IFleetSta
             Tokens: totals.Tokens,
             EstimatedCostUsd: totals.EstimatedCostUsd);
     }
+
+    /// <summary>
+    /// Groups sessions by the provider from their canonical model selector.
+    /// Unqualified or malformed selectors are omitted.
+    /// </summary>
+    private static IReadOnlyList<ProviderStatisticsDto> BuildProviderRows(
+        IReadOnlyList<AgentSessionRow> sessions,
+        IReadOnlyDictionary<string, SessionAccumulator> accumulators)
+    {
+        Dictionary<string, List<AgentSessionRow>>? groups = null;
+        foreach (var session in sessions)
+        {
+            if (!AgentModelSelector.TryParse(session.Model, out var selector))
+            {
+                continue;
+            }
+
+            groups ??= new Dictionary<string, List<AgentSessionRow>>(StringComparer.Ordinal);
+            if (!groups.TryGetValue(selector.Provider, out var bucket))
+            {
+                bucket = new List<AgentSessionRow>();
+                groups[selector.Provider] = bucket;
+            }
+
+            bucket.Add(session);
+        }
+
+        if (groups is null)
+        {
+            return [];
+        }
+
+        return groups
+            .OrderBy(g => g.Key, StringComparer.Ordinal)
+            .Select(g =>
+            {
+                var totals = BuildTotals(g.Value, accumulators);
+                return new ProviderStatisticsDto(
+                    Provider: g.Key,
+                    TrackedAgents: g.Value.Count,
+                    ActiveAgents: g.Value.Count(IsActive),
+                    AgentsWithReportedTokens: totals.AgentsWithReportedTokens,
+                    Tokens: totals.Tokens,
+                    EstimatedCostUsd: totals.EstimatedCostUsd);
+            })
+            .ToList();
+    }
+
 
     /// <summary>
     /// Sums per-session accumulators into one totals row. Overflow while combining sessions

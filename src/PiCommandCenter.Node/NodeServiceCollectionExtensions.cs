@@ -5,6 +5,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Node.Projects;
+using PiCommandCenter.Node.Recovery;
+using PiCommandCenter.Node.Runtime;
 using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.SubscriptionUsage;
 using PiCommandCenter.Node.SystemResources;
@@ -47,7 +49,14 @@ public static class NodeServiceCollectionExtensions
             .ValidateOnStart()
             .Services
             .AddSingleton<IValidateOptions<Verification.VerificationOptions>, Verification.VerificationOptionsValidator>()
-            .AddSingleton<Verification.IVerificationCommandRunner, Verification.VerificationCommandRunner>()
+            .AddSingleton<Verification.VerificationCommandRunner>()
+            .AddSingleton<Verification.IVerificationCommandRunner>(
+                static sp => sp.GetRequiredService<Verification.VerificationCommandRunner>())
+            .AddSingleton<Verification.IAdmittedVerificationCommandRunner>(
+                static sp => sp.GetRequiredService<Verification.VerificationCommandRunner>())
+            .AddSingleton<Verification.IBaselineVerification, Verification.BaselineVerification>()
+            .AddSingleton<Verification.IRequestVerificationCoordinator, Verification.RequestVerificationCoordinator>()
+            .AddSingleton<Verification.IVerificationPolicyCatalog, Verification.VerificationPolicyCatalogProvider>()
             .AddSingleton<Repository.IRepositoryInspector, Repository.RepositoryInspector>()
             .AddSingleton<Repository.RequestWorkspaceTracker>()
             .AddSingleton<Application.Git.ITrustedGitService, Git.RestrictedGitService>()
@@ -162,6 +171,23 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<INodeAssignmentCredentialSource>(
                 static sp => sp.GetRequiredService<NodeAssignmentCredentialSource>())
             .AddSingleton<PiRootSessionSupervisor>()
+            .AddSingleton<AssignmentProcessRegistry>()
+            .AddSingleton<IAssignmentRecoveryChildSessions, PiChildAssignmentRecoverySessions>()
+            .AddSingleton<NodeRecoveryRuntimeGateway>()
+            .AddSingleton<IAssignmentRecoverySessionCanceller>(
+                static sp => sp.GetRequiredService<NodeRecoveryRuntimeGateway>())
+            .AddSingleton<IAssignmentRecoveryActivityObserver>(
+                static sp => sp.GetRequiredService<NodeRecoveryRuntimeGateway>())
+            .AddSingleton<IAssignmentRecoveryEventPublisher>(
+                static sp => sp.GetRequiredService<NodeRecoveryRuntimeGateway>())
+            .AddSingleton<IAssignmentRecoveryReservationCatalog>(
+                static sp => sp.GetRequiredService<NodeRecoveryRuntimeGateway>())
+            .AddSingleton<NodeAssignmentRecoveryRuntime>()
+            .AddSingleton<IAssignmentRecoveryRuntime>(
+                static sp => sp.GetRequiredService<NodeAssignmentRecoveryRuntime>())
+            .AddSingleton<AssignmentRecoveryRunner>()
+            .AddSingleton<IAssignmentRecoveryRunner>(
+                static sp => sp.GetRequiredService<AssignmentRecoveryRunner>())
             .AddSingleton<NodeWorker>()
             .AddSingleton<Child.INodeAssignmentTerminalizationOrchestrator>(
                 static sp => sp.GetRequiredService<NodeWorker>())

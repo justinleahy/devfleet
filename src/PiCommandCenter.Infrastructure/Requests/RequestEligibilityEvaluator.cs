@@ -11,6 +11,8 @@ using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Projects;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Infrastructure.Persistence;
+using PiCommandCenter.Infrastructure.Recovery;
+
 
 namespace PiCommandCenter.Infrastructure.Requests;
 
@@ -105,7 +107,9 @@ public sealed class RequestEligibilityEvaluator : IRequestEligibilityEvaluator
             .Select(project => new ProjectSnapshot(
                 project.Id,
                 project.Enabled,
-                project.MaxReadOnlyRequests))
+                project.MaxReadOnlyRequests,
+                project.TrustedVerificationProfileId,
+                project.TrustedVerificationProfileRevision))
             .ToDictionaryAsync(project => project.Id, cancellationToken)
             .ConfigureAwait(false);
 
@@ -114,6 +118,14 @@ public sealed class RequestEligibilityEvaluator : IRequestEligibilityEvaluator
             .Where(binding => projectIds.Contains(binding.ProjectId))
             .ToDictionaryAsync(binding => binding.ProjectId, cancellationToken)
             .ConfigureAwait(false);
+        var heldProjectIds = (await _db.Set<RecoveryHoldRow>()
+                .AsNoTracking()
+                .Where(hold => projectIds.Select(id => id.Value).Contains(hold.ProjectId))
+                .Select(hold => hold.ProjectId)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false))
+            .ToHashSet();
+
 
         var nodeIds = bindings.Values.Select(binding => binding.NodeId).Distinct().ToArray();
         var nodes = await _db.FleetNodes
@@ -143,7 +155,12 @@ public sealed class RequestEligibilityEvaluator : IRequestEligibilityEvaluator
                 assignment.LeaseExpiresAt,
                 assignment.LastRenewedAt,
                 assignment.LastReconciledAt,
-                assignment.TerminalAt))
+                assignment.TerminalAt,
+                assignment.VerificationPolicyRevision,
+                assignment.BaselineVersion,
+                assignment.TrustedVerificationProfileId,
+                assignment.TrustedVerificationProfileRevision,
+                assignment.MandatoryCommandIdsJson))
             .ToDictionaryAsync(
                 assignment => new WorkRequestId(assignment.RequestId),
                 cancellationToken)
@@ -190,6 +207,7 @@ public sealed class RequestEligibilityEvaluator : IRequestEligibilityEvaluator
                     activeByNode,
                     projectAssignments,
                     assignment,
+                    heldProjectIds.Contains(request.ProjectId.Value),
                     now));
         }
 
@@ -205,6 +223,7 @@ public sealed class RequestEligibilityEvaluator : IRequestEligibilityEvaluator
         IReadOnlyDictionary<NodeId, ActiveAssignmentSnapshot[]> activeByNode,
         IReadOnlyList<ActiveAssignmentSnapshot> projectAssignments,
         ExecutionAssignmentProjectionDto? assignment,
+        bool recoveryHold,
         DateTimeOffset now)
     {
         EligibilityDecision Ineligible(string code, string detail, string action) => new(
@@ -213,6 +232,14 @@ public sealed class RequestEligibilityEvaluator : IRequestEligibilityEvaluator
             new SchedulingStatusDto(code, detail, action, IsEligible: false),
             EligibleBinding: null,
             assignment);
+
+        if (recoveryHold)
+        {
+            return Ineligible(
+                SchedulingReasonCodes.ProjectRecoveryPaused,
+                "Project recovery is paused.",
+                "Resume project recovery before scheduling new work.");
+        }
 
         if (project is null || !project.Enabled)
         {
@@ -301,6 +328,24 @@ public sealed class RequestEligibilityEvaluator : IRequestEligibilityEvaluator
                 "Wait for fresh runtime readiness or inspect the node configuration.");
         }
 
+        if (!string.IsNullOrWhiteSpace(project.TrustedVerificationProfileId)
+            || !string.IsNullOrWhiteSpace(project.TrustedVerificationProfileRevision))
+        {
+            if (string.IsNullOrWhiteSpace(project.TrustedVerificationProfileId)
+                || string.IsNullOrWhiteSpace(project.TrustedVerificationProfileRevision)
+                || !VerificationPolicyAssignmentCapture.IsSelectedProfileAdvertised(
+                    project.TrustedVerificationProfileId,
+                    project.TrustedVerificationProfileRevision,
+                    executionStatus,
+                    now,
+                    _staleAfter))
+            {
+                return Ineligible(
+                    SchedulingReasonCodes.VerificationPolicyUnavailable,
+                    "The selected verification profile is unavailable or stale.",
+                    "Select a current trusted profile on the Project page or reconnect the designated node.");
+            }
+        }
         var advertisedAssignments = executionStatus.ActiveAssignmentIds.ToHashSet();
         var unadvertisedAssignments = activeByNode
             .GetValueOrDefault(binding.NodeId)?
@@ -461,7 +506,9 @@ public sealed class RequestEligibilityEvaluator : IRequestEligibilityEvaluator
     private sealed record ProjectSnapshot(
         ProjectId Id,
         bool Enabled,
-        int MaxReadOnlyRequests);
+        int MaxReadOnlyRequests,
+        string? TrustedVerificationProfileId,
+        string? TrustedVerificationProfileRevision);
 
     private sealed record NodeSnapshot(
         NodeId Id,

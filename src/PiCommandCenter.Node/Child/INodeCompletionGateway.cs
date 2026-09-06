@@ -18,6 +18,12 @@ public interface INodeCompletionGateway
         VerificationRunDto run,
         CancellationToken cancellationToken);
 
+    Task<IReadOnlyList<VerificationRunDto>> ListVerificationRunsAsync(
+        string sessionId,
+        Guid projectId,
+        Guid requestId,
+        CancellationToken cancellationToken);
+
     Task<CompletionGateDecision> BeginTerminalizationAsync(
         Guid projectId,
         Guid requestId,

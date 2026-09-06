@@ -118,12 +118,9 @@ public sealed class ClaudeCodeRuntimeAdapter : IAgentRuntimeAdapter
             string.Empty,
             "--permission-mode",
             "dontAsk",
+            "--model",
+            request.Model.ModelId,
         };
-        if (!request.Model.IsProviderDefault)
-        {
-            arguments.Add("--model");
-            arguments.Add(request.Model.ModelId);
-        }
 
         var process = _processFactory.Start(new OfficialProcessStartRequest(
             _options.Executable,

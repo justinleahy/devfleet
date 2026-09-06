@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Node.Runtime;
 
 namespace PiCommandCenter.Node;
 
@@ -12,6 +13,11 @@ public sealed class SqliteNodeAssignmentJournal : INodeAssignmentJournal
     {
         RespectRequiredConstructorParameters = true,
     };
+
+    private const int MaxProcessIdentities = 16;
+    private const int MaxScopeNameLength = 128;
+    private const int MaxProcessIdentitiesJsonLength = 8192;
+
 
     private readonly string _path;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -33,10 +39,11 @@ public sealed class SqliteNodeAssignmentJournal : INodeAssignmentJournal
             await using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                SELECT RequestId, AssignmentJson, SupervisorState, RepositoryKnown, PendingEventCount
+                SELECT RequestId, AssignmentJson, SupervisorState, RepositoryKnown, PendingEventCount, ProcessIdentitiesJson
                 FROM NodeAssignments
                 ORDER BY RequestId;
                 """;
+
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
             while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -55,6 +62,7 @@ public sealed class SqliteNodeAssignmentJournal : INodeAssignmentJournal
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(entry.Assignment);
         ArgumentOutOfRangeException.ThrowIfNegative(entry.PendingEventCount);
+        var processIdentitiesJson = SerializeProcessIdentities(entry.ProcessIdentities);
 
         var assignmentJson = JsonSerializer.Serialize(entry.Assignment, SerializerOptions);
         await WithConnectionAsync(async connection =>
@@ -67,24 +75,30 @@ public sealed class SqliteNodeAssignmentJournal : INodeAssignmentJournal
                     AssignmentJson,
                     SupervisorState,
                     RepositoryKnown,
-                    PendingEventCount)
+                    PendingEventCount,
+                    ProcessIdentitiesJson)
                 VALUES (
                     $requestId,
                     $assignmentJson,
                     $supervisorState,
                     $repositoryKnown,
-                    $pendingEventCount)
+                    $pendingEventCount,
+                    $processIdentitiesJson)
                 ON CONFLICT(RequestId) DO UPDATE SET
                     AssignmentJson = excluded.AssignmentJson,
                     SupervisorState = excluded.SupervisorState,
                     RepositoryKnown = excluded.RepositoryKnown,
-                    PendingEventCount = excluded.PendingEventCount;
+                    PendingEventCount = excluded.PendingEventCount,
+                    ProcessIdentitiesJson = excluded.ProcessIdentitiesJson;
                 """;
             command.Parameters.AddWithValue("$requestId", entry.Assignment.RequestId.ToString("D"));
             command.Parameters.AddWithValue("$assignmentJson", assignmentJson);
             command.Parameters.AddWithValue("$supervisorState", entry.SupervisorState.ToString());
             command.Parameters.AddWithValue("$repositoryKnown", entry.RepositoryKnown ? 1 : 0);
             command.Parameters.AddWithValue("$pendingEventCount", entry.PendingEventCount);
+            command.Parameters.AddWithValue(
+                "$processIdentitiesJson",
+                processIdentitiesJson is null ? DBNull.Value : processIdentitiesJson);
             await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -127,13 +141,17 @@ public sealed class SqliteNodeAssignmentJournal : INodeAssignmentJournal
                 throw Corrupt(persistedRequestId, "PendingEventCount cannot be negative.");
             }
 
+            var processIdentities = ReadProcessIdentities(reader, persistedRequestId);
+
             return new NodeAssignmentJournalEntry(
                 assignment,
                 persistedSupervisorState == AssignmentSupervisorState.StartBlocked
                     ? AssignmentSupervisorState.StartBlocked
                     : AssignmentSupervisorState.Unknown,
                 repositoryKnown,
-                pendingEventCount);
+                pendingEventCount,
+                processIdentities);
+
         }
         catch (Exception exception) when (exception is JsonException
             or InvalidCastException
@@ -192,6 +210,106 @@ public sealed class SqliteNodeAssignmentJournal : INodeAssignmentJournal
             var value => throw Corrupt(requestId, $"{name} value '{value}' is malformed."),
         };
     }
+
+    private static string? SerializeProcessIdentities(
+        IReadOnlyList<AssignmentProcessIdentity>? identities)
+    {
+        if (identities is null || identities.Count == 0)
+        {
+            return null;
+        }
+
+        ValidateProcessIdentities(identities, requestId: null);
+        var json = JsonSerializer.Serialize(identities, SerializerOptions);
+        if (json.Length > MaxProcessIdentitiesJsonLength)
+        {
+            throw new ArgumentException(
+                "ProcessIdentities JSON exceeds the persistence bound.",
+                nameof(identities));
+        }
+
+        return json;
+    }
+
+    private static IReadOnlyList<AssignmentProcessIdentity> ReadProcessIdentities(
+        SqliteDataReader reader,
+        Guid requestId)
+    {
+        if (reader.FieldCount < 6 || reader.IsDBNull(5))
+        {
+            return [];
+        }
+
+        var json = reader.GetString(5);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
+        }
+
+        if (json.Length > MaxProcessIdentitiesJsonLength)
+        {
+            throw Corrupt(requestId, "ProcessIdentitiesJson exceeds the persistence bound.");
+        }
+
+        List<AssignmentProcessIdentity>? identities;
+        try
+        {
+            identities = JsonSerializer.Deserialize<List<AssignmentProcessIdentity>>(json, SerializerOptions);
+        }
+        catch (JsonException exception)
+        {
+            throw Corrupt(requestId, "ProcessIdentitiesJson is malformed.", exception);
+        }
+
+        if (identities is null)
+        {
+            throw Corrupt(requestId, "ProcessIdentitiesJson is null.");
+        }
+
+        ValidateProcessIdentities(identities, requestId);
+        return identities;
+    }
+
+    private static void ValidateProcessIdentities(
+        IReadOnlyList<AssignmentProcessIdentity> identities,
+        Guid? requestId)
+    {
+        if (identities.Count > MaxProcessIdentities)
+        {
+            ThrowIdentityCorrupt(requestId, "ProcessIdentities exceeds the persistence bound.");
+        }
+
+        foreach (var identity in identities)
+        {
+            if (identity.ProcessId <= 0
+                || identity.StartTimeTicks <= 0
+                || identity.ProcessGroupId <= 0
+                || identity.SessionId <= 0)
+            {
+                ThrowIdentityCorrupt(
+                    requestId,
+                    "Process identity fields must be positive.");
+            }
+
+            if (identity.ScopeName is { Length: > MaxScopeNameLength })
+            {
+                ThrowIdentityCorrupt(
+                    requestId,
+                    "Process identity scope name exceeds the persistence bound.");
+            }
+        }
+    }
+
+    private static void ThrowIdentityCorrupt(Guid? requestId, string detail)
+    {
+        if (requestId is { } id)
+        {
+            throw Corrupt(id, detail);
+        }
+
+        throw new ArgumentException(detail);
+    }
+
 
     private static void EnsureCompleteAssignment(
         Guid requestId,
@@ -255,15 +373,49 @@ public sealed class SqliteNodeAssignmentJournal : INodeAssignmentJournal
                     AssignmentJson TEXT NOT NULL,
                     SupervisorState TEXT NOT NULL,
                     RepositoryKnown INTEGER NOT NULL,
-                    PendingEventCount INTEGER NOT NULL
+                    PendingEventCount INTEGER NOT NULL,
+                    ProcessIdentitiesJson TEXT
                 );
                 """;
             await create.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        await EnsureProcessIdentitiesColumnAsync(connection, cancellationToken).ConfigureAwait(false);
+
+
         _connection = connection;
         return connection;
     }
+
+    private static async Task EnsureProcessIdentitiesColumnAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var info = connection.CreateCommand();
+        info.CommandText = "PRAGMA table_info(NodeAssignments);";
+        var hasColumn = false;
+        await using (var reader = await info.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (string.Equals(reader.GetString(1), "ProcessIdentitiesJson", StringComparison.Ordinal))
+                {
+                    hasColumn = true;
+                    break;
+                }
+            }
+        }
+
+        if (hasColumn)
+        {
+            return;
+        }
+
+        await using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE NodeAssignments ADD COLUMN ProcessIdentitiesJson TEXT;";
+        await alter.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
 
     private async Task WithConnectionAsync(
         Func<SqliteConnection, Task> action,

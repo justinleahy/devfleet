@@ -9,6 +9,8 @@ using PiCommandCenter.Domain.Projects;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Requests;
+using PiCommandCenter.Infrastructure.Recovery;
+
 
 namespace PiCommandCenter.Infrastructure.Tests.Requests;
 
@@ -29,6 +31,38 @@ public sealed class RequestEligibilityEvaluatorTests : IDisposable
 
         AssertReason(decision, SchedulingReasonCodes.ProjectDisabled);
     }
+
+    [Fact]
+    public async Task Recovery_hold_precedes_a_disabled_project()
+    {
+        await using var db = CreateContext();
+        var project = SeedProject(db, enabled: false);
+        var request = SeedRequest(db, project);
+        SeedHold(db, project.Id);
+        await SaveAsync(db);
+
+        var decision = await CreateEvaluator(db).EvaluateAsync(request.Id);
+
+        AssertReason(decision, SchedulingReasonCodes.ProjectRecoveryPaused);
+        Assert.Equal("Project recovery is paused.", decision.Status.Detail);
+        Assert.Equal(
+            "Resume project recovery before scheduling new work.",
+            decision.Status.Action);
+    }
+
+    [Fact]
+    public async Task Unheld_enabled_project_is_not_paused_for_recovery()
+    {
+        await using var db = CreateContext();
+        var world = SeedWorld(db);
+        await SaveAsync(db);
+
+        var decision = await CreateEvaluator(db).EvaluateAsync(world.Request.Id);
+
+        Assert.Equal(SchedulingReasonCodes.Eligible, decision.Status.Code);
+        Assert.True(decision.Status.IsEligible);
+    }
+
 
     [Fact]
     public async Task Missing_binding_is_reported_without_fabricating_placement()
@@ -174,6 +208,74 @@ public sealed class RequestEligibilityEvaluatorTests : IDisposable
         var decision = await CreateEvaluator(db).EvaluateAsync(world.Request.Id);
 
         AssertReason(decision, SchedulingReasonCodes.RuntimeUnknown);
+    }
+
+    [Fact]
+    public async Task Selected_profile_unavailable_precedes_capacity()
+    {
+        await using var db = CreateContext();
+        var world = SeedWorld(
+            db,
+            executionStatusJson: SerializeStatus(availableSlots: 0),
+            selectedProfileId: "dotnet",
+            selectedProfileRevision: "rev-1");
+        await SaveAsync(db);
+
+        var decision = await CreateEvaluator(db).EvaluateAsync(world.Request.Id);
+
+        AssertReason(decision, SchedulingReasonCodes.VerificationPolicyUnavailable);
+        Assert.Contains("profile", decision.Status.Detail, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Project", decision.Status.Action, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Stale_selected_profile_revision_is_unavailable()
+    {
+        await using var db = CreateContext();
+        var world = SeedWorld(
+            db,
+            executionStatusJson: SerializeStatus(
+                catalog: Catalog(
+                    profiles: [Profile("dotnet", "rev-other", Command("dotnet-test", true))])),
+            selectedProfileId: "dotnet",
+            selectedProfileRevision: "rev-1");
+        await SaveAsync(db);
+
+        var decision = await CreateEvaluator(db).EvaluateAsync(world.Request.Id);
+
+        AssertReason(decision, SchedulingReasonCodes.VerificationPolicyUnavailable);
+    }
+
+    [Fact]
+    public async Task Selected_profile_is_eligible_when_the_advertised_catalog_matches()
+    {
+        await using var db = CreateContext();
+        var world = SeedWorld(
+            db,
+            executionStatusJson: SerializeStatus(
+                catalog: Catalog(
+                    profiles: [Profile("dotnet", "rev-1", Command("dotnet-test", true))])),
+            selectedProfileId: "dotnet",
+            selectedProfileRevision: "rev-1");
+        await SaveAsync(db);
+
+        var decision = await CreateEvaluator(db).EvaluateAsync(world.Request.Id);
+
+        Assert.Equal(SchedulingReasonCodes.Eligible, decision.Status.Code);
+        Assert.True(decision.Status.IsEligible);
+    }
+
+    [Fact]
+    public async Task Baseline_only_projects_remain_eligible_without_a_catalog()
+    {
+        await using var db = CreateContext();
+        var world = SeedWorld(db);
+        await SaveAsync(db);
+
+        var decision = await CreateEvaluator(db).EvaluateAsync(world.Request.Id);
+
+        Assert.Equal(SchedulingReasonCodes.Eligible, decision.Status.Code);
+        Assert.True(decision.Status.IsEligible);
     }
 
     [Fact]
@@ -379,6 +481,33 @@ public sealed class RequestEligibilityEvaluatorTests : IDisposable
         db.Projects.Add(project);
         return project;
     }
+    private static void SeedHold(ControlPlaneDbContext db, ProjectId projectId)
+    {
+        var operationId = Guid.NewGuid();
+        var nowTicks = DateTimeOffset.UtcNow.UtcTicks;
+        db.Set<RecoveryOperationRow>().Add(new RecoveryOperationRow
+        {
+            Id = operationId,
+            ProjectId = projectId.Value,
+            Status = "Running",
+            Attempt = 1,
+            InventoryRevision = "inv-1",
+            Reason = "stuck",
+            Actor = "operator",
+            CreatedAtUtcTicks = nowTicks,
+            UpdatedAtUtcTicks = nowTicks,
+            LastProgressUtcTicks = nowTicks,
+            Version = 1,
+        });
+        db.Set<RecoveryHoldRow>().Add(new RecoveryHoldRow
+        {
+            ProjectId = projectId.Value,
+            OperationId = operationId,
+            EstablishedAtUtcTicks = nowTicks,
+            Version = 1,
+        });
+    }
+
 
     private WorkRequest SeedRequest(
         ControlPlaneDbContext db,
@@ -454,9 +583,19 @@ public sealed class RequestEligibilityEvaluatorTests : IDisposable
         NodeStatus nodeStatus = NodeStatus.Online,
         DateTimeOffset? heartbeatAt = null,
         string? executionStatusJson = null,
-        bool omitExecutionStatus = false)
+        bool omitExecutionStatus = false,
+        string? selectedProfileId = null,
+        string? selectedProfileRevision = null)
     {
         var project = SeedProject(db, enabled, maxReadOnlyRequests, maxActiveWriteRequests);
+        if (selectedProfileId is not null && selectedProfileRevision is not null)
+        {
+            project.SelectTrustedVerificationProfile(
+                selectedProfileId,
+                selectedProfileRevision,
+                _clock.GetUtcNow());
+        }
+
         var request = SeedRequest(db, project, requestKind);
         var node = SeedNode(
             db,
@@ -513,7 +652,8 @@ public sealed class RequestEligibilityEvaluatorTests : IDisposable
         IReadOnlyList<string>? readiness = null,
         DateTimeOffset? statusAt = null,
         DateTimeOffset? routeAt = null,
-        IReadOnlyList<Guid>? activeAssignmentIds = null)
+        IReadOnlyList<Guid>? activeAssignmentIds = null,
+        VerificationPolicyCatalogMessage? catalog = null)
     {
         var observedAt = statusAt ?? _clock.GetUtcNow();
         var routeObservedAt = routeAt ?? _clock.GetUtcNow();
@@ -525,13 +665,39 @@ public sealed class RequestEligibilityEvaluatorTests : IDisposable
             "routing-v1",
             routeReadiness.Select((value, index) => new RuntimeRouteReadinessDto(
                 "role-" + index,
-                "codex/default",
+                "codex/gpt-5.6-sol",
                 value,
                 "native-observation",
                 routeObservedAt,
-                "routing-v1")).ToArray());
+                "routing-v1")).ToArray(),
+            catalog);
         return JsonSerializer.Serialize(status, TestRepositories.WebJson);
     }
+
+    private VerificationPolicyCatalogMessage Catalog(
+        bool baselineAvailable = true,
+        string baselineVersion = "1",
+        IReadOnlyList<VerificationPolicyProfileMessage>? profiles = null) => new(
+        _clock.GetUtcNow(),
+        baselineAvailable,
+        baselineVersion,
+        profiles ?? []);
+
+    private static VerificationPolicyProfileMessage Profile(
+        string id,
+        string revision,
+        params VerificationPolicyCommandMessage[] commands) => new(
+        id,
+        revision,
+        id,
+        commands);
+
+    private static VerificationPolicyCommandMessage Command(string id, bool mandatory) => new(
+        id,
+        id,
+        "repository",
+        mandatory,
+        TimeoutSeconds: 30);
 
     private static void CompleteRequest(WorkRequest request)
     {

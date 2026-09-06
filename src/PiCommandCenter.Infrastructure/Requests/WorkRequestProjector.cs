@@ -24,12 +24,16 @@ public static class WorkRequestProjector
             return;
         }
 
+        var isVerificationFailed = string.Equals(
+            nodeEvent.Type,
+            "verification.failed",
+            StringComparison.OrdinalIgnoreCase);
         var isUnblocked = string.Equals(
             nodeEvent.Type,
             "request.unblocked",
             StringComparison.OrdinalIgnoreCase);
         var target = InferTarget(nodeEvent);
-        if (target is null && !isUnblocked)
+        if (target is null && !isUnblocked && !isVerificationFailed)
         {
             return;
         }
@@ -52,9 +56,20 @@ public static class WorkRequestProjector
             return;
         }
 
+        if (isVerificationFailed)
+        {
+            if (!IsAdmittedVerificationFailure(nodeEvent.PayloadJson))
+            {
+                return;
+            }
+
+            request.TryCatchUpTo(WorkRequestStatus.Verifying, nodeEvent.OccurredAt);
+            request.TryCatchUpTo(WorkRequestStatus.Blocked, nodeEvent.OccurredAt);
+            return;
+        }
+
         request.TryCatchUpTo(target!.Value, nodeEvent.OccurredAt);
     }
-
     internal static WorkRequestStatus? InferTarget(NodeEventDto nodeEvent)
     {
         var type = nodeEvent.Type;
@@ -124,6 +139,48 @@ public static class WorkRequestProjector
         }
 
         return WorkRequestStatus.Planning;
+    }
+
+    private const int MaxActionableReasonLength = 2048;
+
+    private static bool IsAdmittedVerificationFailure(string payloadJson)
+    {
+        var errorCode = ReadString(payloadJson, "errorCode");
+        var isUnavailableCapturedPolicy = string.Equals(
+            errorCode,
+            "verification_policy_unavailable",
+            StringComparison.Ordinal);
+        var fingerprint = ReadString(payloadJson, "fingerprint");
+        var policyRevision = ReadString(payloadJson, "policyRevision");
+        if (string.IsNullOrWhiteSpace(policyRevision)
+            || (!isUnavailableCapturedPolicy && string.IsNullOrWhiteSpace(fingerprint)))
+        {
+            return false;
+        }
+
+        var decision = ReadString(payloadJson, "decision");
+        if (decision is not null
+            && (decision.Contains("reject", StringComparison.OrdinalIgnoreCase)
+                || decision.Contains("intermediate", StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        _ = BoundActionableReason(ReadString(payloadJson, "summary"));
+        return true;
+    }
+
+    private static string BoundActionableReason(string? summary)
+    {
+        if (string.IsNullOrWhiteSpace(summary))
+        {
+            return "Verification failed.";
+        }
+
+        var trimmed = summary.Trim();
+        return trimmed.Length <= MaxActionableReasonLength
+            ? trimmed
+            : trimmed[..(MaxActionableReasonLength - 1)] + "…";
     }
 
     private static bool IsReviewer(string payloadJson)

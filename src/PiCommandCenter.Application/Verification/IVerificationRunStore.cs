@@ -14,4 +14,13 @@ public interface IVerificationRunStore
     Task<IReadOnlyList<VerificationRunDto>> ListAsync(
         WorkRequestId requestId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Newest-first replay of final and intermediate runs, capped at
+    /// <paramref name="maxCount"/> in the database query.
+    /// </summary>
+    Task<IReadOnlyList<VerificationRunDto>> ListRecentAsync(
+        WorkRequestId requestId,
+        int maxCount,
+        CancellationToken cancellationToken = default);
 }

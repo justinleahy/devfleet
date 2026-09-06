@@ -1,4 +1,5 @@
 using System.Text.Json;
+using PiCommandCenter.Application.Verification;
 
 namespace PiCommandCenter.Node.Runtime;
 
@@ -15,7 +16,15 @@ public sealed record PiOrchestrationContext(
     string? ParentSessionId,
     Func<string, IReadOnlyDictionary<string, object?>, CancellationToken, Task> EmitAsync,
     string? RepositoryRoot = null,
-    Func<PiCheckpointRequest, CancellationToken, Task<PiCheckpointResult>>? CreateCheckpointAsync = null);
+    Func<PiCheckpointRequest, CancellationToken, Task<PiCheckpointResult>>? CreateCheckpointAsync = null,
+    Guid? WorkspaceBindingId = null,
+    long? BindingValidationRevision = null,
+    string? VerificationPolicyRevision = null,
+    string? BaselineVersion = null,
+    string? TrustedVerificationProfileId = null,
+    string? TrustedVerificationProfileRevision = null,
+    IReadOnlyList<string>? MandatoryVerificationCommandIds = null,
+    IReadOnlyList<VerificationRunDto>? ExistingVerificationRuns = null);
 
 /// <summary>Supervisor-issued checkpoint commit request (trusted git seam only).</summary>
 public sealed record PiCheckpointRequest(

@@ -12,7 +12,7 @@ namespace PiCommandCenter.Node.Tests;
 
 public class ClaudeCodeRuntimeAdapterTests : IDisposable
 {
-    private const string DefaultModel = "claude-code/default";
+    private const string DefaultModel = "claude-code/fable-5-1";
 
     private readonly string _root = Directory.CreateDirectory(Path.Combine(
         Path.GetTempPath(), "pi-cc-claude-tests", Guid.NewGuid().ToString("N"))).FullName;
@@ -176,13 +176,14 @@ public class ClaudeCodeRuntimeAdapterTests : IDisposable
     }
 
     [Fact]
-    public async Task Default_model_omits_model_flag()
+    public async Task Concrete_fable_5_1_model_is_forwarded_with_model_flag()
     {
         var adapter = CreateAdapter();
         await adapter.StartAsync(Request(), CancellationToken.None);
 
         var argv = await CapturedArgvAsync();
-        Assert.DoesNotContain("--model", argv);
+        Assert.Contains("--model", argv);
+        Assert.Equal("fable-5-1", argv[Array.IndexOf(argv, "--model") + 1]);
     }
 
     [Fact]
@@ -200,7 +201,7 @@ public class ClaudeCodeRuntimeAdapterTests : IDisposable
     {
         var adapter = CreateAdapter();
         await Assert.ThrowsAsync<NotSupportedException>(
-            () => adapter.StartAsync(Request(model: "codex/default"), CancellationToken.None));
+            () => adapter.StartAsync(Request(model: "codex/gpt-5.6-sol"), CancellationToken.None));
         Assert.False(File.Exists(Path.Combine(_root, "claude-capture.json")));
     }
 

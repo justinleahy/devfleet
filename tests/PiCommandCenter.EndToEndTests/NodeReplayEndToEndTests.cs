@@ -263,7 +263,7 @@ public sealed class NodeReplayEndToEndTests : IDisposable
             AgentName = "root",
             Role = "root",
             Runtime = "pi",
-            Model = "codex/default",
+            Model = "codex/gpt-5.6-sol",
             Liveness = nameof(AgentLiveness.Online),
             Activity = nameof(AgentActivity.Idle),
             Attention = nameof(AgentAttention.None),
@@ -296,7 +296,7 @@ public sealed class NodeReplayEndToEndTests : IDisposable
                     [
                         new RuntimeRouteReadinessMessage(
                             "root",
-                            "codex/default",
+                            "codex/gpt-5.6-sol",
                             RuntimeReadinessStatuses.Ready,
                             "node-replay-e2e",
                             observedAt,

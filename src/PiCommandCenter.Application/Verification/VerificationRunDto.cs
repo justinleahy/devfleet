@@ -14,4 +14,8 @@ public sealed record VerificationRunDto(
     DateTimeOffset? CompletedAt,
     string? OutputSummary,
     string? OutputArtifactPath,
-    bool Mandatory);
+    bool Mandatory,
+    string Fingerprint,
+    string PolicyRevision,
+    VerificationRunKind RunKind,
+    Guid AttemptId);

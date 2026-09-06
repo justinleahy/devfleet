@@ -46,6 +46,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
     private readonly ILogger<PiRuntimeAdapter> _logger;
     private readonly Application.Git.ITrustedGitService? _gitService;
     private readonly IRequestAdmissionGate _admission;
+    private readonly AssignmentProcessRegistry? _processes;
+
     private readonly ConcurrentDictionary<string, ActivePiSession> _sessions = new();
 
     public PiRuntimeAdapter(
@@ -56,7 +58,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         TimeProvider timeProvider,
         ILogger<PiRuntimeAdapter> logger,
         IRequestAdmissionGate admission,
-        Application.Git.ITrustedGitService? gitService = null)
+        Application.Git.ITrustedGitService? gitService = null,
+        AssignmentProcessRegistry? processes = null)
     {
         ArgumentNullException.ThrowIfNull(nodeOptions);
         ArgumentNullException.ThrowIfNull(workerOptions);
@@ -69,6 +72,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         _heartbeatStaleAfter = TimeSpan.FromSeconds(Math.Max(1, nodeOptions.Value.HeartbeatSeconds) * 3);
         _nodeId = nodeOptions.Value.Id.ToString("D");
         _gitService = gitService;
+        _processes = processes;
     }
 
     public string RuntimeKind => AgentRuntimeKinds.Pi;
@@ -105,6 +109,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
 
         // The orchestrator owns the session id; AgentStartRequest validates it non-empty.
         var sessionId = request.SessionId;
+        var projectId = request.ProjectId.Value.ToString("D");
+        var requestId = request.RequestId.Value.ToString("D");
         RequestCallbackLease? callbackSource = null;
         if (request.Mode == AgentRuntimeMode.Root)
         {
@@ -119,15 +125,51 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
             }
         }
 
+        PiOrchestrationContext? parentContext = null;
+        if (request.Mode == AgentRuntimeMode.Child
+            && _sessions.TryGetValue(request.ParentSessionId!, out var parent)
+            && string.Equals(
+                parent.Context.ProjectId,
+                projectId,
+                StringComparison.Ordinal)
+            && string.Equals(
+                parent.Context.RequestId,
+                requestId,
+                StringComparison.Ordinal))
+        {
+            parentContext = parent.Context;
+        }
+
         var identity = new PiOrchestrationContext(
             sessionId,
             _nodeId,
-            request.ProjectId.Value.ToString("D"),
-            request.RequestId.Value.ToString("D"),
+            projectId,
+            requestId,
             request.ParentSessionId,
             (type, payload, token) => EmitSessionEventAsync(sessionId, type, payload, token),
             request.WorkingDirectory,
-            CreateCheckpointDelegate(request));
+            CreateCheckpointDelegate(request),
+            WorkspaceBindingId: request.Mode == AgentRuntimeMode.Root
+                ? request.WorkspaceBindingId?.Value
+                : parentContext?.WorkspaceBindingId,
+            BindingValidationRevision: request.Mode == AgentRuntimeMode.Root
+                ? request.BindingValidationRevisionSnapshot
+                : parentContext?.BindingValidationRevision,
+            VerificationPolicyRevision: request.Mode == AgentRuntimeMode.Root
+                ? request.VerificationPolicyRevision
+                : parentContext?.VerificationPolicyRevision,
+            BaselineVersion: request.Mode == AgentRuntimeMode.Root
+                ? request.BaselineVersion
+                : parentContext?.BaselineVersion,
+            TrustedVerificationProfileId: request.Mode == AgentRuntimeMode.Root
+                ? request.TrustedVerificationProfileId
+                : parentContext?.TrustedVerificationProfileId,
+            TrustedVerificationProfileRevision: request.Mode == AgentRuntimeMode.Root
+                ? request.TrustedVerificationProfileRevision
+                : parentContext?.TrustedVerificationProfileRevision,
+            MandatoryVerificationCommandIds: request.Mode == AgentRuntimeMode.Root
+                ? request.MandatoryVerificationCommandIds
+                : parentContext?.MandatoryVerificationCommandIds);
 
         IPiWorkerProcess process;
         try
@@ -140,6 +182,12 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
             callbackSource?.Dispose();
             throw;
         }
+        IDisposable? isolationRegistration = null;
+        if (_processes is not null && process is IAssignmentProcessIsolation isolation)
+        {
+            isolationRegistration = _processes.Register(request.RequestId.Value, isolation);
+        }
+
         var session = new PiWorkerSession(
             identity,
             process,
@@ -151,7 +199,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
 
         // Register before the handshake so custom-tool requests racing the start response can
         // already be persisted; removed again below if the handshake fails.
-        _sessions[sessionId] = new ActivePiSession(session, callbackSource);
+        _sessions[sessionId] = new ActivePiSession(
+            session, callbackSource, identity, isolationRegistration);
         try
         {
             await session.StartAsync(
@@ -175,7 +224,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         {
             _sessions.TryRemove(sessionId, out _);
             await DisposeStoppedSessionAsync(
-                new ActivePiSession(session, callbackSource),
+                new ActivePiSession(session, callbackSource, identity, isolationRegistration),
                 CancellationToken.None).ConfigureAwait(false);
             throw;
         }
@@ -255,6 +304,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         }
         finally
         {
+            active.IsolationRegistration?.Dispose();
             if (callbacksDrained && disposed)
             {
                 active.CallbackSource?.Dispose();
@@ -354,6 +404,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
 
     private sealed record ActivePiSession(
         PiWorkerSession Worker,
-        RequestCallbackLease? CallbackSource);
+        RequestCallbackLease? CallbackSource,
+        PiOrchestrationContext Context,
+        IDisposable? IsolationRegistration);
 
 }

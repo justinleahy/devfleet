@@ -39,4 +39,13 @@ public sealed class NodeOptions
 
     /// <summary>Maximum number of concurrent active request claims this node holds.</summary>
     public int MaxConcurrentRequests { get; set; } = 4;
+
+    /// <summary>Seconds allowed for cooperative process-group stop during recovery.</summary>
+    public int RecoveryCooperativeStopSeconds { get; set; } = 10;
+
+    /// <summary>Seconds allowed for forced termination after cooperative stop.</summary>
+    public int RecoveryTerminationSeconds { get; set; } = 20;
+
+    /// <summary>Overall seconds budgeted for one recovery attempt.</summary>
+    public int RecoveryAttemptSeconds { get; set; } = 60;
 }

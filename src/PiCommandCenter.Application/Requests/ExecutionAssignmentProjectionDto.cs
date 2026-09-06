@@ -18,4 +18,9 @@ public sealed record ExecutionAssignmentProjectionDto(
     DateTimeOffset LeaseExpiresAt,
     DateTimeOffset? LastRenewedAt,
     DateTimeOffset? LastReconciledAt,
-    DateTimeOffset? TerminalAt);
+    DateTimeOffset? TerminalAt,
+    string? VerificationPolicyRevision = null,
+    string? BaselineVersion = null,
+    string? TrustedVerificationProfileId = null,
+    string? TrustedVerificationProfileRevision = null,
+    string? MandatoryCommandIdsJson = null);

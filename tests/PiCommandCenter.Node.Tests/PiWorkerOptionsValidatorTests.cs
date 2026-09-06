@@ -38,8 +38,9 @@ public sealed class PiWorkerOptionsValidatorTests
         {
             ["reviewer"] =
             [
+                new() { Model = "claude-code/fable-5-1" },
+                new() { Model = " claude-code/fable-5-1 " },
                 new() { Model = "claude-code/default" },
-                new() { Model = " claude-code/default " },
                 new() { Model = "pi/model" },
                 new() { Model = "opus" },
                 new() { Model = " " },
@@ -50,11 +51,12 @@ public sealed class PiWorkerOptionsValidatorTests
 
         Assert.False(result.Succeeded);
         var failures = result.Failures ?? [];
-        Assert.Contains(failures, failure => failure.Contains("duplicate model candidate 'claude-code/default'", StringComparison.Ordinal));
+        Assert.Contains(failures, failure => failure.Contains("duplicate model candidate 'claude-code/fable-5-1'", StringComparison.Ordinal));
+        Assert.Contains(failures, failure => failure.Contains("got 'claude-code/default'", StringComparison.Ordinal));
         Assert.Contains(failures, failure => failure.Contains("got 'pi/model'", StringComparison.Ordinal));
         Assert.Contains(failures, failure => failure.Contains("got 'opus'", StringComparison.Ordinal));
         Assert.Contains(failures, failure => failure.Contains("got ' '", StringComparison.Ordinal));
-        Assert.Equal(4, failures.Count());
+        Assert.Equal(5, failures.Count());
     }
 
     [Fact]
@@ -69,11 +71,29 @@ public sealed class PiWorkerOptionsValidatorTests
         Assert.Contains(result.Failures ?? [], failure => failure.Contains("'Pi:Model'", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("codex/default")]
+    [InlineData("claude-code/default")]
+    [InlineData("antigravity/default")]
+    [InlineData("muse/default")]
+    public void Provider_default_models_are_rejected(string model)
+    {
+        var options = ValidOptions();
+        options.Model = model;
+
+        var result = new PiWorkerOptionsValidator().Validate(PiWorkerOptions.SectionName, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains(
+            result.Failures ?? [],
+            failure => failure.Contains("canonical '<provider>/<model>' selector", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Root_model_rejects_official_harness_providers()
     {
         var options = ValidOptions();
-        options.Model = "claude-code/default";
+        options.Model = "claude-code/fable-5-1";
 
         var result = new PiWorkerOptionsValidator().Validate(PiWorkerOptions.SectionName, options);
 
@@ -86,7 +106,7 @@ public sealed class PiWorkerOptionsValidatorTests
     public void Root_model_accepts_any_pi_backed_provider()
     {
         var options = ValidOptions();
-        options.Model = "codex/default";
+        options.Model = "codex/gpt-5.6-sol";
 
         var result = new PiWorkerOptionsValidator().Validate(PiWorkerOptions.SectionName, options);
 

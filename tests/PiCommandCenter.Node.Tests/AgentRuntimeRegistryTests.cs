@@ -44,25 +44,27 @@ public sealed class AgentRuntimeRegistryTests
             NullLogger<MuseCodeRuntimeAdapter>.Instance);
         var registry = new AgentRuntimeRegistry(pi, claude, antigravity, muse);
 
-        Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("codex/default")));
         Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("codex/gpt-5.6-sol")));
         Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("zai/glm-4.7")));
         Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("kimi-coding/k3")));
         Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("opencode-go/big-pickle")));
-        Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("custom-binary/default")));
-        Assert.Same(claude, registry.Resolve(AgentModelSelector.Parse("claude-code/default")));
+        Assert.Same(pi, registry.Resolve(AgentModelSelector.Parse("custom-binary/custom-model")));
         Assert.Same(claude, registry.Resolve(AgentModelSelector.Parse("claude-code/fable-5-1")));
-        Assert.Same(antigravity, registry.Resolve(AgentModelSelector.Parse("antigravity/default")));
-        Assert.Same(muse, registry.Resolve(AgentModelSelector.Parse("muse/default")));
-        Assert.Same(muse, registry.Resolve(AgentModelSelector.Parse("muse/muse-1")));
+        Assert.Same(antigravity, registry.Resolve(AgentModelSelector.Parse("antigravity/gemini-3-pro")));
+        Assert.Same(muse, registry.Resolve(AgentModelSelector.Parse("muse/muse-spark-1.3")));
 
         // Selectors fail closed before reaching the registry: no provider, a malformed slug, a
-        // case/whitespace variant, or the reserved runtime name 'pi' never resolve to an
-        // executable. Unknown but syntactically valid providers route only to Pi.
+        // case/whitespace variant, the reserved runtime name 'pi', or the deprecated model id
+        // 'default' never resolve to an executable. Unknown but syntactically valid providers
+        // route only to Pi.
         Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("custom-binary"));
         Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("pi/default"));
         Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("Codex/default"));
         Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("codex /default"));
+        Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("codex/default"));
+        Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("claude-code/default"));
+        Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("antigravity/default"));
+        Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("muse/default"));
         Assert.Throws<ArgumentNullException>(() => registry.Resolve(null!));
     }
 

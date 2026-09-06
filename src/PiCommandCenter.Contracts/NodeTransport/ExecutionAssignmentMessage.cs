@@ -20,4 +20,9 @@ public sealed record ExecutionAssignmentMessage(
     string RequestKind,
     string RequestRiskLevel,
     bool CreateRequestBranch,
-    bool CreateRequestCommit);
+    bool CreateRequestCommit,
+    string? VerificationPolicyRevision = null,
+    string? BaselineVersion = null,
+    string? TrustedVerificationProfileId = null,
+    string? TrustedVerificationProfileRevision = null,
+    string? MandatoryCommandIdsJson = null);

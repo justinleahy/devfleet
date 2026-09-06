@@ -37,10 +37,10 @@ public sealed class MuseCodeRuntimeAdapter : IAgentRuntimeAdapter
     internal static IReadOnlyList<string> BuildLaunchArguments() => MuseProtocol.LaunchArguments;
 
     /// <summary>
-    /// <c>session/start.modelId</c> for a selector: the provider-native id, or null when the
-    /// selector asks for the provider default so the host picks its own. Rejects non-muse runtimes.
+    /// Returns the provider-native <c>session/start.modelId</c> value for a Muse selector.
+    /// Rejects non-Muse runtimes.
     /// </summary>
-    internal static string? ResolveModelArgument(AgentModelSelector selector)
+    internal static string ResolveModelArgument(AgentModelSelector selector)
     {
         if (selector.Provider != AgentModelSelector.Muse)
         {
@@ -48,7 +48,7 @@ public sealed class MuseCodeRuntimeAdapter : IAgentRuntimeAdapter
                 $"Muse runtime only accepts '{AgentModelSelector.Muse}/<model>' selectors; got '{selector}'.");
         }
 
-        return selector.IsProviderDefault ? null : selector.ModelId;
+        return selector.ModelId;
     }
 
     /// <summary>
@@ -238,7 +238,7 @@ public sealed class MuseCodeRuntimeAdapter : IAgentRuntimeAdapter
 
         private readonly AgentStartRequest _request;
         private readonly MuseHostClient _client;
-        private readonly string? _model;
+        private readonly string _model;
         private readonly string _nodeId;
         private readonly string _clientVersion;
         private readonly MuseCodeOptions _options;
@@ -270,7 +270,7 @@ public sealed class MuseCodeRuntimeAdapter : IAgentRuntimeAdapter
         public MuseSession(
             AgentStartRequest request,
             IMuseProcess process,
-            string? model,
+            string model,
             string nodeId,
             string clientVersion,
             MuseCodeOptions options,

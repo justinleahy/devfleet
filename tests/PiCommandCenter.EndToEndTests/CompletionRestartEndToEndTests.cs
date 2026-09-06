@@ -1,3 +1,4 @@
+using System.Text.Json;
 using PiCommandCenter.ControlPlane.Security;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -27,6 +28,10 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
     private readonly EndToEndFixture _fixture;
 
     public CompletionRestartEndToEndTests(EndToEndFixture fixture) => _fixture = fixture;
+
+    private const string Fingerprint = "fingerprint-current";
+    private const string PolicyRevision = "policy-1";
+    private const string BaselineCommandId = "repository-integrity";
 
     [Fact]
     public async Task Accepted_request_result_survives_control_plane_restart()
@@ -89,14 +94,18 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
             {
                 Id = Guid.NewGuid(),
                 RequestId = requestId,
-                ProfileId = "default",
-                CommandId = "true",
+                ProfileId = "devfleet-baseline",
+                CommandId = BaselineCommandId,
                 Status = nameof(VerificationRunStatus.Passed),
                 ExitCode = 0,
                 StartedAtUtcTicks = now.UtcTicks,
                 CompletedAtUtcTicks = now.UtcTicks,
                 OutputSummary = "true",
                 Mandatory = true,
+                Fingerprint = Fingerprint,
+                PolicyRevision = PolicyRevision,
+                RunKind = nameof(VerificationRunKind.Baseline),
+                AttemptId = Guid.NewGuid(),
             });
             var leaseId = Guid.NewGuid();
             db.ReservationLeases.Add(new ReservationLeaseRow
@@ -129,7 +138,7 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
             var binding = PiCommandCenter.Domain.Projects.WorkspaceBinding.Designate(
                 new ProjectId(projectId), nodeId, repositoryPath, now);
             db.WorkspaceBindings.Add(binding);
-            db.ExecutionAssignments.Add(ExecutionAssignment.Create(
+            var assignment = ExecutionAssignment.Create(
                 new WorkRequestId(requestId),
                 new ProjectId(projectId),
                 binding.Id,
@@ -139,11 +148,25 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
                 binding.ValidationRevision,
                 "e2e-claim",
                 now,
-                TimeSpan.FromMinutes(5)));
+                TimeSpan.FromMinutes(5));
+            assignment.CaptureVerificationPolicy(
+                PolicyRevision,
+                baselineVersion: "1",
+                trustedVerificationProfileId: null,
+                trustedVerificationProfileRevision: null,
+                JsonSerializer.Serialize(new[] { BaselineCommandId }));
+            assignment.MarkRunning(now);
+            db.ExecutionAssignments.Add(assignment);
             await db.SaveChangesAsync();
 
             var authority = scope.ServiceProvider.GetRequiredService<IAssignmentTerminalizationService>();
-            var evidence = new CompletionEvidence("Done.", ["README.md"], [], "true passed");
+            var evidence = new CompletionEvidence(
+                "Done.",
+                ["README.md"],
+                [],
+                "true passed",
+                VerificationFingerprint: Fingerprint,
+                VerificationPolicyRevision: PolicyRevision);
             var begin = await authority.BeginAsync(
                 nodeId, new ProjectId(projectId), new WorkRequestId(requestId),
                 "e2e-claim", "root", TerminalizationIntent.Complete, evidence, reason: null);
@@ -182,7 +205,7 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
         AgentName = id,
         Role = "root",
         Runtime = "pi",
-        Model = "codex/default",
+        Model = "codex/gpt-5.6-sol",
         Liveness = nameof(AgentLiveness.Online),
         Activity = nameof(AgentActivity.Idle),
         Attention = nameof(AgentAttention.None),
@@ -202,7 +225,7 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
         AgentName = id,
         Role = role,
         Runtime = "pi",
-        Model = "codex/default",
+        Model = "codex/gpt-5.6-sol",
         Liveness = nameof(AgentLiveness.Exited),
         Activity = nameof(AgentActivity.Idle),
         Attention = nameof(AgentAttention.None),

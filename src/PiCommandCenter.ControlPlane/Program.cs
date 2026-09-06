@@ -5,18 +5,23 @@ using PiCommandCenter.Application;
 using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Application.Projects;
+using PiCommandCenter.Application.VerificationPolicy;
 using PiCommandCenter.Api;
 using PiCommandCenter.ControlPlane.Api;
 using PiCommandCenter.ControlPlane.Security;
 using PiCommandCenter.ControlPlane.RuntimeRouting;
 using PiCommandCenter.ControlPlane.Projects;
 using PiCommandCenter.ControlPlane.SubscriptionUsage;
+using PiCommandCenter.ControlPlane.VerificationPolicy;
 using PiCommandCenter.Infrastructure;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Security;
 using PiCommandCenter.Web.Components;
 using PiCommandCenter.ControlPlane.Hubs;
 using PiCommandCenter.ControlPlane.Hosting;
+using PiCommandCenter.Application.Recovery;
+using PiCommandCenter.ControlPlane.Recovery;
+
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseStaticWebAssets();
@@ -92,6 +97,10 @@ builder.Services.AddSingleton<INodeRuntimeConfigurationGateway, NodeRuntimeConfi
 builder.Services.AddSingleton<INodeSubscriptionUsageGateway, NodeSubscriptionUsageGateway>();
 builder.Services.AddSingleton<INodeWorkspaceDirectoryGateway, NodeWorkspaceDirectoryGateway>();
 builder.Services.AddSingleton<INativeApiRealtimeGateway, NativeApiRealtimeGateway>();
+builder.Services.AddSingleton<INodeVerificationPolicyGateway, NodeVerificationPolicyGateway>();
+builder.Services.AddSingleton<INodeRecoveryCommandGateway, NodeRecoveryCommandGateway>();
+
+builder.Services.AddScoped<IProjectVerificationPolicyService, ProjectVerificationPolicyService>();
 
 builder.Services.AddSingleton<IClock, SystemClock>();
 builder.Services.AddHealthChecks();

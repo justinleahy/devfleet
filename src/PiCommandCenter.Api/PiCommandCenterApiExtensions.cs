@@ -98,6 +98,7 @@ public static class PiCommandCenterApiExtensions
         group.MapRequestResultEndpoints(locationPrefix);
         group.MapMailEndpoints(locationPrefix);
         group.MapReservationsEndpoints(locationPrefix);
+        group.MapProjectRecoveryEndpoints(locationPrefix);
     }
 
     /// <summary>

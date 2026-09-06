@@ -319,15 +319,20 @@ describe("custom tool round-trip", () => {
     }
   });
 
-  it("maps request_verification to the canonical verification.request with profileId required and commandId optional", async () => {
-    const tools = buildRootTools(async (type) => ({ type }));
+  it("maps request_verification to parameterless verification.request", async () => {
+    const captured: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const tools = buildRootTools(async (type, payload) => {
+      captured.push({ type, payload });
+      return { type };
+    });
     const tool = tools.find((entry) => entry.name === "request_verification");
     assert.ok(tool, "request_verification tool must exist");
     assert.equal(TOOL_REQUEST_TYPES["request_verification"], "verification.request");
-    assert.deepEqual(Object.keys(tool.properties).sort(), ["commandId", "profileId"]);
-    assert.equal(tool.properties["profileId"]?.optional, undefined, "profileId is required");
-    assert.equal(tool.properties["commandId"]?.optional, true, "commandId is optional");
-    const roundTrip = await tool.execute({ profileId: "build-and-test", commandId: "unit" });
+    assert.deepEqual(Object.keys(tool.properties), []);
+    const roundTrip = await tool.execute({});
     assert.match(roundTrip, /verification\.request/);
+    assert.equal(captured[0]!.type, "verification.request");
+    assert.equal("profileId" in captured[0]!.payload, false);
+    assert.equal("commandId" in captured[0]!.payload, false);
   });
 });

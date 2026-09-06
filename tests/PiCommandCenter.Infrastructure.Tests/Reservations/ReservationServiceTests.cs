@@ -409,6 +409,78 @@ public class ReservationServiceTests
     }
 
     [Fact]
+    public async Task Project_build_and_source_leases_exclude_each_other_on_the_same_project()
+    {
+        var clock = new MutableClock(Start);
+        var (_, service, projectId) = await CreateWorldAsync(clock);
+        var otherProject = Guid.NewGuid();
+
+        var source = await service.AcquireAsync(Acquire(projectId, File("src/a.cs")));
+        var sourceThenBuild = await Assert.ThrowsAsync<ReservationConflictException>(
+            () => service.AcquireAsync(new AcquireReservationCommand(
+                projectId, Guid.NewGuid(), "session-b", [Resource("project-build")], "verify")));
+        Assert.Equal(source.LeaseId, Assert.Single(sourceThenBuild.Conflicts).LeaseId);
+
+        await service.ReleaseAsync(new ReleaseReservationCommand(source.LeaseId, "session-a"));
+
+        var build = await service.AcquireAsync(new AcquireReservationCommand(
+            projectId, Guid.NewGuid(), "session-b", [Resource("project-build")], "verify"));
+        var buildThenSource = await Assert.ThrowsAsync<ReservationConflictException>(
+            () => service.AcquireAsync(Acquire(projectId, Directory("src/"))));
+        Assert.Equal(build.LeaseId, Assert.Single(buildThenSource.Conflicts).LeaseId);
+
+        var format = await service.AcquireAsync(new AcquireReservationCommand(
+            projectId, Guid.NewGuid(), "session-c", [Resource("project-format")], "format"));
+        Assert.Equal("project-format", Assert.Single(format.Scopes).Path);
+
+        var otherBuild = await service.AcquireAsync(new AcquireReservationCommand(
+            otherProject, Guid.NewGuid(), "session-d", [Resource("project-build")], "other verify"));
+        var otherSource = await service.AcquireAsync(new AcquireReservationCommand(
+            Guid.NewGuid(), Guid.NewGuid(), "session-e", [File("src/a.cs")], "independent source"));
+        Assert.NotEqual(otherBuild.LeaseId, otherSource.LeaseId);
+    }
+
+    [Fact]
+    public async Task Expand_cannot_add_source_or_project_build_across_the_exclusion()
+    {
+        var clock = new MutableClock(Start);
+        var (_, service, projectId) = await CreateWorldAsync(clock);
+
+        var source = await service.AcquireAsync(Acquire(projectId, File("src/a.cs")));
+        var expandToBuild = new ExpandReservationCommand(
+            source.LeaseId,
+            source.FencingToken,
+            "session-a",
+            [Resource("project-build")]);
+        await Assert.ThrowsAsync<ReservationConflictException>(() => service.ExpandAsync(expandToBuild));
+
+        var build = await service.AcquireAsync(new AcquireReservationCommand(
+            Guid.NewGuid(), Guid.NewGuid(), "session-b", [Resource("project-build")], "other project"));
+        _ = build;
+
+        var listedSource = Assert.Single(await service.ListAsync(projectId), l => l.LeaseId == source.LeaseId);
+        Assert.DoesNotContain(listedSource.Scopes, s => s.Path == "project-build");
+
+        var verifier = await service.AcquireAsync(new AcquireReservationCommand(
+            projectId, Guid.NewGuid(), "session-c", [Resource("project-format")], "format first"));
+        await service.ReleaseAsync(new ReleaseReservationCommand(source.LeaseId, "session-a"));
+        var heldBuild = await service.AcquireAsync(new AcquireReservationCommand(
+            projectId, Guid.NewGuid(), "session-d", [Resource("project-build")], "verify"));
+
+        var expandFormatToSource = new ExpandReservationCommand(
+            verifier.LeaseId,
+            verifier.FencingToken,
+            "session-c",
+            [File("src/b.cs")]);
+        var expandConflict = await Assert.ThrowsAsync<ReservationConflictException>(
+            () => service.ExpandAsync(expandFormatToSource));
+        Assert.Equal(heldBuild.LeaseId, Assert.Single(expandConflict.Conflicts).LeaseId);
+
+        var listedFormat = Assert.Single(await service.ListAsync(projectId), l => l.LeaseId == verifier.LeaseId);
+        Assert.DoesNotContain(listedFormat.Scopes, s => s.Path == "src/b.cs");
+    }
+
+    [Fact]
     public async Task Invalid_scopes_are_rejected_before_persistence()
     {
         var clock = new MutableClock(Start);

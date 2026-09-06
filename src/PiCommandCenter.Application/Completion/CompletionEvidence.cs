@@ -7,4 +7,6 @@ public sealed record CompletionEvidence(
     IReadOnlyList<ReviewFinding> ReviewFindings,
     string VerificationSummary,
     string? RequestBranch = null,
-    string? CheckpointCommitId = null);
+    string? CheckpointCommitId = null,
+    string? VerificationFingerprint = null,
+    string? VerificationPolicyRevision = null);

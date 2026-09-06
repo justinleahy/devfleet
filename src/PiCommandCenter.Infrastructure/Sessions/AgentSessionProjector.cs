@@ -100,7 +100,8 @@ public static class AgentSessionProjector
     private static AgentSessionRow CreateRow(NormalizedAgentEvent @event)
     {
         // Registration payload carries the supervisor's assignment; a missing field falls back
-        // to a neutral label so a malformed payload can never block the append.
+        // to a neutral label, and the model to a concrete built-in selector, so a malformed
+        // payload can never block the append.
         var aggregate = AgentSession.Start(
             id: @event.SessionId,
             projectId: new ProjectId(ParseGuid(@event.ProjectId)),
@@ -109,7 +110,7 @@ public static class AgentSessionProjector
             agentName: OptionalText(@event.Payload, "agentName") ?? "agent",
             role: OptionalText(@event.Payload, "role") ?? "worker",
             runtime: @event.Runtime,
-            model: OptionalText(@event.Payload, "model") ?? "codex/default",
+            model: OptionalText(@event.Payload, "model") ?? "codex/gpt-5.6-sol",
             startedAt: @event.OccurredAt);
         aggregate.Apply(@event);
 

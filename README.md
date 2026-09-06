@@ -9,7 +9,7 @@ Details: [docs/architecture.md](docs/architecture.md), [docs/protocols.md](docs/
 - Fedora Linux workstation, systemd user session.
 - .NET SDK **10.0** (`TargetFramework` `net10.0` in `Directory.Build.props`). Install with the current Fedora `dotnet` 10 packages or the Microsoft SDK.
 - Node.js **≥ 26** (`runtime/package.json` `engines.node`) and npm.
-- Git and Bubblewrap (`bwrap`), required for verification and Antigravity filesystem boundaries.
+- Git and Bubblewrap (`bwrap`), required for deterministic node verification (baseline plus any selected trusted project checks) and Antigravity filesystem boundaries.
 - Optional runtimes on `PATH`: `claude` (Claude Code), `agy` (Antigravity CLI), `muse` (Muse Code, read-only), plus a Pi-capable model configuration for `@earendil-works/pi-coding-agent` 0.85.0.
 
 ```bash
@@ -38,6 +38,21 @@ The directory does not have to be a Git checkout already. Classification is read
 Requests can be enqueued while a Project is unbound or its node is offline and remain `Queued` with a scheduling reason. When the designated binding becomes eligible, the control plane atomically creates a durable **ExecutionAssignment** containing the request's immutable node, path, branch, and binding-revision snapshot. Only the connection authenticated as that assigned node, with the assignment token, may act for the request, and every child stays on that node and workspace.
 
 The initial phase has no repository mobility or transparent failover. A Project has an effective limit of one nonterminal development assignment, including finalizing, cancelling, and recovery-required work. Disconnect or lease expiry does not transfer ownership or free the writer slot; completion, failure, and cancellation release it only after assignment-bound quiescence is proved or audited recovery resolves the uncertainty.
+
+## Project recovery
+
+**Recover project** stops this Project's retained execution, keeps files and history, and leaves the queue paused. It is not a reset and does not resume the original assignment.
+
+- Operator runbook: [docs/operations/project-recovery.md](docs/operations/project-recovery.md)
+- Architecture ownership: [docs/architecture.md](docs/architecture.md#recovery)
+- Design (implemented): [docs/design/project-recovery.md](docs/design/project-recovery.md)
+
+Diagnosis is `GET /api/projects/{projectId}/recovery`. Start is `POST /api/projects/{projectId}/recoveries`. Recheck, administrator `confirm-manual`, and `POST /api/projects/{projectId}/recovery/resume` are separate. Linked retry is a new `POST /api/projects/{projectId}/requests` with immutable `OriginalRequestId`.
+
+Linux nodes prove stop with `setsid` session/process-group identity (`AssignmentProcessIdentity`: PID, `/proc` start ticks, `ProcessGroupId`, `SessionId`). Non-Linux and missing `setsid` report `process_stop_unproven`; tree kill is not proof. Silence is never stop proof. Never delete workspaces, SQLite, `Node:EventSpoolPath`, or assignment journals to “unstick” recovery.
+
+Node attempt budgets (`NodeOptions`): `Node:RecoveryCooperativeStopSeconds` (default 10), `Node:RecoveryTerminationSeconds` (default 20), `Node:RecoveryAttemptSeconds` (default 60, must be ≥ the sum of the first two).
+
 
 ## First-time setup
 
@@ -78,7 +93,12 @@ If a session starts without provider auth, the UI shows blocked + input required
 
 ### Pi model configuration
 
-Configure models through Pi’s own agent data under `Pi:AgentDataDirectory` (default `~/.local/share/devfleet/pi-agent`). Do not put provider API keys in SQLite or `appsettings`. `Pi:WorkerPath` points at the installed worker under `~/.local/lib/devfleet` in production.
+Pi-native provider auth and model definitions stay under host-native `~/.pi/agent`. `Pi:AgentDataDirectory` (default `~/.local/share/devfleet/pi-agent`) is DevFleet-owned session/resource state and `role-routes.json` only. Do not put provider API keys in SQLite or `appsettings`. `Pi:WorkerPath` points at the installed worker under `~/.local/lib/devfleet` in production.
+
+### Verification
+
+A default node needs no `Verification:Profiles` section. Empty profiles are a valid baseline-only installation: the supervisor always runs built-in `devfleet-baseline` version `1` (`repository-integrity` mandatory, `whitespace` optional). Configure a ready `reviewer` or `verifier` role route for independent agent review; that route is not a command executor. Optional project checks are node-owned trusted command lists. Select a profile on the Project page; raw command definitions never cross the control plane. Historical `default` profile selection migrates only for Projects with persisted `default` runs when the node still advertises `default`.
+
 ## Migrations
 
 The Control Plane applies EF Core migrations on startup (`MigrateAsync` in `src/PiCommandCenter.ControlPlane/Program.cs`). There is no separate migrate command for normal operation. `ConnectionStrings:ControlPlane` selects the SQLite database that retains fleet Project metadata, WorkspaceBindings, request queues and history, and durable ExecutionAssignments. Assignment history survives terminalization, disconnect, and lease expiry. The node journals assignment identity and unacknowledged events at `Node:EventSpoolPath` for reconciliation before new claims after restart.
@@ -198,38 +218,43 @@ RUN_REAL_PI_TESTS=1 RUN_REAL_CLAUDE_TESTS=1 RUN_REAL_ANTIGRAVITY_TESTS=1 dotnet 
 | `Projects:ApprovedRoots` (**Node configuration only**) | Node-local allowed WorkspaceBinding prefixes; used by the selected node for bounded directory browse and revisioned validation, never by Project registration or the control plane filesystem |
 | `Admin:Username` / `Admin:PasswordFile` | Cookie admin |
 | `NodeAuthentication:CredentialFile` / `Header` / `Scheme` | Node hub |
-| `Node:ControlPlaneUrl`, `Id`, `DisplayName`, `HeartbeatSeconds`, `ClaimLeaseSeconds`, `EventSpoolPath`, `RequireCleanStart`, `AllowUntrackedFiles` | Node worker |
+| `Node:ControlPlaneUrl`, `Id`, `DisplayName`, `HeartbeatSeconds`, `ClaimLeaseSeconds`, `EventSpoolPath`, `RequireCleanStart`, `AllowUntrackedFiles`, `RecoveryCooperativeStopSeconds`, `RecoveryTerminationSeconds`, `RecoveryAttemptSeconds` | Node worker; recovery budgets are attempt deadlines, never ownership expiry |
 | `Pi:*` | Worker path, node executable, agent data dir, timeouts, child caps, `Model` (canonical root selector), allowed roles, and ordered `RoleRoutes` |
 | `Claude:*` | `Executable` (`claude`), `SettingsPath`, timeouts, line caps |
 | `Antigravity:*` | `Executable` (`agy`), timeouts, line caps |
 | `Muse:*` | `Executable` (`muse`), timeouts, line caps; read-only `muse serve` (MSP) with write and shell tools disabled |
-| `Verification:Profiles` | Trusted command lists (agents cannot supply executables) |
+| `Verification:Profiles` | Optional node-owned trusted command lists. Empty or omitted is baseline-only; agents cannot supply executables, profile ids, or command ids |
 | `SubscriptionUsage:*` | `NodeExecutable` + `ScriptPath` (installed worker usage sidecar under `~/.local/lib/devfleet`) |
 
-`Pi:Model` is the canonical root selector (`codex/default`). `Pi:RoleRoutes:<role>` is an
+`Pi:Model` is the canonical root selector (`codex/gpt-5.6-sol`). `Pi:RoleRoutes:<role>` is an
 ordered list of `{ Model }` candidates with canonical `<provider>/<model>` values (for example
-`codex/gpt-5.6-sol` or `zai/glm-4.7`; `default` asks the provider for its default). The reserved
-prefixes `claude-code`, `antigravity`, and `muse` select their official-harness adapters; every
+`codex/gpt-5.6-sol`, `zai/glm-4.7`, or `qwen-token-plan/qwen3.8-max`). The model id `default` is invalid: `AgentModelSelector.TryParse`
+rejects it, and every runtime selector must name an explicit model. Built-in examples:
+`codex/gpt-5.6-sol`, `claude-code/fable-5-1`, `antigravity/gemini-3-pro`, `muse/muse-spark-1.3`, `qwen-token-plan/qwen3.8-max`.
+The reserved prefixes `claude-code`, `antigravity`, and `muse` select their official-harness adapters; every
 other provider prefix runs through Pi (`codex` aliases Pi's `openai-codex`; the rest pass
-through identically) and fails closed unless authenticated. The selector chooses the provider
+through identically) and fails closed unless authenticated. Adapters always forward the native
+model id from the selector; they never omit it or ask the provider to pick. The selector chooses the provider
 and model; the node—not the root agent—tries candidates
 in order until a runtime starts. `muse/*` runs the official Muse Code CLI over its
 stable JSON-RPC MSP schema with `--disable-write --disable-shell`, so it belongs only
 in read-oriented routes (architect, reviewer), never in implementer or verifier
-routes. Auth failures surface as blocked + `muse login`; DevFleet never collects Muse
+routes. The `verifier` role remains a model route for independent agent verification; deterministic checks are the Project verification policy, not that route. Auth failures surface as blocked + `muse login`; DevFleet never collects Muse
 credentials or reads its auth file. See `deploy/appsettings.Node.example.json`.
 
 Every provider prefix outside the reserved official harnesses (`claude-code`,
 `antigravity`, `muse`) runs on Pi as the runtime adapter, which covers every
 authenticated Pi provider, not only OpenAI. `codex` aliases Pi's `openai-codex`
-provider (`codex/default`, `codex/gpt-5.6-sol`); every other Pi provider prefix
-passes through identically (e.g. `zai/glm-4.7`), and an unauthenticated or
+provider (`codex/gpt-5.6-sol`); every other Pi provider prefix
+passes through identically (e.g. `zai/glm-4.7`, `qwen-token-plan/qwen3.8-max`), and an unauthenticated or
 unavailable provider fails closed. Model discovery returns one catalog per
-authenticated Pi provider, so every reported selector is runnable.
+authenticated Pi provider, so every reported selector is runnable. `/usage` lists configured Qwen Token Plan providers (`qwen-token-plan`, `qwen-token-plan-individual`, `qwen-token-plan-cn`) with a console-only remaining-quota notice; Alibaba exposes no public remaining Token Plan quota API, so DevFleet never invents percentages or treats local tokens as remaining credits. `/statistics` attributes actual persisted Pi token telemetry by canonical model provider. Session tokens cannot derive Alibaba Credits.
 
 Authenticated operators can edit these routes at `/routing`. The page talks to the
 selected online node over the existing SignalR connection; updates take effect for the
 next child spawn and are persisted as `role-routes.json` under `Pi:AgentDataDirectory`.
+Persisted role-route overrides that still contain a deprecated `<provider>/default`
+selector are discarded and replaced by the configured explicit routes.
 **Refresh models** reads the node's in-memory catalog cache. The node collects the
 authenticated Pi providers, `agy models`, and Muse's `model/list` once at startup and then
 refreshes them automatically every five minutes, so refreshes reuse the last completed
@@ -237,11 +262,10 @@ snapshot instead of relaunching every discovery process; a failed refresh keeps 
 snapshot.
 Claude aliases and configured route selectors are recomputed from
 live routing on every request. Claude Code cannot export its authenticated model picker, so DevFleet
-offers a maintained list of stable aliases (`default`, `fable`, `sonnet`, `opus`, and
+offers a maintained list of stable aliases (`fable`, `sonnet`, `opus`, and
 `haiku`) plus any full Claude selectors already used in a route. Muse 1.0.3's bundled
 MSP catalog can omit supported models, so DevFleet augments the live `model/list`
 result with the four concrete IDs `muse-spark-1.3`, `muse-spark-1.3-contributor`,
 `muse-spark-1.2`, and `muse-spark-1.2-contributor`, canonicalized as `muse/<model-id>`
-and deduplicated while keeping any additional valid live Muse IDs. `muse/default`
-remains the provider-selected default on routes, not a discovered catalog entry.
+and deduplicated while keeping any additional valid live Muse IDs.
 Operators may still enter a canonical selector by hand.

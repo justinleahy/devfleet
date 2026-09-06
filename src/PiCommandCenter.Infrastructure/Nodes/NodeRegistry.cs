@@ -3,10 +3,12 @@ using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Runtime;
+using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Infrastructure.Persistence;
+using PiCommandCenter.Infrastructure.Verification;
 
 namespace PiCommandCenter.Infrastructure.Nodes;
 
@@ -17,12 +19,17 @@ namespace PiCommandCenter.Infrastructure.Nodes;
 public sealed class NodeRegistry(
     TimeProvider clock,
     ControlPlaneDbContext db,
-    IProjectionNotifier notifier) : INodeRegistry
+    IProjectionNotifier notifier,
+    VerificationPolicyUpgradeMigrator? policyUpgradeMigrator = null) : INodeRegistry
 {
     private const int MaxAssignmentCount = 200;
     private const int MaxRouteCount = 200;
+    private const int MaxVerificationProfileCount = 32;
+    private const int MaxVerificationCommandCount = 32;
     private const int MaxStatusTextLength = 128;
     private const int MaxExecutionStatusJsonLength = 131072;
+    private const int MinVerificationTimeoutSeconds = 1;
+    private const int MaxVerificationTimeoutSeconds = 86_400;
     private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<IReadOnlyList<NodeDto>> ListAsync(CancellationToken cancellationToken = default)
@@ -105,6 +112,14 @@ public sealed class NodeRegistry(
                 resourceSnapshotJson,
                 executionStatusJson),
             cancellationToken);
+        if (command.ExecutionStatus?.VerificationPolicy is { } catalog
+            && policyUpgradeMigrator is not null)
+        {
+            await policyUpgradeMigrator.MigrateAfterHeartbeatAsync(
+                command.Id,
+                catalog,
+                cancellationToken);
+        }
         PublishFleetAndEligibilityChanges(eligibilityChanges);
         return ToDto(node);
     }
@@ -311,6 +326,57 @@ public sealed class NodeRegistry(
                 || !routeKeys.Add((route.Role, route.CanonicalModel)))
             {
                 return false;
+            }
+        }
+
+        return VerificationPolicyIsValid(status.VerificationPolicy);
+    }
+
+    private static bool VerificationPolicyIsValid(VerificationPolicyCatalogMessage? policy)
+    {
+        if (policy is null)
+        {
+            return true;
+        }
+
+        if (policy.ObservedAt.Offset != TimeSpan.Zero
+            || !policy.BaselineAvailable
+            || !IsBoundedStableText(policy.BaselineVersion)
+            || policy.Profiles is null
+            || policy.Profiles.Count > MaxVerificationProfileCount)
+        {
+            return false;
+        }
+
+        var profileIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var profile in policy.Profiles)
+        {
+            if (profile is null
+                || !IsBoundedStableText(profile.Id)
+                || !IsBoundedStableText(profile.Revision)
+                || !IsBoundedStableText(profile.DisplayLabel)
+                || string.Equals(profile.Id, VerificationBaselineIds.ProfileId, StringComparison.Ordinal)
+                || profile.Commands is null
+                || profile.Commands.Count is 0 or > MaxVerificationCommandCount
+                || !profileIds.Add(profile.Id))
+            {
+                return false;
+            }
+
+            var commandIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var command in profile.Commands)
+            {
+                if (command is null
+                    || !IsBoundedStableText(command.Id)
+                    || VerificationBaselineIds.IsReservedCommandId(command.Id)
+                    || !IsBoundedStableText(command.DisplayLabel)
+                    || !IsBoundedStableText(command.WorkingDirectoryLabel)
+                    || command.TimeoutSeconds is < MinVerificationTimeoutSeconds
+                        or > MaxVerificationTimeoutSeconds
+                    || !commandIds.Add(command.Id))
+                {
+                    return false;
+                }
             }
         }
 

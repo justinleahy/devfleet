@@ -48,7 +48,7 @@ export const CHILD_TOOL_REQUEST_TYPES: Record<string, string> = {
   release_reservation: "reservation.release",
   request_reservation_handoff: "reservation.handoff.request",
   accept_reservation_handoff: "reservation.handoff.accept",
-  run_verification_command: "verification.request",
+  run_project_checks: "verification.intermediate.request",
   mail_send: "agent.message.send",
   mail_reply: "agent.message.send",
   mail_inbox: "agent.inbox.read",
@@ -74,7 +74,7 @@ export const CHILD_MUTATION_TOOLS = [
   "release_reservation",
   "request_reservation_handoff",
   "accept_reservation_handoff",
-  "run_verification_command",
+  "run_project_checks",
 ] as const;
 
 /** The node-side transport a tool round-trips through. */
@@ -242,10 +242,10 @@ export function buildChildTools(request: ChildToolRequest): RootTool[] {
     "Release an active reservation lease when work on the scope is done.",
     lease,
     request,),
-    childRoundTripTool("run_verification_command",
-    "Run Verification Command",
-    "Ask the node to run one command from a trusted verification profile.",
-    { profileId: s("Configured verification profile id"), commandId: optional("Command id within the profile") },
+    childRoundTripTool("run_project_checks",
+    "Run Project Checks",
+    "Ask the node to run the Project's selected project checks as an intermediate check. Takes no profile or command; returns no_project_checks when none are selected.",
+    {},
     request,),
     childRoundTripTool("mail_send",
     "Send Mail",

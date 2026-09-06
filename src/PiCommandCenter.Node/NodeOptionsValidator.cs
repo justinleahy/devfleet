@@ -64,6 +64,31 @@ public sealed class NodeOptionsValidator : IValidateOptions<NodeOptions>
             failures.Add($"'{nameof(options.EventSpoolPath)}' must not be empty.");
         }
 
+        if (options.RecoveryCooperativeStopSeconds <= 0)
+        {
+            failures.Add($"'{nameof(options.RecoveryCooperativeStopSeconds)}' must be positive.");
+        }
+
+        if (options.RecoveryTerminationSeconds <= 0)
+        {
+            failures.Add($"'{nameof(options.RecoveryTerminationSeconds)}' must be positive.");
+        }
+
+        if (options.RecoveryAttemptSeconds <= 0)
+        {
+            failures.Add($"'{nameof(options.RecoveryAttemptSeconds)}' must be positive.");
+        }
+        else if (options.RecoveryCooperativeStopSeconds > 0
+            && options.RecoveryTerminationSeconds > 0
+            && options.RecoveryAttemptSeconds
+                < options.RecoveryCooperativeStopSeconds + options.RecoveryTerminationSeconds)
+        {
+            failures.Add(
+                $"'{nameof(options.RecoveryAttemptSeconds)}' must be at least "
+                + $"'{nameof(options.RecoveryCooperativeStopSeconds)}' + "
+                + $"'{nameof(options.RecoveryTerminationSeconds)}'.");
+        }
+
         return failures.Count > 0
             ? ValidateOptionsResult.Fail(failures)
             : ValidateOptionsResult.Success;

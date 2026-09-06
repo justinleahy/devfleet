@@ -127,7 +127,7 @@ public sealed class MuseModelCatalogReader : IMuseModelCatalogReader
         foreach (var entry in models.EnumerateArray())
         {
             var modelId = MuseProtocol.GetString(entry, "modelId")?.Trim();
-            if (string.IsNullOrEmpty(modelId) || modelId == AgentModelSelector.DefaultModelId)
+            if (string.IsNullOrEmpty(modelId))
             {
                 continue;
             }

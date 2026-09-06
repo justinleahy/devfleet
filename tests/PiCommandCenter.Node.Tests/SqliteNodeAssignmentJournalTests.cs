@@ -2,6 +2,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Node;
+using PiCommandCenter.Node.Runtime;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -43,6 +44,8 @@ public sealed class SqliteNodeAssignmentJournalTests : IDisposable
         Assert.Equal(AssignmentSupervisorState.Unknown, loaded.SupervisorState);
         Assert.True(loaded.RepositoryKnown);
         Assert.Equal(7, loaded.PendingEventCount);
+        Assert.Empty(loaded.ProcessIdentities ?? []);
+
     }
     [Fact]
     public async Task Start_blocked_supervisor_state_survives_restart_for_safe_retry()
@@ -143,6 +146,152 @@ public sealed class SqliteNodeAssignmentJournalTests : IDisposable
             () => restarted.LoadAsync(CancellationToken.None));
         Assert.Contains(requestId.ToString("D"), exception.Message, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Process_identities_round_trip_across_restart()
+    {
+        var assignment = MakeAssignment(Guid.NewGuid(), marker: "identities");
+        var identities = new[]
+        {
+            new AssignmentProcessIdentity(4242, 1_000_001, 4242, 7, "pi-worker"),
+            new AssignmentProcessIdentity(4243, 1_000_002, 4242, 7, null),
+        };
+
+        await using (var journal = CreateJournal())
+        {
+            await journal.UpsertAsync(
+                new NodeAssignmentJournalEntry(
+                    assignment,
+                    AssignmentSupervisorState.Running,
+                    RepositoryKnown: true,
+                    PendingEventCount: 2,
+                    identities),
+                CancellationToken.None);
+        }
+
+        await using var restarted = CreateJournal();
+        var loaded = Assert.Single(await restarted.LoadAsync(CancellationToken.None));
+        Assert.Equal(AssignmentSupervisorState.Unknown, loaded.SupervisorState);
+        Assert.Equal(identities, loaded.ProcessIdentities);
+    }
+
+    [Fact]
+    public async Task Legacy_schema_migrates_and_loads_missing_identities_as_empty()
+    {
+        Directory.CreateDirectory(_directory);
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var create = connection.CreateCommand();
+            create.CommandText =
+                """
+                CREATE TABLE NodeAssignments (
+                    RequestId TEXT PRIMARY KEY,
+                    AssignmentJson TEXT NOT NULL,
+                    SupervisorState TEXT NOT NULL,
+                    RepositoryKnown INTEGER NOT NULL,
+                    PendingEventCount INTEGER NOT NULL
+                );
+                """;
+            await create.ExecuteNonQueryAsync();
+        }
+
+        var assignment = MakeAssignment(Guid.NewGuid(), marker: "legacy");
+        await using (var seed = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await seed.OpenAsync();
+            await using var insert = seed.CreateCommand();
+            insert.CommandText =
+                """
+                INSERT INTO NodeAssignments (
+                    RequestId, AssignmentJson, SupervisorState, RepositoryKnown, PendingEventCount)
+                VALUES ($requestId, $assignmentJson, $supervisorState, 1, 0);
+                """;
+            insert.Parameters.AddWithValue("$requestId", assignment.RequestId.ToString("D"));
+            insert.Parameters.AddWithValue(
+                "$assignmentJson",
+                System.Text.Json.JsonSerializer.Serialize(
+                    assignment,
+                    new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)
+                    {
+                        RespectRequiredConstructorParameters = true,
+                    }));
+            insert.Parameters.AddWithValue("$supervisorState", nameof(AssignmentSupervisorState.Running));
+            await insert.ExecuteNonQueryAsync();
+        }
+
+        await using var journal = CreateJournal();
+        var loaded = Assert.Single(await journal.LoadAsync(CancellationToken.None));
+        Assert.Equal(assignment.RequestId, loaded.Assignment.RequestId);
+        Assert.Equal(AssignmentSupervisorState.Unknown, loaded.SupervisorState);
+        Assert.Empty(loaded.ProcessIdentities ?? []);
+    }
+
+    [Fact]
+    public async Task Load_fails_closed_when_process_identities_payload_is_corrupt()
+    {
+        var requestId = Guid.NewGuid();
+        await using (var journal = CreateJournal())
+        {
+            await journal.UpsertAsync(
+                new NodeAssignmentJournalEntry(
+                    MakeAssignment(requestId, marker: "identity-corrupt"),
+                    AssignmentSupervisorState.Running,
+                    RepositoryKnown: true,
+                    PendingEventCount: 0),
+                CancellationToken.None);
+        }
+
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                "UPDATE NodeAssignments SET ProcessIdentitiesJson = '{not-json' WHERE RequestId = $requestId;";
+            command.Parameters.AddWithValue("$requestId", requestId.ToString("D"));
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await using var restarted = CreateJournal();
+        var exception = await Assert.ThrowsAsync<NodeAssignmentJournalCorruptionException>(
+            () => restarted.LoadAsync(CancellationToken.None));
+        Assert.Contains(requestId.ToString("D"), exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Load_fails_closed_when_process_identity_fields_are_not_positive()
+    {
+        var requestId = Guid.NewGuid();
+        await using (var journal = CreateJournal())
+        {
+            await journal.UpsertAsync(
+                new NodeAssignmentJournalEntry(
+                    MakeAssignment(requestId, marker: "identity-invalid"),
+                    AssignmentSupervisorState.Running,
+                    RepositoryKnown: true,
+                    PendingEventCount: 0),
+                CancellationToken.None);
+        }
+
+        await using (var connection = new SqliteConnection($"Data Source={_databasePath}"))
+        {
+            await connection.OpenAsync();
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                UPDATE NodeAssignments
+                SET ProcessIdentitiesJson = '[{"processId":0,"startTimeTicks":1,"processGroupId":1,"sessionId":1}]'
+                WHERE RequestId = $requestId;
+                """;
+            command.Parameters.AddWithValue("$requestId", requestId.ToString("D"));
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await using var restarted = CreateJournal();
+        await Assert.ThrowsAsync<NodeAssignmentJournalCorruptionException>(
+            () => restarted.LoadAsync(CancellationToken.None));
+    }
+
 
     public void Dispose()
     {

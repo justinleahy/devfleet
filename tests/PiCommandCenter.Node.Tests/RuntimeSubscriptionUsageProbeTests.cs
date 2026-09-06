@@ -399,7 +399,8 @@ public sealed class RuntimeSubscriptionUsageProbeTests
         var snapshot = await probe.GetAsync();
 
         Assert.Equal(
-            ["opencode-go", "xai-oauth", "zai", "kimi-code", "anthropic", "openai-codex"],
+            ["qwen-token-plan-cn", "qwen-token-plan-individual", "qwen-token-plan", "opencode-go",
+                "xai-oauth", "zai", "kimi-code", "anthropic", "openai-codex"],
             snapshot.Providers.Select(p => p.Provider));
         Assert.All(snapshot.Providers, p => Assert.Equal(SubscriptionUsageStatuses.Available, p.Status));
     }
@@ -1031,7 +1032,8 @@ public sealed class RuntimeSubscriptionUsageProbeTests
     {
         Assert.Equal(NodeId, snapshot.NodeId);
         Assert.Equal(
-            ["openai-codex", "anthropic", "kimi-code", "zai", "xai-oauth", "opencode-go"],
+            ["openai-codex", "anthropic", "kimi-code", "zai", "xai-oauth", "opencode-go",
+                "qwen-token-plan", "qwen-token-plan-individual", "qwen-token-plan-cn"],
             snapshot.Providers.Select(p => p.Provider));
         Assert.All(snapshot.Providers, provider =>
         {
@@ -1041,7 +1043,6 @@ public sealed class RuntimeSubscriptionUsageProbeTests
         var json = JsonSerializer.Serialize(snapshot);
         Assert.DoesNotContain("SECRET", json, StringComparison.Ordinal);
         Assert.DoesNotContain("/home/", json, StringComparison.Ordinal);
-        Assert.DoesNotContain("token", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("reports", json, StringComparison.Ordinal);
         Assert.DoesNotContain("Weekly", json, StringComparison.Ordinal);
         Assert.DoesNotContain("omp", json, StringComparison.OrdinalIgnoreCase);

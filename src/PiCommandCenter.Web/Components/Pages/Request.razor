@@ -31,6 +31,7 @@
 @inject IVerificationRunStore VerificationRunStore
 @inject IAssignmentTerminalizationService CompletionGate
 @inject IProjectionNotifier Notifier
+@inject NavigationManager Navigation
 
 <PageTitle>@(_request?.Title ?? "Request") &middot; DevFleet</PageTitle>
 
@@ -122,6 +123,24 @@ else
                         <AttentionCallout Signal="signal" Now="_snapshot" />
                     }
                 </div>
+            </section>
+        }
+
+        @* Placed after "Needs attention" on purpose: a request waiting for input or an
+           unmet configuration blocker keeps its own specific fix first, and recovery is
+           offered only for a retained assignment or a disconnected owner. *@
+        @if (_recovery is { } recovery)
+        {
+            <section class="page-section" aria-labelledby="recovery-entry-heading">
+                <div class="section-head">
+                    <h2 id="recovery-entry-heading">@recovery.Title</h2>
+                    <div class="section-actions">
+                        <FluentAnchor Href="@RecoveryHref()" Appearance="Appearance.Accent">
+                            Recover project
+                        </FluentAnchor>
+                    </div>
+                </div>
+                <p class="page-lead">@recovery.Detail</p>
             </section>
         }
 
@@ -253,6 +272,18 @@ else
                     <dl class="facts">
                         <dt>Request id</dt>
                         <dd class="mono">@request.Id</dd>
+                        @if (request.OriginalRequestId is { } original)
+                        {
+                            <dt>Retry of</dt>
+                            <dd class="fact-lines">
+                                <a href="@($"/requests/{original}")">the request this retry was drafted from</a>
+                                <span class="mono hint">@original</span>
+                                <span class="hint">
+                                    Provenance only: this request never resumed that execution and
+                                    holds no authority from it.
+                                </span>
+                            </dd>
+                        }
                         <dt>Project</dt>
                         <dd>
                             @if (_project is not null)
@@ -961,58 +992,250 @@ else
                     @_verificationError
                 </FluentMessageBar>
             }
-            else if (_verificationRuns.Count == 0)
-            {
-                <p class="panel-empty">
-                    No verification command has run for this request. Runs are recorded by the node
-                    when the root agent calls <span class="mono">request_verification</span>; only
-                    profiles from trusted node configuration can execute.
-                </p>
-            }
             else
             {
-                <div class="run-grid">
-                    @foreach (var profile in VerificationProfiles())
-                    {
-                        <FluentCard>
-                            <section class="panel" aria-label="@($"Verification profile {profile.Key}")">
-                                <div class="section-head is-tight">
-                                    <h3>@profile.Key</h3>
-                                    <FluentBadge Appearance="@(ProfileGreen(profile.Value) ? Appearance.Accent : Appearance.Neutral)">
-                                        @(ProfileGreen(profile.Value) ? "all green" : "not green")
-                                    </FluentBadge>
-                                </div>
-
-                                <ul class="run-list">
-                                    @foreach (var run in profile.Value)
+                @* Four distinct concepts, never merged into one profile list: the independent
+                   agent, the automatic baseline, the Project's selected checks, and the
+                   child-requested intermediate history. *@
+                <div class="verification-stack">
+                    <FluentCard>
+                        <section class="panel" aria-labelledby="verification-agent-heading">
+                            <div class="section-head is-tight">
+                                <h3 id="verification-agent-heading">Verification agent</h3>
+                                <span class="section-meta">independent agent review</span>
+                            </div>
+                            @if (_verification.ReviewSessions.Count == 0)
+                            {
+                                <p class="panel-empty">
+                                    No reviewer or verifier session is registered for this request.
+                                    Independent review is performed by a child session whose model
+                                    comes from <a href="/routing">role routing</a>; routing chooses
+                                    models only and never defines an executable command.
+                                </p>
+                            }
+                            else
+                            {
+                                <ul class="run-list" aria-labelledby="verification-agent-heading">
+                                    @foreach (var session in _verification.ReviewSessions)
                                     {
-                                        <li class="run @RunClass(run.Status)">
-                                            <span class="run-command mono">@run.CommandId</span>
+                                        <li class="run @ReviewClass(session)">
+                                            <span class="run-command">@session.AgentName</span>
                                             <span class="badge-row">
-                                                <FluentBadge Appearance="@(run.Status == VerificationRunStatus.Passed ? Appearance.Accent : Appearance.Neutral)">
-                                                    @run.Status
+                                                <FluentBadge Appearance="Appearance.Neutral">@session.Role</FluentBadge>
+                                                <FluentBadge Appearance="@(session.WorkState == AgentWorkState.Completed ? Appearance.Accent : Appearance.Neutral)">
+                                                    @session.WorkState
                                                 </FluentBadge>
-                                                @if (run.Mandatory)
-                                                {
-                                                    <FluentBadge Appearance="Appearance.Neutral">mandatory</FluentBadge>
-                                                }
                                             </span>
                                             <span class="run-facts">
-                                                exit @(run.ExitCode?.ToString() ?? "n/a") &middot;
-                                                @RunDuration(run) &middot;
-                                                @run.StartedAt.ToString("u")
+                                                @session.Liveness &middot; @session.Activity &middot;
+                                                @(session.CurrentOperation
+                                                    ?? (string.IsNullOrWhiteSpace(session.StatusReason)
+                                                        ? "no operation reported"
+                                                        : session.StatusReason))
                                             </span>
-                                            @if (run.OutputSummary is { Length: > 0 } summary)
-                                            {
-                                                <pre class="event-payload">@summary</pre>
-                                            }
-                                            @if (run.OutputArtifactPath is { Length: > 0 } artifact)
-                                            {
-                                                <span class="event-origin">artifact @artifact</span>
-                                            }
+                                            <span class="run-facts mono">@session.Id</span>
                                         </li>
                                     }
                                 </ul>
+                            }
+                        </section>
+                    </FluentCard>
+
+                    <FluentCard>
+                        <section class="panel" aria-labelledby="verification-baseline-heading">
+                            <div class="section-head is-tight">
+                                <h3 id="verification-baseline-heading">Automatic baseline</h3>
+                                <span class="section-meta">devfleet-baseline &middot; always enabled</span>
+                            </div>
+                            @if (_verification.Baseline.Count == 0)
+                            {
+                                <p class="panel-empty">
+                                    @if (_verification.IsAdmittedInProgress && _verification.Admitted is { } admitted)
+                                    {
+                                        <text>
+                                            Final verification is in progress for fingerprint
+                                            <span class="mono">@Short(admitted.Fingerprint)</span>.
+                                            @if (admitted.Command is { } command)
+                                            {
+                                                <text>
+                                                    Running @command.CommandId for @CommandElapsed(command)
+                                                    of a @command.TimeoutSeconds s budget
+                                                    @(command.Mandatory ? "(mandatory)" : "(optional)").
+                                                </text>
+                                            }
+                                            else
+                                            {
+                                                <text>
+                                                    Command rows have not been persisted yet.
+                                                    Elapsed @AdmittedElapsed(admitted) since
+                                                    @admitted.StartedAt.ToString("u").
+                                                </text>
+                                            }
+                                        </text>
+                                    }
+                                    else
+                                    {
+                                        <text>
+                                            No baseline run is recorded for the current repository state.
+                                            Final verification runs automatically when the request is
+                                            submitted for completion, so nothing has to be started by hand.
+                                            Which commands run beyond the baseline is chosen under
+                                            <a href="@ProjectHref()">Project configuration</a>.
+                                        </text>
+                                    }
+                                </p>
+                            }
+                            else
+                            {
+                                @if (_verification.BaselineSuccess is { } baselinePassed)
+                                {
+                                    <p class="run-verdict is-passed">@baselinePassed</p>
+                                }
+                                <ul class="run-list" aria-labelledby="verification-baseline-heading">
+                                    @foreach (var row in _verification.Baseline)
+                                    {
+                                        @RunRow(row)
+                                    }
+                                </ul>
+                            }
+                        </section>
+                    </FluentCard>
+
+                    <FluentCard>
+                        <section class="panel" aria-labelledby="verification-project-heading">
+                            <div class="section-head is-tight">
+                                <h3 id="verification-project-heading">Project checks</h3>
+                                <span class="section-meta">@ProjectChecksMeta()</span>
+                            </div>
+                            @if (_verification.ProjectChecks.Count == 0)
+                            {
+                                <p class="panel-empty">
+                                    @if (_verification.IsAdmittedInProgress)
+                                    {
+                                        <text>
+                                            Final verification is admitted. Project-check command rows
+                                            for this attempt have not been persisted yet.
+                                        </text>
+                                    }
+                                    else if (RequestVerificationPolicyCopy.AssignedProfileId(
+                                                 _request?.Assignment,
+                                                 _request?.Assignment is not null)
+                                             is { } assignedProfile)
+                                    {
+                                        <text>
+                                            No project-check run is recorded for the current
+                                            repository state. The assignment snapshot selected
+                                            trusted profile <span class="mono">@assignedProfile</span>.
+                                        </text>
+                                    }
+                                    else if (_request?.Assignment is not null)
+                                    {
+                                        <text>
+                                            Baseline repository checks will run. The assignment
+                                            snapshot selected no project-check profile.
+                                        </text>
+                                    }
+                                    else if (_project?.TrustedVerificationProfileId is { Length: > 0 } selected)
+                                    {
+                                        <text>
+                                            No project-check run is recorded for the current
+                                            repository state. The current Project selection is
+                                            trusted profile <span class="mono">@selected</span>
+                                            and applies until this request is assigned.
+                                        </text>
+                                    }
+                                    else
+                                    {
+                                        <text>
+                                            Baseline repository checks will run. No project test
+                                            suite is configured. A trusted profile is selected
+                                            under <a href="@ProjectHref()">Project configuration</a>;
+                                            command definitions stay node-owned.
+                                        </text>
+                                    }
+                                </p>
+                            }
+                            else
+                            {
+                                @if (_verification.ProjectChecksSuccess is { } projectPassed)
+                                {
+                                    <p class="run-verdict is-passed">@projectPassed</p>
+                                }
+                                <ul class="run-list" aria-labelledby="verification-project-heading">
+                                    @foreach (var row in _verification.ProjectChecks)
+                                    {
+                                        @RunRow(row)
+                                    }
+                                </ul>
+                            }
+                        </section>
+                    </FluentCard>
+
+                    <FluentCard>
+                        <section class="panel" aria-labelledby="verification-intermediate-heading">
+                            <div class="section-head is-tight">
+                                <h3 id="verification-intermediate-heading">Intermediate checks</h3>
+                                <span class="section-meta">history only</span>
+                            </div>
+                            @if (_verification.Intermediate.Count == 0)
+                            {
+                                <p class="panel-empty">
+                                    No child requested an intermediate project check. Intermediate
+                                    runs never change the request phase and are never counted by
+                                    the completion gate.
+                                </p>
+                            }
+                            else
+                            {
+                                <details>
+                                    <summary>
+                                        @_verification.Intermediate.Count intermediate
+                                        run@(_verification.Intermediate.Count == 1 ? string.Empty : "s")
+                                        requested during implementation
+                                    </summary>
+                                    <p class="panel-lead">
+                                        Requested by a child while implementing. These runs never
+                                        change the request phase, never appear in the final
+                                        verification rows, and are never counted by the completion
+                                        gate.
+                                    </p>
+                                    <ul class="run-list" aria-label="Intermediate check history">
+                                        @foreach (var row in _verification.Intermediate)
+                                        {
+                                            @RunRow(row)
+                                        }
+                                    </ul>
+                                </details>
+                            }
+                        </section>
+                    </FluentCard>
+
+                    @if (_verification.History.Count > 0)
+                    {
+                        <FluentCard>
+                            <section class="panel" aria-labelledby="verification-history-heading">
+                                <div class="section-head is-tight">
+                                    <h3 id="verification-history-heading">Superseded attempts</h3>
+                                    <span class="section-meta">retained history</span>
+                                </div>
+                                <details>
+                                    <summary>
+                                        @_verification.History.Count
+                                        row@(_verification.History.Count == 1 ? string.Empty : "s")
+                                        from an earlier fingerprint or policy revision
+                                    </summary>
+                                    <p class="panel-lead">
+                                        The repository or the effective policy changed after these
+                                        runs, so they are history: neither the completion gate nor
+                                        the rows above count them, however green they were.
+                                    </p>
+                                    <ul class="run-list" aria-label="Superseded verification runs">
+                                        @foreach (var row in _verification.History)
+                                        {
+                                            @RunRow(row)
+                                        }
+                                    </ul>
+                                </details>
                             </section>
                         </FluentCard>
                     }
@@ -1141,6 +1364,119 @@ else
                 </p>
             }
         </section>
+
+        @* A retry is a new queued request drafted from this one: it never resumes this execution
+           and never clears a project recovery hold. Offered only once this request is terminal,
+           because a live one still has its own execution to attend to. *@
+        @if (IsRequestTerminal(request))
+        {
+            <section class="page-section" aria-labelledby="retry-heading">
+                <div class="section-head">
+                    <h2 id="retry-heading">Retry as new request</h2>
+                    <span class="section-meta">new queued request &middot; linked to this one</span>
+                </div>
+                <p class="page-lead">
+                    This request is @request.StatusName and its execution cannot resume: no session,
+                    assignment, or reservation of this request is restarted or reused. A retry is an
+                    ordinary new queued request, linked to this one for provenance, and it waits for
+                    the same scheduling eligibility as any other queued work.
+                </p>
+                <p class="page-lead">
+                    A project recovery hold is separate and stays in force: queueing a retry does not
+                    clear it, and a held project must be resumed from
+                    <a href="@RecoveryHref()">project recovery</a> before any queued request,
+                    this retry included, can be claimed.
+                </p>
+
+                <FluentCard>
+                    <div class="panel">
+                        @if (_retryErrors.Count > 0)
+                        {
+                            <FluentMessageBar Intent="MessageIntent.Error"
+                                              Title="Could not queue the retry"
+                                              AllowDismiss="false">
+                                @if (_retryErrors.Count == 1)
+                                {
+                                    @_retryErrors[0]
+                                }
+                                else
+                                {
+                                    <ul class="audit-list">
+                                        @foreach (var error in _retryErrors)
+                                        {
+                                            <li>@error</li>
+                                        }
+                                    </ul>
+                                }
+                            </FluentMessageBar>
+                        }
+
+                        @* Kept even after navigation is issued, so the new request stays reachable
+                           by a direct link if the operator never left this page. *@
+                        @if (_retryCreated is { } queued)
+                        {
+                            <div role="status">
+                                <FluentMessageBar Intent="MessageIntent.Success" AllowDismiss="false">
+                                    Queued <a href="@($"/requests/{queued.Id}")">@queued.Title</a>
+                                    as a linked retry. This request stays @request.StatusName.
+                                </FluentMessageBar>
+                            </div>
+                        }
+
+                        <details>
+                            <summary>Edit and queue the retry</summary>
+                            <div class="result-block">
+                                <p class="panel-lead">
+                                    Prefilled from this request and fully editable before it is
+                                    queued. Submitting creates a new request linked to
+                                    <span class="mono">@request.Id</span>; that link is immutable and
+                                    this request is left exactly as it is.
+                                </p>
+
+                                <FluentTextField @bind-Value="_retryTitle"
+                                                 Label="Title"
+                                                 Required="true" />
+
+                                <FluentTextArea @bind-Value="_retryPrompt"
+                                                Label="Prompt"
+                                                Required="true"
+                                                Rows="5" />
+
+                                <FluentSelect TOption="string"
+                                              Label="Kind"
+                                              Items="@KindNames"
+                                              OptionText="@(name => name)"
+                                              OptionValue="@(name => name)"
+                                              @bind-Value="_retryKind" />
+
+                                <FluentSelect TOption="string"
+                                              Label="Priority"
+                                              Items="@PriorityNames"
+                                              OptionText="@(name => name)"
+                                              OptionValue="@(name => name)"
+                                              @bind-Value="_retryPriority" />
+
+                                <FluentSelect TOption="string"
+                                              Label="Risk"
+                                              Items="@RiskNames"
+                                              OptionText="@(name => name)"
+                                              OptionValue="@(name => name)"
+                                              @bind-Value="_retryRisk" />
+
+                                @* This page's own 44px action sizing, shared with the head action. *@
+                                <div class="page-head-actions">
+                                    <FluentButton Appearance="Appearance.Accent"
+                                                  OnClick="EnqueueRetryAsync"
+                                                  Loading="@_retrySubmitting">
+                                        Queue linked retry
+                                    </FluentButton>
+                                </div>
+                            </div>
+                        </details>
+                    </div>
+                </FluentCard>
+            </section>
+        }
     </div>
 }
 
@@ -1150,6 +1486,10 @@ else
     private const int PayloadCap = 2000;
     private const int ReservationAuditCap = 20;
     private const string AllAgentsTarget = "*";
+
+    private static readonly string[] KindNames = Enum.GetNames<WorkRequestKind>();
+    private static readonly string[] PriorityNames = Enum.GetNames<RequestPriority>();
+    private static readonly string[] RiskNames = Enum.GetNames<RiskLevel>();
 
     [Parameter]
     public Guid RequestId { get; set; }
@@ -1165,7 +1505,9 @@ else
     private ProjectDto? _project;
     private LiveView? _live;
     private DateTimeOffset _snapshot;
+    private IReadOnlyList<AttentionSignal> _attention = Array.Empty<AttentionSignal>();
     private string? _loadError;
+    private RecoveryEntry? _recovery;
     private string? _sessionError;
     private readonly List<MessageThread> _threads = [];
     private IReadOnlyList<GuidanceTarget> _guidanceTargets = Array.Empty<GuidanceTarget>();
@@ -1180,12 +1522,26 @@ else
     private bool _loading = true;
     private bool _busy;
     private IReadOnlyList<VerificationRunDto> _verificationRuns = Array.Empty<VerificationRunDto>();
-    private IReadOnlyList<AttentionSignal> _attention = Array.Empty<AttentionSignal>();
+    private RequestVerificationView _verification = RequestVerificationViewReader.Read(
+        Array.Empty<VerificationRunDto>(),
+        Array.Empty<AgentSessionDto>());
     private RequestInsights _insights = RequestInsights.Empty;
     private RequestExecutionProgress? _progress;
     private RequestResultDto? _result;
     private string? _verificationError;
     private string? _resultError;
+
+    // Retry draft: prefilled from the loaded request once, then owned by the operator so a
+    // committed write elsewhere on the request cannot rewrite what is being typed.
+    private Guid _retryDraftFor;
+    private string? _retryTitle;
+    private string? _retryPrompt;
+    private string _retryKind = nameof(WorkRequestKind.Development);
+    private string _retryPriority = nameof(RequestPriority.Normal);
+    private string _retryRisk = nameof(RiskLevel.Standard);
+    private IReadOnlyList<string> _retryErrors = Array.Empty<string>();
+    private WorkRequestDto? _retryCreated;
+    private bool _retrySubmitting;
 
     /// <summary>
     /// Reads the two outcome stores and reduces the event stream, then rebuilds the request's
@@ -1205,6 +1561,10 @@ else
             _verificationError = ex.Message;
             _verificationRuns = Array.Empty<VerificationRunDto>();
         }
+
+        // Reduced once per load so every verification row, verdict, and count in the section
+        // reads the same snapshot as the attention signals derived from the same rows.
+        _verification = RequestVerificationViewReader.Read(_verificationRuns, _sessions, _events);
 
         try
         {
@@ -1226,8 +1586,10 @@ else
             _leases,
             _verificationRuns,
             _insights,
-            Clock.UtcNow);
+            Clock.UtcNow,
+            _events);
         _attention = signals;
+        _recovery = ComputeRecoveryEntry(request, signals);
     }
 
     protected override Task OnParametersSetAsync() => LoadAsync(showSpinner: true);
@@ -1261,6 +1623,95 @@ else
 
     private Task ManualReloadAsync() => LoadAsync(showSpinner: true);
 
+    /// <summary>
+    /// Fills the retry draft from the request as it stands, once per request id: a live reload
+    /// driven by a committed write must not overwrite fields the operator is editing.
+    /// </summary>
+    private void SeedRetryDraft(WorkRequestDto request)
+    {
+        if (_retryDraftFor == request.Id)
+        {
+            return;
+        }
+
+        _retryDraftFor = request.Id;
+        _retryTitle = request.Title;
+        _retryPrompt = request.Prompt;
+        _retryKind = request.KindName;
+        _retryPriority = request.PriorityName;
+        _retryRisk = request.RiskLevelName;
+        _retryErrors = Array.Empty<string>();
+        _retryCreated = null;
+    }
+
+    /// <summary>
+    /// Queues the edited draft as an ordinary new request carrying an immutable link to this one.
+    /// Nothing here resumes this request's execution, releases its assignment, or touches a
+    /// project recovery hold: the new request enters the queue and waits for ordinary eligibility.
+    /// </summary>
+    private async Task EnqueueRetryAsync()
+    {
+        if (_request is not { } request)
+        {
+            return;
+        }
+
+        _retryCreated = null;
+        var errors = new List<string>(2);
+        if (string.IsNullOrWhiteSpace(_retryTitle))
+        {
+            errors.Add("Title is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(_retryPrompt))
+        {
+            errors.Add("Prompt is required.");
+        }
+
+        if (errors.Count > 0)
+        {
+            _retryErrors = errors;
+            return;
+        }
+
+        _retryErrors = Array.Empty<string>();
+        _retrySubmitting = true;
+        try
+        {
+            var command = new QueueWorkRequestCommand(
+                Parse(_retryKind, WorkRequestKind.Development),
+                Parse(_retryPriority, RequestPriority.Normal),
+                Parse(_retryRisk, RiskLevel.Standard),
+                _retryTitle!.Trim(),
+                _retryPrompt!.Trim(),
+                OriginalRequestId: request.Id);
+
+            _retryCreated = await Queue.EnqueueAsync(
+                new ProjectId(request.ProjectId),
+                command,
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _retryErrors = new[] { ex.Message };
+        }
+        finally
+        {
+            _retrySubmitting = false;
+        }
+
+        // The new request is persisted and already linked on this page, so navigation is issued
+        // outside the guarded enqueue: whatever it does, the direct link stays.
+        if (_retryCreated is { } created)
+        {
+            Navigation.NavigateTo($"/requests/{created.Id}");
+        }
+    }
+
+    private static TEnum Parse<TEnum>(string? name, TEnum fallback)
+        where TEnum : struct, Enum =>
+        Enum.TryParse<TEnum>(name, out var parsed) ? parsed : fallback;
+
     private async Task LoadAsync(bool showSpinner)
     {
         if (_busy)
@@ -1286,6 +1737,7 @@ else
             var requestId = new WorkRequestId(RequestId);
             _request = await Queue.GetAsync(requestId, CancellationToken.None);
             _loadError = null;
+            SeedRetryDraft(_request);
             await LoadProjectAsync(_request.ProjectId);
             await LoadSessionsAsync(requestId);
             await LoadMailAsync(_request);
@@ -1612,55 +2064,174 @@ else
         }
     }
 
-    /// <summary>Runs grouped by profile in first-seen order, each profile's runs oldest first.</summary>
-    private IEnumerable<KeyValuePair<string, List<VerificationRunDto>>> VerificationProfiles()
-    {
-        var byProfile = new Dictionary<string, List<VerificationRunDto>>(StringComparer.Ordinal);
-        var order = new List<string>();
-        foreach (var run in _verificationRuns)
-        {
-            if (!byProfile.TryGetValue(run.ProfileId, out var runs))
+    /// <summary>
+    /// One deterministic verification row, shared by the baseline, project-check, intermediate,
+    /// and superseded lists. Every value comes from the persisted run; no timeout budget is shown
+    /// because no persisted row carries one.
+    /// </summary>
+    private RenderFragment<VerificationRow> RunRow => row =>
+        @<li class="run @RunClass(row)">
+            <span class="run-command mono">@row.Run.CommandId</span>
+            <span class="badge-row">
+                <FluentBadge Appearance="@(row.Run.Status == VerificationRunStatus.Passed ? Appearance.Accent : Appearance.Neutral)">
+                    @row.Run.Status
+                </FluentBadge>
+                <FluentBadge Appearance="Appearance.Neutral">
+                    @(row.Run.Mandatory ? "mandatory" : "optional")
+                </FluentBadge>
+                @if (row.IsWarning)
+                {
+                    <FluentBadge Appearance="Appearance.Neutral">warning &middot; does not block</FluentBadge>
+                }
+                @if (row.Run.RunKind == VerificationRunKind.Intermediate)
+                {
+                    <FluentBadge Appearance="Appearance.Neutral">intermediate</FluentBadge>
+                }
+                else if (!row.IsCurrent)
+                {
+                    <FluentBadge Appearance="Appearance.Neutral">superseded</FluentBadge>
+                }
+            </span>
+            <span class="run-facts">
+                @row.Run.ProfileId &middot; exit @(row.Run.ExitCode?.ToString() ?? "n/a") &middot;
+                @RunTiming(row) &middot; @row.Run.StartedAt.ToString("u")
+                @if (!row.IsCurrent)
+                {
+                    <text>&middot; fingerprint @Short(row.Run.Fingerprint) &middot; policy @Short(row.Run.PolicyRevision)</text>
+                }
+            </span>
+            @if (row.Run.OutputSummary is { Length: > 0 } summary)
             {
-                runs = [];
-                byProfile[run.ProfileId] = runs;
-                order.Add(run.ProfileId);
+                <pre class="event-payload">@summary</pre>
             }
+            @if (row.Run.OutputArtifactPath is { Length: > 0 } artifact)
+            {
+                <span class="event-origin">artifact @artifact</span>
+            }
+        </li>;
 
-            runs.Add(run);
-        }
-
-        foreach (var profileId in order)
+    /// <summary>
+    /// Row accent: green for a pass, red only for a mandatory failure of the current fingerprint,
+    /// amber for an optional failure or a still-running command, and muted for retained history.
+    /// </summary>
+    private static string RunClass(VerificationRow row)
+    {
+        if (row.IsRunning)
         {
-            yield return new KeyValuePair<string, List<VerificationRunDto>>(profileId, byProfile[profileId]);
+            return "is-running";
         }
+
+        if (row.IsBlocking)
+        {
+            return "is-failed";
+        }
+
+        if (row.IsWarning)
+        {
+            return "is-warning";
+        }
+
+        if (!row.IsCurrent)
+        {
+            return "is-history";
+        }
+
+        return row.Run.Status == VerificationRunStatus.Passed ? "is-passed" : string.Empty;
     }
 
-    private static bool ProfileGreen(List<VerificationRunDto> runs)
+    private static string ReviewClass(AgentSessionDto session) => session.WorkState switch
     {
-        foreach (var run in runs)
-        {
-            if (run.Status != VerificationRunStatus.Passed)
-            {
-                return false;
-            }
-        }
-
-        return runs.Count > 0;
-    }
-
-    private static string RunClass(VerificationRunStatus status) => status switch
-    {
-        VerificationRunStatus.Passed => "is-passed",
-        VerificationRunStatus.Running => "is-running",
-        VerificationRunStatus.Cancelled => string.Empty,
-        _ => "is-failed",
+        AgentWorkState.Completed => "is-passed",
+        AgentWorkState.Failed or AgentWorkState.Blocked => "is-failed",
+        AgentWorkState.Cancelled => "is-history",
+        _ => "is-running",
     };
 
-    private static string RunDuration(VerificationRunDto run) =>
-        run.CompletedAt is { } completed
-            ? $"{(completed - run.StartedAt).TotalSeconds:0.0}s"
-            : "still running";
+    /// <summary>
+    /// How long the command took, or how long it has been running against this snapshot.
+    /// Timeout budget is printed only from a bounded command-progress event.
+    /// </summary>
+    private string RunTiming(VerificationRow row)
+    {
+        if (row.Run.CompletedAt is { } completed)
+        {
+            return $"{(completed - row.Run.StartedAt).TotalSeconds:0.0}s";
+        }
 
+        if (!row.IsRunning)
+        {
+            return "no completion recorded";
+        }
+
+        var elapsed = FormatElapsed(_snapshot - row.Run.StartedAt);
+        if (_verification.Admitted?.Command is { } command
+            && string.Equals(command.CommandId, row.Run.CommandId, StringComparison.Ordinal))
+        {
+            return $"{elapsed} of {command.TimeoutSeconds}s budget";
+        }
+
+        return elapsed;
+    }
+
+    private string CommandElapsed(AdmittedCommandProgress command) =>
+        FormatElapsed(_snapshot - command.StartedAt);
+
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        if (elapsed < TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.Zero;
+        }
+
+        return elapsed.TotalSeconds < 120
+            ? $"running for {elapsed.TotalSeconds:0.0}s"
+            : $"running for {(int)elapsed.TotalMinutes}m {elapsed.Seconds:00}s";
+    }
+
+    /// <summary>First bytes of an opaque fingerprint or revision, enough to tell two apart.</summary>
+    private static string Short(string value) =>
+        value.Length <= 16 ? value : string.Concat(value.AsSpan(0, 16), "\u2026");
+    /// <summary>
+    /// Which trusted profile this request is bound to. Assigned work reads the immutable
+    /// assignment snapshot; completed work names the recorded run; only an unassigned request
+    /// reads the live Project selection.
+    /// </summary>
+    private string ProjectChecksMeta()
+    {
+        var request = _request;
+        var isAssigned = request?.Assignment is not null;
+        var isTerminal = request is not null && IsRequestTerminal(request);
+        return RequestVerificationPolicyCopy.ProjectChecksMeta(
+            request?.Assignment,
+            _project?.TrustedVerificationProfileId,
+            _project?.TrustedVerificationProfileRevision,
+            _verification.ProjectChecks,
+            isAssigned,
+            isTerminal);
+    }
+
+    private static bool IsRequestTerminal(WorkRequestDto request) =>
+        request.Status is (int)WorkRequestStatus.Completed
+            or (int)WorkRequestStatus.Failed
+            or (int)WorkRequestStatus.Cancelled;
+
+    private string AdmittedElapsed(AdmittedFinalVerification admitted)
+    {
+        var elapsed = _snapshot - admitted.StartedAt;
+        if (elapsed < TimeSpan.Zero)
+        {
+            elapsed = TimeSpan.Zero;
+        }
+
+        return elapsed.TotalSeconds < 120
+            ? $"{elapsed.TotalSeconds:0.0}s"
+            : $"{(int)elapsed.TotalMinutes}m {elapsed.Seconds:00}s";
+    }
+
+    /// <summary>
+    /// The section header sentence: what the current fingerprint proves, what is still running,
+    /// and how much of what is on screen is retained history rather than a current result.
+    /// </summary>
     private string VerificationSummary()
     {
         if (_verificationError is not null)
@@ -1668,29 +2239,54 @@ else
             return "verification store unavailable";
         }
 
-        var green = 0;
-        var red = 0;
-        var mandatoryRed = 0;
-        foreach (var run in _verificationRuns)
+        var parts = new List<string>(6);
+        if (_verification.IsAdmittedInProgress && _verification.Admitted is { } admitted)
         {
-            if (run.Status == VerificationRunStatus.Passed)
+            if (admitted.Command is { } command)
             {
-                green++;
-                continue;
+                parts.Add(
+                    $"running {command.CommandId} · {CommandElapsed(command)} of {command.TimeoutSeconds}s budget");
             }
-
-            if (run.Status is VerificationRunStatus.Failed or VerificationRunStatus.TimedOut)
+            else
             {
-                red++;
-                if (run.Mandatory)
-                {
-                    mandatoryRed++;
-                }
+                parts.Add($"admitted final verification running for {AdmittedElapsed(admitted)}");
             }
         }
 
-        return $"{_verificationRuns.Count} run(s) \u00b7 {green} green \u00b7 {red} red "
-            + $"({mandatoryRed} mandatory) \u00b7 refreshed {TimeText.Relative(_snapshot, Clock.UtcNow)}";
+        if (_verification.Running is { } running && _verification.Admitted?.Command is null)
+        {
+            parts.Add($"running {running.Run.CommandId} \u00b7 {RunTiming(running)}");
+        }
+        else if (!_verification.IsAdmittedInProgress)
+        {
+            var current = _verification.Baseline.Count + _verification.ProjectChecks.Count;
+            parts.Add(current == 0
+                ? "no check recorded for the current repository state"
+                : $"{current} check{(current == 1 ? string.Empty : "s")} for the current fingerprint");
+        }
+
+        if (_verification.HasBlockingFailure)
+        {
+            parts.Add("a mandatory check is red");
+        }
+
+        if (_verification.WarningCount > 0)
+        {
+            parts.Add($"{_verification.WarningCount} warning{(_verification.WarningCount == 1 ? string.Empty : "s")}");
+        }
+
+        if (_verification.Intermediate.Count > 0)
+        {
+            parts.Add($"{_verification.Intermediate.Count} intermediate");
+        }
+
+        if (_verification.History.Count > 0)
+        {
+            parts.Add($"{_verification.History.Count} superseded");
+        }
+
+        parts.Add($"refreshed {TimeText.Relative(_snapshot, Clock.UtcNow)}");
+        return string.Join(" \u00b7 ", parts);
     }
 
     /// <summary>
@@ -1757,6 +2353,66 @@ else
 
     private string ProjectHref() =>
         _request is null ? "/" : $"/projects/{_request.ProjectId}";
+
+    /// <summary>The recovery panel on this request's project, addressed by its own anchor.</summary>
+    private string RecoveryHref() => $"{ProjectHref()}#project-recovery";
+
+    /// <summary>
+    /// One contextual entry into the project's recovery panel, derived from this request's own
+    /// persisted facts.
+    /// </summary>
+    private readonly record struct RecoveryEntry(string Title, string Detail);
+
+    /// <summary>
+    /// Offers recovery only for the facts it answers: a retained assignment that is quiescing
+    /// or has uncertain ownership, or a session that still owns a lease while disconnected.
+    /// A queued request with a configuration or readiness blocker, and a blocked request
+    /// waiting for input, keep their own specific fix instead.
+    /// </summary>
+    private static RecoveryEntry? ComputeRecoveryEntry(
+        WorkRequestDto request,
+        IReadOnlyList<AttentionSignal> attention)
+    {
+        if (request.Assignment is { } assignment)
+        {
+            switch (assignment.State)
+            {
+                case ExecutionAssignmentState.RecoveryRequired:
+                    return new RecoveryEntry(
+                        "Recovery is required for this assignment",
+                        "Ownership of this request's execution is uncertain and no second writer is "
+                            + "permitted, so it keeps project and node capacity until recovery "
+                            + "resolves it. Recovery is project-scoped and runs from the project "
+                            + "page; it preserves files, history, and this request's record.");
+                case ExecutionAssignmentState.Cancelling:
+                    return new RecoveryEntry(
+                        "Cancellation has not released ownership",
+                        "Cancellation was delivered to the assigned node, which has not yet proved "
+                            + "quiescence. Project recovery adopts this assignment as a target "
+                            + "instead of issuing a second cancellation.");
+                case ExecutionAssignmentState.Finalizing:
+                    return new RecoveryEntry(
+                        "Finalization has not released ownership",
+                        "Completion was accepted, but the writer slot and reservations stay held "
+                            + "while the assigned node quiesces. Project recovery confirms that "
+                            + "accepted intent with its own evidence rather than discarding it.");
+            }
+        }
+
+        foreach (var signal in attention)
+        {
+            if (signal.Kind == AttentionKind.DisconnectedWithLease)
+            {
+                return new RecoveryEntry(
+                    "A disconnected owner still holds this request's leases",
+                    "The owning session is disconnected or exited while its lease group is still "
+                        + "held. Silence is not proof that it stopped writing, so ownership is "
+                        + "resolved through project recovery, never by unlocking the workspace.");
+            }
+        }
+
+        return null;
+    }
 
     private static bool HasPayload(string payloadJson) =>
         !string.IsNullOrWhiteSpace(payloadJson) && payloadJson is not "{}" and not "null";

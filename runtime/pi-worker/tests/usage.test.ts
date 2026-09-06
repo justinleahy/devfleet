@@ -62,9 +62,9 @@ function limit(id: string): UsageLimit {
   return { id, label: id, window: { label: id }, amount: { usedFraction: 0.5, unit: "percent" } };
 }
 
-/** Bindings that mirror the production table but with a controllable collector. */
-function bindings(collect: UsageProviderBinding["collect"]): UsageProviderBinding[] {
-  return USAGE_PROVIDERS.map((binding) => ({ ...binding, collect }));
+/** Bindings that mirror the production table but force the test collector, including static cards. */
+function bindings(collect: NonNullable<UsageProviderBinding["collect"]>): UsageProviderBinding[] {
+  return USAGE_PROVIDERS.map(({ unavailableDiagnostic: _, ...binding }) => ({ ...binding, collect }));
 }
 
 const available = (provider: string, limits: UsageLimit[] = [limit("5h")]): UsageReport => ({
@@ -84,9 +84,19 @@ async function run(
 }
 
 describe("usage coordinator", () => {
-  it("maps the six Pi provider ids to the emitted card ids in table order", async () => {
+  it("maps the nine Pi provider ids to the emitted card ids in table order", async () => {
     const piIds = USAGE_PROVIDERS.map((binding) => binding.piProvider);
-    assert.deepEqual(piIds, ["openai-codex", "anthropic", "kimi-coding", "zai", "xai", "opencode-go"]);
+    assert.deepEqual(piIds, [
+      "openai-codex",
+      "anthropic",
+      "kimi-coding",
+      "zai",
+      "xai",
+      "opencode-go",
+      "qwen-token-plan",
+      "qwen-token-plan-individual",
+      "qwen-token-plan-cn",
+    ]);
 
     const seen: string[] = [];
     const output = await run(
@@ -98,7 +108,17 @@ describe("usage coordinator", () => {
     );
     assert.deepEqual(
       output.reports.map((report) => report.provider),
-      ["openai-codex", "anthropic", "kimi-code", "zai", "xai-oauth", "opencode-go"],
+      [
+        "openai-codex",
+        "anthropic",
+        "kimi-code",
+        "zai",
+        "xai-oauth",
+        "opencode-go",
+        "qwen-token-plan",
+        "qwen-token-plan-individual",
+        "qwen-token-plan-cn",
+      ],
     );
     assert.deepEqual(
       seen,
@@ -110,6 +130,36 @@ describe("usage coordinator", () => {
       assert.equal(report.fetchedAt, 1_700_000_000_000);
       assert.equal("diagnostic" in report, false);
     }
+  });
+
+  it("emits unavailable Qwen Token Plan cards only for configured native Pi auth", async () => {
+    let requestCalls = 0;
+    let getAuthCalls = 0;
+    const request: UsageRequest = async () => {
+      requestCalls += 1;
+      throw new Error("request_failed");
+    };
+    const runtime = fakeRuntime(["qwen-token-plan"], {
+      getAuth: async () => {
+        getAuthCalls += 1;
+        throw new Error("getAuth must not run for Qwen Token Plan");
+      },
+    });
+    const output = await run(runtime, [...USAGE_PROVIDERS], new AbortController().signal, request);
+    assert.equal(requestCalls, 0);
+    assert.equal(getAuthCalls, 0);
+    assert.deepEqual(
+      output.reports.map((report) => report.provider),
+      ["qwen-token-plan"],
+    );
+    const [qwen] = output.reports;
+    assert.ok(qwen);
+    assert.equal(qwen.status, "unavailable");
+    assert.equal(qwen.diagnostic, "quota_console_only");
+    assert.deepEqual(qwen.limits, []);
+    const serialized = JSON.stringify(output);
+    assert.equal(serialized.includes(SECRET), false);
+    assert.equal(serialized.includes(`${SECRET}-qwen-token-plan`), false);
   });
 
   it("omits providers Pi has no credential for without calling their collector", async () => {
@@ -165,7 +215,9 @@ describe("usage coordinator", () => {
     const runtime = fakeRuntime(["openai-codex", "anthropic", "kimi-coding", "zai"], {
       checkAuth: async (providerId) => {
         if (providerId === "openai-codex") throw new Error(`boom ${SECRET}`);
-        return providerId === "xai" || providerId === "opencode-go"
+        return providerId === "xai"
+          || providerId === "opencode-go"
+          || providerId.startsWith("qwen-token-plan")
           ? undefined
           : { type: "oauth", source: "OAuth" };
       },

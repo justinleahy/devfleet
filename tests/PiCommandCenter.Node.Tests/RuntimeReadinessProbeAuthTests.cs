@@ -30,7 +30,6 @@ public sealed class RuntimeReadinessProbeAuthTests : IDisposable
 
         var observed = await probe.ObserveAsync(
             [
-                AgentModelSelector.Parse("codex/default"),
                 AgentModelSelector.Parse("codex/gpt-current"),
                 AgentModelSelector.Parse("codex/not-in-catalog"),
                 AgentModelSelector.Parse("zai/glm-expired"),
@@ -38,7 +37,6 @@ public sealed class RuntimeReadinessProbeAuthTests : IDisposable
             ],
             CancellationToken.None);
 
-        Assert.Equal(RuntimeReadinessStatuses.Ready, observed["codex/default"]);
         Assert.Equal(RuntimeReadinessStatuses.Ready, observed["codex/gpt-current"]);
         Assert.Equal(RuntimeReadinessStatuses.Unavailable, observed["codex/not-in-catalog"]);
         Assert.Equal(RuntimeReadinessStatuses.Unavailable, observed["zai/glm-expired"]);
@@ -60,13 +58,11 @@ public sealed class RuntimeReadinessProbeAuthTests : IDisposable
 
         var observed = await probe.ObserveAsync(
             [
-                AgentModelSelector.Parse("antigravity/default"),
                 AgentModelSelector.Parse("antigravity/gemini-3-pro"),
                 AgentModelSelector.Parse("antigravity/not-in-catalog"),
             ],
             CancellationToken.None);
 
-        Assert.Equal(RuntimeReadinessStatuses.Unknown, observed["antigravity/default"]);
         Assert.Equal(RuntimeReadinessStatuses.Unknown, observed["antigravity/gemini-3-pro"]);
         Assert.Equal(RuntimeReadinessStatuses.Unavailable, observed["antigravity/not-in-catalog"]);
         var command = Assert.Single(runner.Commands);

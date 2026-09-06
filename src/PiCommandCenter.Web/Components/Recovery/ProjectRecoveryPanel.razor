@@ -1,0 +1,1744 @@
+@namespace PiCommandCenter.Web.Components.Recovery
+@using System.Globalization
+@using System.Security.Claims
+@using System.Text.Json
+@using PiCommandCenter.Application
+@using PiCommandCenter.Application.Recovery
+@using PiCommandCenter.Contracts.NodeTransport
+@using PiCommandCenter.Domain
+@implements IAsyncDisposable
+@inject IProjectRecoveryService Recoveries
+@inject IManualProjectRecoveryService ManualRecoveries
+@inject IRecoveryAttemptDispatcher Dispatcher
+@inject AuthenticationStateProvider Authentication
+@inject IToastService ToastService
+@inject IClock Clock
+
+@*
+    Operator recovery surface for one Project (docs/design/project-recovery.md §"Operator experience").
+    Opening it only reads: diagnosis, hold, latest operation, and the captured target inventory. Every
+    mutation is an explicit operator action that first confirms the exact inventory revision the panel
+    displayed. The panel never claims process-stop proof, a completion percentage, or a known-zero
+    inventory of its own; unreported facts are labelled as not reported.
+
+    Reusable from the Project page, a Request page, or the Attention inbox: it needs only the project id.
+*@
+
+<section class="recovery" id="@AnchorId" aria-labelledby="@HeadingId">
+    <header class="recovery-head">
+        <div class="recovery-identity">
+            <p class="recovery-eyebrow">Execution ownership</p>
+            <h2 id="@HeadingId">Project recovery</h2>
+        </div>
+        <div class="badge-row">
+            @if (_diagnosis is { } badged)
+            {
+                <FluentBadge Appearance="@(badged.HoldPresent ? Appearance.Accent : Appearance.Neutral)">
+                    @(badged.HoldPresent ? "Queue paused by recovery hold" : "No recovery hold")
+                </FluentBadge>
+                @if (badged.LatestOperation is { } badgedOperation)
+                {
+                    <FluentBadge Appearance="@StatusAppearance(badgedOperation.Status)">
+                        @StatusLabel(badgedOperation.Status)
+                    </FluentBadge>
+                    <FluentBadge Appearance="Appearance.Neutral">attempt @badgedOperation.Attempt</FluentBadge>
+                }
+            }
+        </div>
+    </header>
+
+    <p class="recovery-lead">
+        Recovery stops this project's current work safely and pauses its queue for inspection. It never
+        resets Git, discards files, or assumes an unreachable agent has stopped, and it never restarts
+        work automatically.
+    </p>
+
+    @* One stable live region: assistive tech hears state changes without the visible layout moving. *@
+    <p class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">@Announcement()</p>
+
+    @if (_loading)
+    {
+        <div class="state-block" role="status">
+            <FluentProgressRing aria-label="Reading recovery diagnosis" />
+            <span>Reading recovery diagnosis</span>
+        </div>
+    }
+    else if (_loadError is not null)
+    {
+        <FluentMessageBar Intent="MessageIntent.Error"
+                          Title="Could not read the recovery diagnosis"
+                          AllowDismiss="false">
+            @_loadError
+        </FluentMessageBar>
+        <div class="actions">
+            <FluentButton Appearance="Appearance.Neutral" OnClick="ReloadAsync" Class="action">
+                Retry diagnosis
+            </FluentButton>
+        </div>
+    }
+    else if (_diagnosis is { } diagnosis)
+    {
+        var operation = diagnosis.LatestOperation;
+        var unresolved = operation is not null && IsUnresolved(operation.Status);
+        var resumed = !diagnosis.HoldPresent && operation is { Status: RecoveryOperationStatus.Recovered };
+        var retained = diagnosis.NonterminalAssignments.Count + diagnosis.UnresolvedReservations.Count;
+        var startable = !unresolved && retained > 0;
+
+        @* Outcome banner: exactly one, matching the documented outcome table. *@
+        @if (operation is { Status: RecoveryOperationStatus.Pending or RecoveryOperationStatus.Running })
+        {
+            <FluentMessageBar Intent="MessageIntent.Info"
+                              Title="Recovery is running"
+                              AllowDismiss="false">
+                The assigned node is working through the stop procedure below. Leaving this page does not
+                cancel the operation; reopening the panel shows the same one.
+            </FluentMessageBar>
+        }
+        else if (operation is { Status: RecoveryOperationStatus.NeedsIntervention } stalled)
+        {
+            <FluentMessageBar Intent="MessageIntent.Warning"
+                              Title="@($"Still blocked: {MissingEvidenceSummary(stalled)}")"
+                              AllowDismiss="false">
+                Execution ownership and the recovery hold are retained. Nothing has been unlocked and no
+                agent has been declared stopped.
+            </FluentMessageBar>
+        }
+        else if (diagnosis.HoldPresent && operation is { Status: RecoveryOperationStatus.Recovered } recovered)
+        {
+            @if (BlockerCodes(recovered).Count > 0)
+            {
+                <FluentMessageBar Intent="MessageIntent.Warning"
+                                  Title="Execution recovered — setup or workspace action required"
+                                  AllowDismiss="false">
+                    Every captured target is accounted for, so ownership recovery succeeded. The blockers
+                    listed below still apply to starting new work; recovery does not bypass them.
+                </FluentMessageBar>
+            }
+            else
+            {
+                <div role="status">
+                    <FluentMessageBar Intent="MessageIntent.Success" AllowDismiss="false">
+                        Recovered — queue paused. Ready for new work once resumed.
+                    </FluentMessageBar>
+                </div>
+            }
+        }
+        else if (resumed)
+        {
+            <div role="status">
+                <FluentMessageBar Intent="MessageIntent.Success" AllowDismiss="false">
+                    Recovery hold cleared. Queue ordering and ordinary eligibility rules apply unchanged;
+                    clearing the hold does not promise the next request can start.
+                </FluentMessageBar>
+            </div>
+        }
+        else if (retained == 0)
+        {
+            <FluentMessageBar Intent="MessageIntent.Info"
+                              Title="No execution recovery needed"
+                              AllowDismiss="false">
+                This project retains no nonterminal execution assignment and no unresolved reservation.
+                Reading this panel changed nothing: no queue pause and no recovery hold were created.
+            </FluentMessageBar>
+        }
+
+        @if (_inventoryChanged)
+        {
+            <FluentMessageBar Intent="MessageIntent.Warning"
+                              Title="Target inventory changed — confirm again"
+                              AllowDismiss="false">
+                The project's assignments or reservations changed after this panel loaded, so nothing was
+                started. The list below is refreshed to revision <span class="mono">@diagnosis.InventoryRevision</span>;
+                review it and confirm again.
+            </FluentMessageBar>
+        }
+
+        @if (_actionError is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="The recovery action was rejected"
+                              AllowDismiss="false">
+                @_actionError
+            </FluentMessageBar>
+        }
+
+        @if (_dispatchNotice is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Warning"
+                              Title="The attempt was not delivered to the assigned node"
+                              AllowDismiss="false">
+                @_dispatchNotice
+            </FluentMessageBar>
+        }
+
+        @if (ActorProblem() is { } actorProblem)
+        {
+            <FluentMessageBar Intent="MessageIntent.Warning"
+                              Title="Administrator identity unavailable"
+                              AllowDismiss="false">
+                @actorProblem
+            </FluentMessageBar>
+        }
+
+        <dl class="facts">
+            <div class="fact">
+                <dt>Inventory revision</dt>
+                <dd class="mono">@diagnosis.InventoryRevision</dd>
+            </div>
+            <div class="fact">
+                <dt>Project revision</dt>
+                <dd class="num">@diagnosis.ProjectVersion</dd>
+            </div>
+            <div class="fact">
+                <dt>Scheduling hold</dt>
+                <dd>
+                    @if (diagnosis.HoldPresent)
+                    {
+                        <span>Held; new claims are refused with <span class="mono">@RecoveryReasonCodes.ProjectRecoveryPaused</span></span>
+                    }
+                    else
+                    {
+                        <span>None</span>
+                    }
+                </dd>
+            </div>
+            <div class="fact">
+                <dt>Read at</dt>
+                <dd class="num"><span class="stamp">@_now.ToString("u")</span></dd>
+            </div>
+        </dl>
+
+        <section class="group" aria-labelledby="@RetainedHeadingId">
+            <h3 id="@RetainedHeadingId" class="group-title">Retained execution ownership</h3>
+            @if (diagnosis.NonterminalAssignments.Count == 0)
+            {
+                <p class="panel-empty">
+                    No nonterminal execution assignment is retained for this project, so no writer slot is
+                    occupied by execution.
+                </p>
+            }
+            else
+            {
+                <p class="group-lead">
+                    Each assignment below keeps its writer ownership until quiescence is proved. A silent or
+                    disconnected node is not evidence that its agents stopped.
+                </p>
+                <ul class="target-list">
+                    @foreach (var assignment in diagnosis.NonterminalAssignments)
+                    {
+                        <li class="target">
+                            <div class="target-head">
+                                <a class="target-title mono" href="@($"/requests/{assignment.RequestId.Value}")">
+                                    @assignment.RequestId.Value
+                                </a>
+                                <span class="badge-row">
+                                    <FluentBadge Appearance="Appearance.Accent">@assignment.State</FluentBadge>
+                                    <FluentBadge Appearance="Appearance.Neutral">revision @assignment.Version</FluentBadge>
+                                    <FluentBadge Appearance="Appearance.Neutral">binding @assignment.BindingRevision</FluentBadge>
+                                </span>
+                            </div>
+                            <dl class="facts">
+                                <div class="fact">
+                                    <dt>Assigned node</dt>
+                                    <dd>
+                                        @if (assignment.AssignedNodeDisplayName is { Length: > 0 } nodeName)
+                                        {
+                                            <span>@nodeName</span>
+                                        }
+                                        else if (assignment.AssignedNodeId is { } nodeId)
+                                        {
+                                            <span class="mono">@nodeId</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="unknown">not reported</span>
+                                        }
+                                        @if (assignment.AssignedNodeDisplayName is { Length: > 0 }
+                                             && assignment.AssignedNodeId is { } namedNodeId)
+                                        {
+                                            <span class="aside mono">@namedNodeId</span>
+                                        }
+                                    </dd>
+                                </div>
+                                <div class="fact">
+                                    <dt>Node status</dt>
+                                    <dd>
+                                        @if (assignment.NodeStatus is { Length: > 0 } nodeStatus)
+                                        {
+                                            <span>@nodeStatus</span>
+                                        }
+                                        else
+                                        {
+                                            <span class="unknown">not reported</span>
+                                        }
+                                    </dd>
+                                </div>
+                                <div class="fact fact-wide">
+                                    <dt>Canonical workspace</dt>
+                                    <dd class="mono">
+                                        @if (assignment.CanonicalRepositoryPath is { Length: > 0 } path)
+                                        {
+                                            @path
+                                        }
+                                        else
+                                        {
+                                            <span class="unknown">not reported</span>
+                                        }
+                                    </dd>
+                                </div>
+                                @Stamp("Assigned", assignment.AssignedAt)
+                                @Stamp("Last renewal", assignment.LastRenewedAt)
+                                @Stamp("Last reconciliation", assignment.LastReconciledAt)
+                                @Deadline("Claim lease", assignment.LeaseExpiresAt)
+                                @Stamp("Last node contact", assignment.NodeLastContact)
+                            </dl>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+
+        <section class="group" aria-labelledby="@ReservationHeadingId">
+            <h3 id="@ReservationHeadingId" class="group-title">Unresolved reservations</h3>
+            @if (diagnosis.UnresolvedReservations.Count == 0)
+            {
+                <p class="panel-empty">
+                    No active or recovery-required reservation lease is outstanding in this project, so no
+                    scope is blocked by one.
+                </p>
+            }
+            else
+            {
+                <p class="group-lead">
+                    Recovery resolves only assignment-owned leases through the existing reservation
+                    authority. Another assignment's lease is surfaced, never released here.
+                </p>
+                <ul class="target-list">
+                    @foreach (var reservation in diagnosis.UnresolvedReservations)
+                    {
+                        <li class="target">
+                            <div class="target-head">
+                                <span class="target-title mono">@reservation.LeaseId</span>
+                                <span class="badge-row">
+                                    <FluentBadge Appearance="Appearance.Accent">@reservation.State</FluentBadge>
+                                    <FluentBadge Appearance="Appearance.Neutral">revision @reservation.Version</FluentBadge>
+                                </span>
+                            </div>
+                            <dl class="facts">
+                                <div class="fact">
+                                    <dt>Request</dt>
+                                    <dd>
+                                        @if (reservation.RequestId is { } leaseRequestId)
+                                        {
+                                            <a class="mono" href="@($"/requests/{leaseRequestId}")">@leaseRequestId</a>
+                                        }
+                                        else
+                                        {
+                                            <span class="unknown">not reported</span>
+                                        }
+                                    </dd>
+                                </div>
+                                <div class="fact">
+                                    <dt>Owner session</dt>
+                                    <dd class="mono">
+                                        @if (reservation.OwnerSessionId is { Length: > 0 } owner)
+                                        {
+                                            @owner
+                                        }
+                                        else
+                                        {
+                                            <span class="unknown">not reported</span>
+                                        }
+                                    </dd>
+                                </div>
+                                <div class="fact fact-wide">
+                                    <dt>Reason</dt>
+                                    <dd>
+                                        @if (reservation.Reason is { Length: > 0 } leaseReason)
+                                        {
+                                            @leaseReason
+                                        }
+                                        else
+                                        {
+                                            <span class="unknown">none recorded</span>
+                                        }
+                                    </dd>
+                                </div>
+                                @Deadline("Expires", reservation.ExpiresAt)
+                            </dl>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+
+        @if (operation is not null)
+        {
+            var codes = BlockerCodes(operation);
+            var stageIndex = StageIndex(operation.Stage);
+
+            <section class="group" aria-labelledby="@ProgressHeadingId">
+                <h3 id="@ProgressHeadingId" class="group-title">Recovery operation</h3>
+                <p class="group-lead">
+                    Stages come from the assigned node's last durable report. They are a named position in
+                    the stop procedure, not a completion percentage.
+                </p>
+
+                <dl class="facts">
+                    <div class="fact">
+                        <dt>Operation</dt>
+                        <dd class="mono">@operation.Id</dd>
+                    </div>
+                    <div class="fact">
+                        <dt>Status</dt>
+                        <dd>@StatusLabel(operation.Status) &middot; attempt @operation.Attempt &middot; revision @operation.Version</dd>
+                    </div>
+                    <div class="fact fact-wide">
+                        <dt>Reason recorded at start</dt>
+                        <dd>@operation.Reason</dd>
+                    </div>
+                    <div class="fact">
+                        <dt>Started by</dt>
+                        <dd>@operation.Actor</dd>
+                    </div>
+                    <div class="fact">
+                        <dt>Confirmed inventory</dt>
+                        <dd class="mono">@operation.InventoryRevision</dd>
+                    </div>
+                    @Stamp("Started", operation.CreatedAt)
+                    @Stamp("Last update", operation.UpdatedAt)
+                    @Deadline("Attempt deadline", operation.Deadline)
+                    @Stamp("Completed", operation.CompletedAt)
+                </dl>
+
+                <ol class="stages">
+                    @for (var index = 0; index < Stages.Length; index++)
+                    {
+                        var state = StageState(index, stageIndex, operation.Status);
+                        <li class="@StageClass(state)">
+                            <span class="stage-name">@Stages[index]</span>
+                            <span class="stage-state">@state</span>
+                        </li>
+                    }
+                </ol>
+
+                @if (stageIndex < 0)
+                {
+                    <p class="group-note">
+                        @if (operation.Stage is { Length: > 0 } reportedStage)
+                        {
+                            <text>
+                                The last report named the stage <span class="mono">@reportedStage</span>, which is
+                                not one of the five procedure stages, so no position is marked above.
+                            </text>
+                        }
+                        else
+                        {
+                            <text>
+                                No stage has been reported for this operation yet, so no position is marked above.
+                            </text>
+                        }
+                    </p>
+                }
+
+                <section class="subgroup" aria-labelledby="@BlockerHeadingId">
+                    <h4 id="@BlockerHeadingId" class="section-label">Missing evidence and blockers</h4>
+                    @if (codes.Count == 0)
+                    {
+                        <p class="panel-empty">
+                            No blocker code is recorded on this operation. That is the absence of a reported
+                            blocker, not proof that every inventory is known and zero.
+                        </p>
+                    }
+                    else
+                    {
+                        <ul class="blocker-list">
+                            @foreach (var blockerCode in codes)
+                            {
+                                <li class="blocker">
+                                    <span class="blocker-code mono">@blockerCode</span>
+                                    <span class="blocker-text">@BlockerText(blockerCode)</span>
+                                </li>
+                            }
+                        </ul>
+                    }
+                </section>
+
+                <section class="subgroup" aria-labelledby="@OutcomeHeadingId">
+                    <h4 id="@OutcomeHeadingId" class="section-label">Captured targets and outcomes</h4>
+                    @if (operation.AssignmentTargets.Count == 0 && operation.ReservationTargets.Count == 0)
+                    {
+                        <p class="panel-empty">This operation captured no target.</p>
+                    }
+                    else
+                    {
+                        <ul class="outcome-list">
+                            @foreach (var target in operation.AssignmentTargets)
+                            {
+                                <li class="outcome">
+                                    <span class="outcome-kind">Assignment</span>
+                                    <a class="mono" href="@($"/requests/{target.RequestId.Value}")">@target.RequestId.Value</a>
+                                    <span class="outcome-state">
+                                        captured @target.CapturedState at revision @target.CapturedVersion,
+                                        binding @target.BindingRevision
+                                    </span>
+                                    <span class="outcome-result">
+                                        @if (target.Outcome is { Length: > 0 } assignmentOutcome)
+                                        {
+                                            <FluentBadge Appearance="Appearance.Accent">@assignmentOutcome</FluentBadge>
+                                        }
+                                        else
+                                        {
+                                            <span class="unknown">no outcome recorded yet</span>
+                                        }
+                                    </span>
+                                </li>
+                            }
+                            @foreach (var target in operation.ReservationTargets)
+                            {
+                                <li class="outcome">
+                                    <span class="outcome-kind">Reservation</span>
+                                    <span class="mono">@target.LeaseId</span>
+                                    <span class="outcome-state">
+                                        captured @target.CapturedState at revision @target.CapturedVersion
+                                    </span>
+                                    <span class="outcome-result">
+                                        @if (target.Outcome is { Length: > 0 } reservationOutcome)
+                                        {
+                                            <FluentBadge Appearance="Appearance.Accent">@reservationOutcome</FluentBadge>
+                                        }
+                                        else
+                                        {
+                                            <span class="unknown">no outcome recorded yet</span>
+                                        }
+                                    </span>
+                                </li>
+                            }
+                        </ul>
+                    }
+                </section>
+            </section>
+        }
+
+        @if (operation is { Status: RecoveryOperationStatus.NeedsIntervention } blocked)
+        {
+            <section class="group intervention" aria-labelledby="@InterventionHeadingId">
+                <p class="intervention-eyebrow">Local intervention</p>
+                <h3 id="@InterventionHeadingId" class="group-title">Safe steps on the owning machine</h3>
+                <p class="group-lead">
+                    Ownership stays retained and this project stays paused while you work through these
+                    steps. Nothing below unlocks the writer slot, and DevFleet will not declare the old
+                    agents stopped on your behalf.
+                </p>
+
+                <ol class="steps">
+                    <li>Restore connectivity where possible, so the assigned node can reconcile its retained cancellation itself.</li>
+                    <li>On the owning machine, identify and stop the assignment's supervised process trees, and confirm no descendant can still write.</li>
+                    <li>Inspect the exact canonical workspace shown above and record remaining changes, repository status, and any interrupted operation.</li>
+                    <li>Recheck recovery once the node can produce trustworthy evidence.</li>
+                </ol>
+
+                @if (GuidanceFor(BlockerCodes(blocked)) is { Count: > 0 } guidance)
+                {
+                    <ul class="guidance-list">
+                        @foreach (var hint in guidance)
+                        {
+                            <li>@hint</li>
+                        }
+                    </ul>
+                }
+
+                <p class="group-note">
+                    Restarting the node service is optional local troubleshooting that affects other projects
+                    on that machine, and it is not proof of quiescence. Never delete databases, assignment
+                    journals, event spools, or workspace contents. If the required evidence still cannot be
+                    obtained after rechecking, the audited administrator attestation below is the only
+                    remaining path, and it records your judgement rather than node proof.
+                </p>
+
+                <div class="actions">
+                    <FluentButton Appearance="Appearance.Accent"
+                                  OnClick="RecheckAsync"
+                                  Loading="@_submitting"
+                                  Class="action">
+                        Recheck recovery
+                    </FluentButton>
+                    <p class="action-note">
+                        Recheck re-attempts operation <span class="mono">@blocked.Id</span> at revision
+                        @blocked.Version. It never starts a second concurrent recovery.
+                    </p>
+                </div>
+            </section>
+        }
+
+        @* Attestation is offered only for a blocked operation, and only after automatic recheck above. *@
+        @if (operation is { Status: RecoveryOperationStatus.NeedsIntervention } attesting)
+        {
+            var gaps = ManualGaps();
+
+            <section class="group attest" aria-labelledby="@AttestHeadingId">
+                <p class="attest-eyebrow">Dangerous &middot; audited administrator attestation</p>
+                <h3 id="@AttestHeadingId" class="group-title">Recover on my attestation</h3>
+                <p class="group-lead">
+                    Use this only when Recheck recovery keeps failing and you have established on the owning
+                    machine that the original execution can no longer write. It resolves execution ownership
+                    from your recorded statement: the captured targets are cancelled and the captured
+                    reservations are fenced. It is not a forced unlock, it never releases another owner's
+                    lease, and it never restarts the stopped work.
+                </p>
+
+                <p class="attest-provenance">
+                    Provenance: operator attestation is not node proof. Everything you enter is stored as your
+                    statement, attributed to your signed-in account, and audited as
+                    <span class="mono">operator-attestation</span>. It never becomes evidence the assigned node
+                    reported, and later node reports can still contradict it.
+                </p>
+
+                @if (_manualError is not null)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Error"
+                                      Title="The attestation was rejected"
+                                      AllowDismiss="false">
+                        @_manualError
+                    </FluentMessageBar>
+                }
+
+                <FluentTextField @bind-Value="_manualProjectName"
+                                 Label="Exact project name (typed to confirm the target)"
+                                 Placeholder="The project's display name, character for character"
+                                 Required="true"
+                                 Maxlength="256"
+                                 Class="field field-wide" />
+                <p class="action-note">
+                    The panel deliberately does not prefill or echo the name: the control plane compares what
+                    you type against the project it is about to act on, and refuses any mismatch.
+                </p>
+
+                <FluentTextArea @bind-Value="_manualReason"
+                                Label="Reason for attesting instead of waiting for node evidence"
+                                Required="true"
+                                Rows="3"
+                                Maxlength="1024"
+                                Class="field field-wide" />
+
+                <FluentTextArea @bind-Value="_manualProcessStop"
+                                Label="Process-stop evidence you observed (what you ran, on which machine, and what it showed)"
+                                Required="true"
+                                Rows="4"
+                                Maxlength="1024"
+                                Class="field field-wide" />
+
+                <FluentTextArea @bind-Value="_manualRepositoryStatus"
+                                Label="Owning-workspace repository status (branch, dirty paths, interrupted Git operation, lock files)"
+                                Required="true"
+                                Rows="4"
+                                Maxlength="1024"
+                                Class="field field-wide" />
+
+                <FluentTextField @bind-Value="_manualRepositorySource"
+                                 Label="How that repository status was collected (command and host)"
+                                 Placeholder="git status --porcelain=v2 over SSH on pi-node-03"
+                                 Required="true"
+                                 Maxlength="1024"
+                                 Class="field field-wide" />
+
+                <div class="attest-row">
+                    <FluentTextField @bind-Value="_manualCollectedAt"
+                                     Label="Repository status collected at (UTC, yyyy-MM-dd HH:mm:ssZ)"
+                                     Required="true"
+                                     Maxlength="64"
+                                     Class="field field-wide" />
+                    <FluentButton Appearance="Appearance.Neutral"
+                                  OnClick="StampCollectedNow"
+                                  Class="attest-now">
+                        Set to now (UTC)
+                    </FluentButton>
+                </div>
+                <p class="action-note">
+                    Defaulted to the time this panel last read the diagnosis and left editable: enter when you
+                    actually inspected the workspace. A snapshot older than 15 minutes, or any time in the
+                    future, is refused.
+                </p>
+
+                <FluentTextArea @bind-Value="_manualGapAccounting"
+                                Label="Reservation and event gap accounting (unacknowledged events, unresolved leases, and what you did about each)"
+                                Required="true"
+                                Rows="4"
+                                Maxlength="1024"
+                                Class="field field-wide" />
+
+                <div class="attest-checks">
+                    <div class="attest-check">
+                        <FluentCheckbox @bind-Value="_manualWriterAccessPrevented"
+                                        Label="I have prevented writer access to the owning workspace by the original execution" />
+                    </div>
+                    <div class="attest-check">
+                        <FluentCheckbox @bind-Value="_manualAcknowledgeGaps"
+                                        Label="I acknowledge the evidence gaps above are unresolved and are being accepted on my judgement" />
+                    </div>
+                    <div class="attest-check">
+                        <FluentCheckbox @bind-Value="_manualCannotResume"
+                                        Label="I confirm the original execution cannot resume and must be treated as finished" />
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <FluentButton Appearance="Appearance.Accent"
+                                  OnClick="ConfirmManualAsync"
+                                  Loading="@_submitting"
+                                  Disabled="@(gaps.Count > 0)"
+                                  Class="action">
+                        Recover on my attestation
+                    </FluentButton>
+                    <p class="action-note">
+                        Confirms operation <span class="mono">@attesting.Id</span> at revision
+                        @attesting.Version, attempt @attesting.Attempt, as
+                        @(_actor ?? "an unidentified operator"). The recovery hold stays in place: resuming the
+                        queue remains a separate action.
+                    </p>
+                </div>
+
+                @if (gaps.Count > 0)
+                {
+                    <p class="attest-gaps">
+                        Still required before this can be submitted: @(string.Join("; ", gaps)).
+                    </p>
+                }
+            </section>
+        }
+
+        @if (diagnosis.HoldPresent && operation is { Status: RecoveryOperationStatus.Recovered })
+        {
+            <section class="group" aria-labelledby="@ResumeHeadingId">
+                <h3 id="@ResumeHeadingId" class="group-title">Resume queue</h3>
+                <p class="group-lead">
+                    Ownership and readiness are separate. Every captured target is resolved, so the hold can
+                    be cleared; clearing it restores ordinary scheduling and does not enable a disabled
+                    project, reorder the queue, or promise the next request can start.
+                </p>
+                <div class="actions">
+                    <FluentButton Appearance="Appearance.Accent"
+                                  OnClick="ResumeAsync"
+                                  Loading="@_submitting"
+                                  Disabled="@(ActorProblem() is not null)"
+                                  Class="action">
+                        Resume queue
+                    </FluentButton>
+                    <p class="action-note">
+                        Clears only this resolved hold at revision
+                        @(diagnosis.HoldVersion?.ToString() ?? "unknown").
+                    </p>
+                </div>
+            </section>
+        }
+
+        @if (startable)
+        {
+            <section class="group confirm" aria-labelledby="@ConfirmHeadingId">
+                <p class="confirm-eyebrow">Confirmation required</p>
+                <h3 id="@ConfirmHeadingId" class="group-title">Stop work and recover</h3>
+
+                @* Exact confirmation text mandated by docs/design/project-recovery.md §Confirmation. *@
+                <blockquote class="confirm-text">
+                    Stop this project's current work and pause its queue. Files, uncommitted changes,
+                    settings, and history will be kept. Work will not restart automatically. If DevFleet
+                    cannot prove the old processes stopped, the project will stay blocked.
+                </blockquote>
+
+                <section class="subgroup" aria-labelledby="@AffectedHeadingId">
+                    <h4 id="@AffectedHeadingId" class="section-label">Affected by this confirmation</h4>
+                    <ul class="affected-list">
+                        @foreach (var assignment in diagnosis.NonterminalAssignments)
+                        {
+                            <li class="affected">
+                                <span class="affected-kind">Assignment</span>
+                                <span class="mono">@assignment.RequestId.Value</span>
+                                <span class="affected-state">@assignment.State, revision @assignment.Version</span>
+                            </li>
+                        }
+                        @foreach (var reservation in diagnosis.UnresolvedReservations)
+                        {
+                            <li class="affected">
+                                <span class="affected-kind">Reservation</span>
+                                <span class="mono">@reservation.LeaseId</span>
+                                <span class="affected-state">@reservation.State, revision @reservation.Version</span>
+                            </li>
+                        }
+                    </ul>
+                </section>
+
+                <FluentTextArea @bind-Value="_reason"
+                                Label="Reason (recorded on the operation and in the audit trail)"
+                                Required="true"
+                                Rows="3"
+                                Class="field field-wide" />
+
+                <div class="actions">
+                    <FluentButton Appearance="Appearance.Accent"
+                                  OnClick="StartRecoveryAsync"
+                                  Loading="@_submitting"
+                                  Disabled="@(ActorProblem() is not null)"
+                                  Class="action">
+                        Stop work and recover
+                    </FluentButton>
+                    <p class="action-note">
+                        Confirms inventory revision <span class="mono">@diagnosis.InventoryRevision</span> as
+                        @(_actor ?? "an unidentified operator"). If the inventory changed meanwhile, nothing
+                        starts and you are asked to confirm again.
+                    </p>
+                </div>
+            </section>
+        }
+
+        <div class="actions actions-secondary">
+            <FluentButton Appearance="Appearance.Stealth"
+                          OnClick="ReloadAsync"
+                          Disabled="@_submitting"
+                          Class="action">
+                Reload diagnosis
+            </FluentButton>
+        </div>
+    }
+</section>
+
+@code {
+    /// <summary>Interval the panel re-reads a Pending or Running operation at.</summary>
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(5);
+
+    /// <summary>The five named stages of the documented stop procedure, in order.</summary>
+    private static readonly string[] Stages =
+    [
+        "Pausing new work",
+        "Stopping agents and supervised operations",
+        "Reconciling events and reservations",
+        "Inspecting the workspace",
+        "Resolving execution ownership",
+    ];
+
+    /// <summary>
+    /// Serializes every service call. The scoped recovery service is backed by one
+    /// <c>DbContext</c>, so the background poll must never overlap an operator action.
+    /// </summary>
+    private readonly SemaphoreSlim _gate = new(1, 1);
+
+    private readonly CancellationTokenSource _pollCts = new();
+
+    private Task? _poll;
+    private Guid _loadedProject;
+    private bool _loading = true;
+    private bool _submitting;
+    private bool _inventoryChanged;
+    private ProjectRecoveryDiagnosis? _diagnosis;
+    private DateTimeOffset _now;
+    private string? _loadError;
+    private string? _actionError;
+    private string? _dispatchNotice;
+    private string? _actor;
+    private string _reason = string.Empty;
+    private bool _reasonSeeded;
+    private string? _startKey;
+    private string? _startKeyReason;
+    private string? _startKeyRevision;
+
+    // Administrator attestation, kept as typed text so a rejected submission survives for correction.
+    private string _manualProjectName = string.Empty;
+    private string _manualReason = string.Empty;
+    private string _manualProcessStop = string.Empty;
+    private string _manualRepositoryStatus = string.Empty;
+    private string _manualRepositorySource = string.Empty;
+    private string _manualCollectedAt = string.Empty;
+    private string _manualGapAccounting = string.Empty;
+    private bool _manualWriterAccessPrevented;
+    private bool _manualAcknowledgeGaps;
+    private bool _manualCannotResume;
+    private string? _manualError;
+    private string? _manualKey;
+    private string? _manualKeyFingerprint;
+
+    [Parameter]
+    [EditorRequired]
+    public Guid ProjectId { get; set; }
+
+    /// <summary>
+    /// Raised after a durable change (start, recheck, or resume) so the host page can reload its own
+    /// projections. The panel refreshes itself regardless.
+    /// </summary>
+    [Parameter]
+    public EventCallback OnChanged { get; set; }
+
+    /// <summary>
+    /// Fragment id on the panel's root section, so a page, the Attention inbox, or a toast can link
+    /// straight to it. Override only when a page renders the panel more than once.
+    /// </summary>
+    [Parameter]
+    public string AnchorId { get; set; } = "project-recovery";
+
+    private string HeadingId => $"recovery-{ProjectId:N}-heading";
+
+    private string RetainedHeadingId => $"recovery-{ProjectId:N}-retained";
+
+    private string ReservationHeadingId => $"recovery-{ProjectId:N}-reservations";
+
+    private string ProgressHeadingId => $"recovery-{ProjectId:N}-progress";
+
+    private string BlockerHeadingId => $"recovery-{ProjectId:N}-blockers";
+
+    private string OutcomeHeadingId => $"recovery-{ProjectId:N}-outcomes";
+
+    private string InterventionHeadingId => $"recovery-{ProjectId:N}-intervention";
+
+    private string ResumeHeadingId => $"recovery-{ProjectId:N}-resume";
+
+    private string ConfirmHeadingId => $"recovery-{ProjectId:N}-confirm";
+
+    private string AffectedHeadingId => $"recovery-{ProjectId:N}-affected";
+
+    private string AttestHeadingId => $"recovery-{ProjectId:N}-attest";
+
+    protected override async Task OnInitializedAsync()
+    {
+        // The actor is the authenticated administrator, never a typed field: a recovery audit row
+        // that anyone could author would be worthless.
+        var state = await Authentication.GetAuthenticationStateAsync();
+        var user = state.User;
+        _actor = user.Identity?.IsAuthenticated == true
+            ? user.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? user.Identity.Name
+            : null;
+
+        _poll = PollAsync(_pollCts.Token);
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (_loadedProject == ProjectId)
+        {
+            return;
+        }
+
+        _loadedProject = ProjectId;
+        _loading = true;
+        _diagnosis = null;
+        _reason = string.Empty;
+        _reasonSeeded = false;
+        _startKey = null;
+        _inventoryChanged = false;
+        _actionError = null;
+        _dispatchNotice = null;
+        ResetManualForm();
+        await LoadAsync();
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        // Only the panel's own reading stops here. A started recovery operation is durable and
+        // continues on the control plane and the assigned node.
+        await _pollCts.CancelAsync();
+        if (_poll is { } poll)
+        {
+            try
+            {
+                await poll;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        _pollCts.Dispose();
+        _gate.Dispose();
+    }
+
+    /// <summary>Bounded re-read while an operation is still working; idle otherwise.</summary>
+    private async Task PollAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(PollInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+            {
+                if (_diagnosis?.LatestOperation is not { Status: RecoveryOperationStatus.Pending or RecoveryOperationStatus.Running })
+                {
+                    continue;
+                }
+
+                await InvokeAsync(async () =>
+                {
+                    await LoadAsync();
+                    StateHasChanged();
+                });
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Disposal.
+        }
+        catch (ObjectDisposedException)
+        {
+            // The renderer went away between ticks; the durable operation is unaffected.
+        }
+    }
+
+    private async Task ReloadAsync()
+    {
+        _actionError = null;
+        _dispatchNotice = null;
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        if (ProjectId == Guid.Empty)
+        {
+            _loadError = "No project id was supplied to the recovery panel.";
+            _loading = false;
+            return;
+        }
+
+        await _gate.WaitAsync(CancellationToken.None);
+        try
+        {
+            _now = Clock.UtcNow;
+            _diagnosis = await Recoveries.GetDiagnosisAsync(new ProjectId(ProjectId), CancellationToken.None);
+            _loadError = null;
+            SeedReason(_diagnosis);
+            SeedRepositoryCollectedAt(_diagnosis);
+        }
+        catch (Exception ex)
+        {
+            _loadError = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Prefills the reason from the observed blocker once, then leaves it under operator control.
+    /// The seed states only what the diagnosis reports.
+    /// </summary>
+    private void SeedReason(ProjectRecoveryDiagnosis diagnosis)
+    {
+        if (_reasonSeeded || _reason.Length > 0)
+        {
+            return;
+        }
+
+        if (diagnosis.LatestOperation is { } operation && BlockerCodes(operation) is { Count: > 0 } codes)
+        {
+            _reason = $"Recovery reported {string.Join(", ", codes)} on attempt {operation.Attempt}.";
+        }
+        else if (diagnosis.NonterminalAssignments.Count > 0)
+        {
+            var assignment = diagnosis.NonterminalAssignments[0];
+            var node = assignment.NodeStatus is { Length: > 0 } status
+                ? $" Assigned node reports {status}."
+                : " No assigned-node status is reported.";
+            _reason = $"Retained {assignment.State} assignment for request {assignment.RequestId.Value} is not progressing.{node}";
+        }
+        else if (diagnosis.UnresolvedReservations.Count > 0)
+        {
+            var reservation = diagnosis.UnresolvedReservations[0];
+            _reason = $"Unresolved {reservation.State} reservation lease {reservation.LeaseId} still blocks its scopes.";
+        }
+        else
+        {
+            return;
+        }
+
+        _reasonSeeded = true;
+    }
+
+    /// <summary>
+    /// Clears every attested field. Attestation is per project and per blocked operation: evidence
+    /// typed against one project must never be carried into another.
+    /// </summary>
+    private void ResetManualForm()
+    {
+        _manualProjectName = string.Empty;
+        _manualReason = string.Empty;
+        _manualProcessStop = string.Empty;
+        _manualRepositoryStatus = string.Empty;
+        _manualRepositorySource = string.Empty;
+        _manualCollectedAt = string.Empty;
+        _manualGapAccounting = string.Empty;
+        _manualWriterAccessPrevented = false;
+        _manualAcknowledgeGaps = false;
+        _manualCannotResume = false;
+        _manualError = null;
+        _manualKey = null;
+        _manualKeyFingerprint = null;
+    }
+
+    /// <summary>
+    /// Defaults the repository collection time to this read, then leaves it alone: the operator states
+    /// when the workspace was actually inspected, and the control plane judges its freshness.
+    /// </summary>
+    private void SeedRepositoryCollectedAt(ProjectRecoveryDiagnosis diagnosis)
+    {
+        if (_manualCollectedAt.Length > 0
+            || diagnosis.LatestOperation is not { Status: RecoveryOperationStatus.NeedsIntervention })
+        {
+            return;
+        }
+
+        _manualCollectedAt = StampUtc(_now);
+    }
+
+    private void StampCollectedNow() => _manualCollectedAt = StampUtc(Clock.UtcNow);
+
+    private static string StampUtc(DateTimeOffset instant) =>
+        instant.ToUniversalTime().ToString("u", CultureInfo.InvariantCulture);
+
+    private bool TryReadCollectedAt(out DateTimeOffset collectedAt) =>
+        DateTimeOffset.TryParse(
+            _manualCollectedAt,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+            out collectedAt);
+
+    /// <summary>
+    /// What the attestation still lacks, in the order the form asks for it. Nothing here is waivable:
+    /// while this list is non-empty the submit control stays disabled and names what is missing.
+    /// </summary>
+    private List<string> ManualGaps()
+    {
+        var gaps = new List<string>(11);
+        if (ActorProblem() is not null)
+        {
+            gaps.Add("a readable administrator identity");
+        }
+
+        if (string.IsNullOrWhiteSpace(_manualProjectName))
+        {
+            gaps.Add("the exact project name");
+        }
+
+        if (string.IsNullOrWhiteSpace(_manualReason))
+        {
+            gaps.Add("a reason");
+        }
+
+        if (string.IsNullOrWhiteSpace(_manualProcessStop))
+        {
+            gaps.Add("process-stop evidence");
+        }
+
+        if (string.IsNullOrWhiteSpace(_manualRepositoryStatus))
+        {
+            gaps.Add("the owning-workspace repository status");
+        }
+
+        if (string.IsNullOrWhiteSpace(_manualRepositorySource))
+        {
+            gaps.Add("how that status was collected");
+        }
+
+        if (!TryReadCollectedAt(out _))
+        {
+            gaps.Add("a readable UTC collection time");
+        }
+
+        if (string.IsNullOrWhiteSpace(_manualGapAccounting))
+        {
+            gaps.Add("reservation and event gap accounting");
+        }
+
+        if (!_manualWriterAccessPrevented)
+        {
+            gaps.Add("the writer-access confirmation");
+        }
+
+        if (!_manualAcknowledgeGaps)
+        {
+            gaps.Add("the evidence-gap acknowledgement");
+        }
+
+        if (!_manualCannotResume)
+        {
+            gaps.Add("the confirmation that the original execution cannot resume");
+        }
+
+        return gaps;
+    }
+
+    /// <summary>
+    /// Stable idempotency key for one attested input against one attempt. Editing any field issues a
+    /// new key, so retrying identical evidence replays and corrected evidence is never folded into the
+    /// earlier acceptance.
+    /// </summary>
+    private string ManualKey(string fingerprint)
+    {
+        if (_manualKey is null || !string.Equals(_manualKeyFingerprint, fingerprint, StringComparison.Ordinal))
+        {
+            _manualKey = Guid.NewGuid().ToString("N");
+            _manualKeyFingerprint = fingerprint;
+        }
+
+        return _manualKey;
+    }
+
+    /// <summary>
+    /// Records the administrator's attestation against the blocked operation the panel displayed. On
+    /// success the operation is recovered and the hold is deliberately kept: resuming stays separate.
+    /// </summary>
+    private async Task ConfirmManualAsync()
+    {
+        if (_submitting
+            || _diagnosis?.LatestOperation is not { Status: RecoveryOperationStatus.NeedsIntervention } operation)
+        {
+            return;
+        }
+
+        if (ManualGaps() is { Count: > 0 } gaps)
+        {
+            _manualError = $"Manual recovery still needs {string.Join("; ", gaps)}.";
+            return;
+        }
+
+        if (!TryReadCollectedAt(out var collectedAt))
+        {
+            _manualError = "The repository status collection time could not be read as a UTC instant.";
+            return;
+        }
+
+        var projectName = _manualProjectName.Trim();
+        var reason = _manualReason.Trim();
+        var processStop = _manualProcessStop.Trim();
+        var repositoryStatus = _manualRepositoryStatus.Trim();
+        var repositorySource = _manualRepositorySource.Trim();
+        var gapAccounting = _manualGapAccounting.Trim();
+        var fingerprint = string.Join(
+            "\u001f",
+            operation.Id.ToString("N"),
+            operation.Version.ToString(CultureInfo.InvariantCulture),
+            operation.Attempt.ToString(CultureInfo.InvariantCulture),
+            projectName,
+            reason,
+            processStop,
+            repositoryStatus,
+            repositorySource,
+            collectedAt.ToString("O", CultureInfo.InvariantCulture),
+            gapAccounting);
+
+        _actionError = null;
+        _dispatchNotice = null;
+        _manualError = null;
+        _submitting = true;
+        try
+        {
+            await _gate.WaitAsync(CancellationToken.None);
+            try
+            {
+                await ManualRecoveries.ConfirmManualAsync(
+                    new ProjectId(ProjectId),
+                    new ConfirmManualProjectRecoveryCommand(
+                        operation.Id,
+                        operation.Version,
+                        operation.Attempt,
+                        projectName,
+                        reason,
+                        _actor!,
+                        ManualKey(fingerprint),
+                        ConfirmOriginalExecutionCannotResume: true,
+                        WriterAccessPrevented: true,
+                        AcknowledgeEvidenceGaps: true,
+                        processStop,
+                        repositoryStatus,
+                        repositorySource,
+                        collectedAt,
+                        gapAccounting),
+                    CancellationToken.None);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+
+            // Recovered on attestation only. The hold is retained, so the queue stays paused until the
+            // operator clears it through Resume queue.
+            ToastService.ShowSuccess("Manual recovery recorded; queue still paused");
+            ResetManualForm();
+            await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            // The typed evidence is kept so one field can be corrected and resubmitted.
+            _manualError = ex.Message;
+            await LoadAsync();
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+
+    private string? ActorProblem() => string.IsNullOrWhiteSpace(_actor)
+        ? "Your administrator identity could not be read from the current session, so recovery cannot be "
+          + "attributed to an operator. Sign in again before starting or resuming recovery."
+        : null;
+
+    /// <summary>
+    /// Stable idempotency key for one confirmed input. Editing the reason or confirming a refreshed
+    /// inventory issues a new key, so a retry of identical input is idempotent and changed input is
+    /// never silently folded into the earlier acceptance.
+    /// </summary>
+    private string StartKey(string revision, string reason)
+    {
+        if (_startKey is null
+            || !string.Equals(_startKeyRevision, revision, StringComparison.Ordinal)
+            || !string.Equals(_startKeyReason, reason, StringComparison.Ordinal))
+        {
+            _startKey = Guid.NewGuid().ToString("N");
+            _startKeyRevision = revision;
+            _startKeyReason = reason;
+        }
+
+        return _startKey;
+    }
+
+    private async Task StartRecoveryAsync()
+    {
+        if (_submitting || _diagnosis is not { } diagnosis)
+        {
+            return;
+        }
+
+        _dispatchNotice = null;
+        _actionError = ActorProblem()
+            ?? (string.IsNullOrWhiteSpace(_reason)
+                ? "A reason is required; it is recorded on the operation and in the audit trail."
+                : null);
+        if (_actionError is not null)
+        {
+            return;
+        }
+
+        var reason = _reason.Trim();
+        var revision = diagnosis.InventoryRevision;
+        _submitting = true;
+        try
+        {
+            ProjectRecoveryStartResult started;
+            await _gate.WaitAsync(CancellationToken.None);
+            try
+            {
+                started = await Recoveries.StartAsync(
+                    new ProjectId(ProjectId),
+                    new StartProjectRecoveryCommand(revision, reason, _actor!, StartKey(revision, reason)),
+                    CancellationToken.None);
+
+                if (started.Operation is { } operation)
+                {
+                    // The operation is already durable. Delivery is best-effort and fails closed, so a
+                    // dispatch error is reported without pretending the start failed.
+                    try
+                    {
+                        await Dispatcher.DispatchAsync(
+                            new ProjectId(ProjectId),
+                            operation.Id,
+                            CancellationToken.None);
+                    }
+                    catch (Exception ex)
+                    {
+                        _dispatchNotice =
+                            $"Recovery {operation.Id} is durable and the hold is in place, but delivering the "
+                            + $"attempt to the assigned node failed: {ex.Message} Ownership is retained; use "
+                            + "Recheck recovery once the node is reachable.";
+                    }
+                }
+            }
+            finally
+            {
+                _gate.Release();
+            }
+
+            _inventoryChanged = false;
+            ToastService.ShowSuccess(started.NoOp
+                ? "No execution recovery needed"
+                : "Recovery started; queue paused");
+            await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (RecoveryInventoryConflictException)
+        {
+            // Never cancel work the operator has not seen: refresh the preview and ask again.
+            _inventoryChanged = true;
+            _startKey = null;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            _actionError = ex.Message;
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+
+    private async Task RecheckAsync()
+    {
+        if (_submitting || _diagnosis?.LatestOperation is not { } operation)
+        {
+            return;
+        }
+
+        _actionError = null;
+        _dispatchNotice = null;
+        _submitting = true;
+        try
+        {
+            await _gate.WaitAsync(CancellationToken.None);
+            try
+            {
+                var rechecked = await Recoveries.RecheckAsync(
+                    new ProjectId(ProjectId),
+                    operation.Id,
+                    operation.Version,
+                    $"recheck-{operation.Id:N}-{operation.Attempt}",
+                    CancellationToken.None);
+
+                try
+                {
+                    await Dispatcher.DispatchAsync(
+                        new ProjectId(ProjectId),
+                        rechecked.Id,
+                        CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    _dispatchNotice =
+                        $"Attempt {rechecked.Attempt} is recorded, but delivering it to the assigned node "
+                        + $"failed: {ex.Message} Ownership is retained and the project stays paused.";
+                }
+            }
+            finally
+            {
+                _gate.Release();
+            }
+
+            ToastService.ShowSuccess("Recovery rechecked");
+            await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            _actionError = ex.Message;
+            await LoadAsync();
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+
+    private async Task ResumeAsync()
+    {
+        if (_submitting || _diagnosis is not { HoldPresent: true } diagnosis)
+        {
+            return;
+        }
+
+        if (diagnosis.LatestOperation is not { Status: RecoveryOperationStatus.Recovered } operation)
+        {
+            return;
+        }
+
+        _dispatchNotice = null;
+        _actionError = ActorProblem()
+            ?? (diagnosis.HoldVersion is null
+                ? "The hold revision is unknown, so the hold cannot be cleared safely. Reload the diagnosis."
+                : null);
+        if (_actionError is not null)
+        {
+            return;
+        }
+
+        _submitting = true;
+        try
+        {
+            await _gate.WaitAsync(CancellationToken.None);
+            try
+            {
+                await Recoveries.ResumeAsync(
+                    new ProjectId(ProjectId),
+                    operation.Id,
+                    diagnosis.HoldVersion!.Value,
+                    _actor!,
+                    CancellationToken.None);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+
+            ToastService.ShowSuccess("Recovery hold cleared");
+            await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            _actionError = ex.Message;
+            await LoadAsync();
+        }
+        finally
+        {
+            _submitting = false;
+        }
+    }
+
+    private static bool IsUnresolved(RecoveryOperationStatus status) => status
+        is RecoveryOperationStatus.Pending
+        or RecoveryOperationStatus.Running
+        or RecoveryOperationStatus.NeedsIntervention;
+
+    private static string StatusLabel(RecoveryOperationStatus status) => status switch
+    {
+        RecoveryOperationStatus.Pending => "Pending",
+        RecoveryOperationStatus.Running => "Running",
+        RecoveryOperationStatus.NeedsIntervention => "Needs intervention",
+        RecoveryOperationStatus.Recovered => "Recovered",
+        _ => status.ToString(),
+    };
+
+    private static Appearance StatusAppearance(RecoveryOperationStatus status) => status switch
+    {
+        RecoveryOperationStatus.NeedsIntervention => Appearance.Accent,
+        RecoveryOperationStatus.Running => Appearance.Accent,
+        _ => Appearance.Neutral,
+    };
+
+    /// <summary>Index of the reported stage in the documented procedure, or -1 when unplaceable.</summary>
+    private static int StageIndex(string? stage)
+    {
+        if (string.IsNullOrWhiteSpace(stage))
+        {
+            return -1;
+        }
+
+        for (var index = 0; index < Stages.Length; index++)
+        {
+            if (string.Equals(Stages[index], stage.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static string StageState(int index, int current, RecoveryOperationStatus status)
+    {
+        if (status == RecoveryOperationStatus.Recovered)
+        {
+            return "Passed";
+        }
+
+        if (current < 0)
+        {
+            return "Not reported";
+        }
+
+        if (index < current)
+        {
+            return "Passed";
+        }
+
+        if (index > current)
+        {
+            return "Not started";
+        }
+
+        return status == RecoveryOperationStatus.NeedsIntervention ? "Stalled here" : "In progress";
+    }
+
+    /// <summary>Scoped class for one stage row, derived from its state word.</summary>
+    private static string StageClass(string state) =>
+        "stage is-" + state.ToLowerInvariant().Replace(' ', '-');
+
+    /// <summary>Blocker codes recorded on the operation; a malformed payload yields no codes.</summary>
+    private static IReadOnlyList<string> BlockerCodes(ProjectRecoveryOperation operation)
+    {
+        if (string.IsNullOrWhiteSpace(operation.BlockerCodesJson))
+        {
+            return Array.Empty<string>();
+        }
+
+        try
+        {
+            var codes = JsonSerializer.Deserialize<string[]>(operation.BlockerCodesJson);
+            if (codes is null)
+            {
+                return Array.Empty<string>();
+            }
+
+            var kept = new List<string>(codes.Length);
+            foreach (var code in codes)
+            {
+                if (!string.IsNullOrWhiteSpace(code))
+                {
+                    kept.Add(code.Trim());
+                }
+            }
+
+            return kept;
+        }
+        catch (JsonException)
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    private static string MissingEvidenceSummary(ProjectRecoveryOperation operation)
+    {
+        var codes = BlockerCodes(operation);
+        return codes.Count == 0
+            ? "the assigned node has not supplied the evidence recovery needs"
+            : string.Join("; ", codes.Select(BlockerText));
+    }
+
+    private static string BlockerText(string code) => code switch
+    {
+        RecoveryReasonCodes.ProjectRecoveryPaused =>
+            "this project's queue is paused by the recovery hold",
+        RecoveryReasonCodes.NodeUnreachable =>
+            "the assigned node is not connected, so it cannot report evidence",
+        RecoveryReasonCodes.ProcessStopUnproven =>
+            "the node could not prove that every assignment-owned process stopped",
+        RecoveryReasonCodes.OperationDrainTimeout =>
+            "supervised operations did not drain within the attempt deadline",
+        RecoveryReasonCodes.EventsUnacknowledged =>
+            "spooled assignment events are not acknowledged yet",
+        RecoveryReasonCodes.ReservationUnresolved =>
+            "an assignment-owned reservation lease is still unresolved",
+        RecoveryReasonCodes.RepositoryStatusUnknown =>
+            "the canonical workspace could not be inspected, so its repository status is unknown",
+        RecoveryReasonCodes.RecoveryEvidenceStale =>
+            "the evidence offered does not correlate with the current attempt",
+        RecoveryReasonCodes.RecoveryTargetChanged =>
+            "the captured target inventory no longer matches the project",
+        _ => "this blocker code has no operator description in this build",
+    };
+
+    /// <summary>Code-specific local steps, appended to the general guidance for intervention.</summary>
+    private static List<string> GuidanceFor(IReadOnlyList<string> codes)
+    {
+        var guidance = new List<string>(codes.Count);
+        foreach (var code in codes)
+        {
+            var hint = code switch
+            {
+                RecoveryReasonCodes.NodeUnreachable =>
+                    "Restore the node agent's connection to this control plane. A returning owner can advance "
+                    + "the retained cancellation without ever resuming the original execution.",
+                RecoveryReasonCodes.ProcessStopUnproven =>
+                    "On the owning machine, stop the assignment's process trees and confirm no reparented or "
+                    + "daemonized descendant survives. A disconnected heartbeat is not exit proof.",
+                RecoveryReasonCodes.OperationDrainTimeout =>
+                    "Let the in-flight supervised operations finish, then recheck. Restarting services to "
+                    + "force the drain is troubleshooting, not evidence.",
+                RecoveryReasonCodes.EventsUnacknowledged =>
+                    "Leave the event spool intact; the owner flushes and acknowledges it. Clearing the spool "
+                    + "to make the pending count zero destroys audit history.",
+                RecoveryReasonCodes.ReservationUnresolved =>
+                    "Review the project's reservation leases. Recovery resolves only assignment-owned leases "
+                    + "through the reservation authority; another assignment's lease needs its own handling.",
+                RecoveryReasonCodes.RepositoryStatusUnknown =>
+                    "Inspect the canonical workspace path listed above on the owning machine and record its "
+                    + "repository status and any interrupted Git operation. An inaccessible workspace cannot "
+                    + "be reported as clean, and Git lock files are never deleted automatically.",
+                RecoveryReasonCodes.RecoveryEvidenceStale =>
+                    "Recheck to open a fresh attempt; evidence collected for an earlier attempt cannot "
+                    + "authorize release.",
+                RecoveryReasonCodes.RecoveryTargetChanged =>
+                    "Reload the diagnosis: the captured targets changed, so the operation must be rechecked "
+                    + "against the current inventory.",
+                _ => null,
+            };
+
+            if (hint is not null)
+            {
+                guidance.Add(hint);
+            }
+        }
+
+        return guidance;
+    }
+
+    private string Announcement()
+    {
+        if (_loading)
+        {
+            return "Reading the project recovery diagnosis.";
+        }
+
+        if (_loadError is not null)
+        {
+            return "The project recovery diagnosis could not be read.";
+        }
+
+        if (_diagnosis is not { } diagnosis)
+        {
+            return "No project recovery diagnosis is available.";
+        }
+
+        var operation = diagnosis.LatestOperation;
+        if (operation is { Status: RecoveryOperationStatus.NeedsIntervention })
+        {
+            return $"Recovery needs intervention: {MissingEvidenceSummary(operation)}. Ownership is retained.";
+        }
+
+        if (operation is { Status: RecoveryOperationStatus.Pending or RecoveryOperationStatus.Running })
+        {
+            return operation.Stage is { Length: > 0 } stage
+                ? $"Recovery is running at stage {stage}, attempt {operation.Attempt}."
+                : $"Recovery is running, attempt {operation.Attempt}, with no stage reported yet.";
+        }
+
+        if (operation is { Status: RecoveryOperationStatus.Recovered })
+        {
+            return diagnosis.HoldPresent
+                ? "Recovered. The queue is still paused until the hold is cleared."
+                : "The recovery hold is cleared and ordinary scheduling applies.";
+        }
+
+        return diagnosis.NonterminalAssignments.Count + diagnosis.UnresolvedReservations.Count == 0
+            ? "No execution recovery is needed for this project."
+            : "This project has retained execution ownership that recovery can stop.";
+    }
+
+    private RenderFragment Stamp(string label, DateTimeOffset? instant) =>
+        @<div class="fact">
+            <dt>@label</dt>
+            <dd class="num">
+                @if (instant is { } at)
+                {
+                    <span class="stamp">@at.ToString("u")</span>
+                    <span class="hint">(@TimeText.Relative(at, _now))</span>
+                }
+                else
+                {
+                    <span class="unknown">not reported</span>
+                }
+            </dd>
+        </div>;
+
+    private RenderFragment Deadline(string label, DateTimeOffset? instant) =>
+        @<div class="fact">
+            <dt>@label</dt>
+            <dd class="num">
+                @if (instant is { } at)
+                {
+                    <span class="stamp">@at.ToString("u")</span>
+                    <span class="@(at <= _now ? "overdue" : "hint")">(@TimeText.Deadline(at, _now))</span>
+                }
+                else
+                {
+                    <span class="unknown">not reported</span>
+                }
+            </dd>
+        </div>;
+}

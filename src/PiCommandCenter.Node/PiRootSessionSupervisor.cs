@@ -164,7 +164,15 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
             prompt: BuildPrompt(assignment),
             AgentRuntimeMode.Root,
             model.Value,
-            createRequestCommit: assignment.CreateRequestCommit);
+            createRequestCommit: assignment.CreateRequestCommit,
+            workspaceBindingId: new Domain.Projects.WorkspaceBindingId(assignment.WorkspaceBindingId),
+            bindingValidationRevisionSnapshot: assignment.BindingValidationRevisionSnapshot,
+            verificationPolicyRevision: assignment.VerificationPolicyRevision,
+            baselineVersion: assignment.BaselineVersion,
+            trustedVerificationProfileId: assignment.TrustedVerificationProfileId,
+            trustedVerificationProfileRevision: assignment.TrustedVerificationProfileRevision,
+            mandatoryVerificationCommandIds: ParseMandatoryVerificationCommandIds(
+                assignment.MandatoryCommandIdsJson));
 
         // Supervisor-owned request branch, created exactly once before the worker starts so the
         // agent works on the request branch. No branch, no checkpoint policy: without the flag
@@ -467,6 +475,25 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
         _logger.LogDebug(
             "Spooled event {Type} (seq {Sequence}) for request {RequestId}.",
             type, message.Sequence, active.Assignment.RequestId);
+    }
+
+    private static IReadOnlyList<string>? ParseMandatoryVerificationCommandIds(string? json)
+    {
+        if (json is null)
+        {
+            return null;
+        }
+
+        var commandIds = JsonSerializer.Deserialize<string[]>(json, JsonOptions)
+            ?? throw new InvalidOperationException(
+                "The assignment mandatory verification command snapshot is null.");
+        if (commandIds.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new InvalidOperationException(
+                "The assignment mandatory verification command snapshot contains an empty command id.");
+        }
+
+        return commandIds;
     }
 
     private static string BuildPrompt(ExecutionAssignmentMessage assignment)

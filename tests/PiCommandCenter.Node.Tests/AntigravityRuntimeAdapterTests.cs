@@ -66,25 +66,25 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
         var dump = Path.Combine(_root, "dump.json");
         var adapter = CreateAdapter(_root, dump);
         await Assert.ThrowsAsync<NotSupportedException>(() =>
-            adapter.StartAsync(MakeRequest(_root, "codex/default"), CancellationToken.None));
+            adapter.StartAsync(MakeRequest(_root, "codex/gpt-5.6-sol"), CancellationToken.None));
         await Assert.ThrowsAsync<NotSupportedException>(() =>
             adapter.StartAsync(MakeRequest(_root, "claude-code/fable-5-1"), CancellationToken.None));
         Assert.False(File.Exists(dump));
     }
 
     [Fact]
-    public void Model_argument_is_the_selector_suffix_or_omitted_for_default()
+    public void Model_argument_is_always_the_native_selector_suffix()
     {
-        Assert.Null(AntigravityRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("antigravity/default")));
         Assert.Equal(
             "gemini-3-pro",
             AntigravityRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("antigravity/gemini-3-pro")));
         Assert.Equal(
             "vendor/nested-id",
             AntigravityRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("antigravity/vendor/nested-id")));
+        Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("antigravity/default"));
         Assert.Equal(
-            ["--input-format", "stream-json", "--output-format", "stream-json"],
-            AntigravityRuntimeAdapter.BuildLaunchArguments(null).ToArray());
+            ["--input-format", "stream-json", "--output-format", "stream-json", "--model", "gemini-3-pro"],
+            AntigravityRuntimeAdapter.BuildLaunchArguments("gemini-3-pro").ToArray());
     }
 
     [Fact]
@@ -351,7 +351,7 @@ public sealed class AntigravityRuntimeAdapterTests : IDisposable
 
     private static AgentStartRequest MakeRequest(
         string cwd,
-        string model = "antigravity/default",
+        string model = "antigravity/gemini-3-pro",
         string? sessionId = null,
         AgentRuntimeAuthorizationContext? authorization = null)
         => new(

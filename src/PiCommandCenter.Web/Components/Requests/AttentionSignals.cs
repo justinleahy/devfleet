@@ -26,7 +26,9 @@ public enum AttentionKind
     /// <summary>A handoff was requested and no transfer or release has answered it.</summary>
     HandoffRequested,
 
-    /// <summary>A mandatory or optional verification command finished red.</summary>
+    /// <summary>
+    /// A mandatory baseline or project-check command of the current fingerprint finished red.
+    /// </summary>
     VerificationFailed,
 
     /// <summary>The repository changed outside every lease of this request.</summary>
@@ -104,7 +106,8 @@ public static class AttentionScanner
         IReadOnlyList<ReservationLeaseDto> leases,
         IReadOnlyList<VerificationRunDto> verificationRuns,
         RequestInsights insights,
-        DateTimeOffset now)
+        DateTimeOffset now,
+        IReadOnlyList<SessionEventDto>? events = null)
     {
         ArgumentNullException.ThrowIfNull(into);
         ArgumentNullException.ThrowIfNull(request);
@@ -112,7 +115,7 @@ public static class AttentionScanner
 
         ScanSessions(into, request, projectName, sessions);
         ScanLeases(into, request, projectName, sessions, leases, now);
-        ScanVerification(into, request, projectName, verificationRuns);
+        ScanVerification(into, request, projectName, verificationRuns, events);
         ScanRepository(into, request, projectName, insights);
     }
 
@@ -257,34 +260,55 @@ public static class AttentionScanner
         }
     }
 
+    /// <summary>
+    /// Verification attention is exactly what the completion gate blocks on: a mandatory
+    /// <see cref="VerificationRunKind.Baseline"/> or <see cref="VerificationRunKind.ProjectCheck"/>
+    /// command of the current fingerprint that failed or timed out. Intermediate runs are ignored
+    /// because they never affect phase, attention, or completion; optional commands are ignored
+    /// because a red optional command only warns; and a red row from a superseded fingerprint is
+    /// retained history that blocks nothing.
+    /// </summary>
     private static void ScanVerification(
         List<AttentionSignal> into,
         WorkRequestDto request,
         string projectName,
-        IReadOnlyList<VerificationRunDto> runs)
+        IReadOnlyList<VerificationRunDto> runs,
+        IReadOnlyList<SessionEventDto>? events)
     {
-        foreach (var run in runs)
+        var view = RequestVerificationViewReader.Read(runs, Array.Empty<AgentSessionDto>(), events);
+        ScanVerificationRows(into, request, projectName, view.Baseline);
+        ScanVerificationRows(into, request, projectName, view.ProjectChecks);
+    }
+
+    private static void ScanVerificationRows(
+        List<AttentionSignal> into,
+        WorkRequestDto request,
+        string projectName,
+        IReadOnlyList<VerificationRow> rows)
+    {
+        foreach (var row in rows)
         {
-            if (run.Status is VerificationRunStatus.Passed
-                or VerificationRunStatus.Running
-                or VerificationRunStatus.Cancelled)
+            if (!row.IsBlocking)
             {
                 continue;
             }
 
+            var run = row.Run;
             var outcome = run.Status == VerificationRunStatus.TimedOut ? "timed out" : "failed";
             var exit = run.ExitCode is { } code ? $" with exit code {code}" : string.Empty;
             var summary = string.IsNullOrWhiteSpace(run.OutputSummary)
                 ? "No output summary was captured."
                 : run.OutputSummary;
+            var kind = run.RunKind == VerificationRunKind.Baseline ? "baseline" : "project check";
 
             Add(
                 into,
                 AttentionKind.VerificationFailed,
-                run.Mandatory ? AttentionSeverity.Error : AttentionSeverity.Warning,
+                AttentionSeverity.Error,
                 $"Verification {run.CommandId} {outcome}",
-                $"{(run.Mandatory ? "Mandatory" : "Optional")} command {run.CommandId} of profile "
-                    + $"{run.ProfileId} {outcome}{exit}. {summary}",
+                $"Mandatory {kind} command {run.CommandId} of profile {run.ProfileId} "
+                    + $"{outcome}{exit}. Completion stays blocked until it passes for the current "
+                    + $"repository fingerprint. {summary}",
                 request,
                 projectName,
                 sessionId: null,

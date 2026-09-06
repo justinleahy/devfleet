@@ -9,4 +9,5 @@ public sealed record QueueWorkRequestCommand(
     Domain.Requests.RequestPriority Priority,
     Domain.Requests.RiskLevel RiskLevel,
     string Title,
-    string Prompt);
+    string Prompt,
+    Guid? OriginalRequestId = null);

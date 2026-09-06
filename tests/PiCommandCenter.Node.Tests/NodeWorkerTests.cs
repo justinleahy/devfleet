@@ -11,6 +11,8 @@ using PiCommandCenter.Node.Child;
 using PiCommandCenter.Node.Projects;
 using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.SystemResources;
+using PiCommandCenter.Node.Runtime;
+using PiCommandCenter.Node.Recovery;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -25,10 +27,17 @@ internal sealed class FakeNodeHub : INodeHubOps
 
     public event Func<CancelAssignmentCommand, Task>? CancelAssignmentReceived;
 
+    public event Func<RecoverAssignmentCommandMessage, Task>? RecoverAssignmentReceived;
+
+
     private readonly Queue<ExecutionAssignmentMessage> _assignmentsToReturn = new();
     private readonly Dictionary<Guid, DateTimeOffset> _renewals = new();
     public List<IReadOnlyList<NodeEventMessage>> PublishedBatches { get; } = [];
     public List<NodeEventAcknowledgementMessage> AcknowledgementsToReturn { get; } = [];
+    public List<AssignmentRecoveryProgressMessage> Progress { get; } = [];
+    public List<AssignmentRecoveryProofMessage> Proofs { get; } = [];
+    public Exception? ProgressException { get; set; }
+    public Exception? ProofException { get; set; }
     public int ClaimNextCalls { get; private set; }
     public int HeartbeatCalls { get; private set; }
     public IReadOnlyList<string> LastHeartbeatSessionIds { get; private set; } = [];
@@ -55,6 +64,10 @@ internal sealed class FakeNodeHub : INodeHubOps
 
     public Task RaiseAssignmentCancelAsync(CancelAssignmentCommand command)
         => CancelAssignmentReceived?.Invoke(command) ?? Task.CompletedTask;
+
+    public Task RaiseRecoverAsync(RecoverAssignmentCommandMessage command)
+        => RecoverAssignmentReceived?.Invoke(command) ?? Task.CompletedTask;
+
 
     public Task StartAsync(CancellationToken cancellationToken)
     {
@@ -147,6 +160,32 @@ internal sealed class FakeNodeHub : INodeHubOps
         }
 
         return Task.FromResult(acknowledgement);
+    }
+
+    public Task ReportRecoveryProgressAsync(
+        AssignmentRecoveryProgressMessage message,
+        CancellationToken cancellationToken)
+    {
+        if (ProgressException is not null)
+        {
+            throw ProgressException;
+        }
+
+        Progress.Add(message);
+        return Task.CompletedTask;
+    }
+
+    public Task ReportRecoveryProofAsync(
+        AssignmentRecoveryProofMessage message,
+        CancellationToken cancellationToken)
+    {
+        if (ProofException is not null)
+        {
+            throw ProofException;
+        }
+
+        Proofs.Add(message);
+        return Task.CompletedTask;
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -426,7 +465,8 @@ internal static class NodeWorkerTestHarness
         FakeRuntimeReadinessProvider? readiness = null,
         NodeAssignmentCredentialSource? assignmentCredentials = null,
         FakeAssignmentJournal? journal = null,
-        ILogger<NodeWorker>? logger = null)
+        ILogger<NodeWorker>? logger = null,
+        IAssignmentRecoveryRunner? recoveryRunner = null)
     {
         var effectiveOptions = options ?? CreateOptions();
         var hub = new FakeNodeHub();
@@ -453,6 +493,10 @@ internal static class NodeWorkerTestHarness
             effectiveRootTerminalizer,
             effectiveAssignmentCredentials,
             effectiveRoots,
+            recoveryRunner ?? new AssignmentRecoveryRunner(
+                new SilentAssignmentRecoveryRuntime(),
+                Options.Create(effectiveOptions),
+                clock),
             logger ?? NullLogger<NodeWorker>.Instance);
         return (worker, hub, effectiveSpool, clock);
     }
@@ -492,6 +536,75 @@ internal sealed class MutableTimeProvider(DateTimeOffset start) : TimeProvider
 
     public override DateTimeOffset GetUtcNow() => _now;
 }
+
+internal sealed class SilentAssignmentRecoveryRuntime : IAssignmentRecoveryRuntime
+{
+    private static RecoveryKnownCountMessage Zero => new(0, null);
+
+    public List<string> Sequence { get; } = [];
+    public int JournalCalls { get; private set; }
+    public TaskCompletionSource? JournalGate { get; set; }
+
+    public async Task JournalRecoveryIntentAsync(
+        RecoverAssignmentCommandMessage command,
+        CancellationToken cancellationToken)
+    {
+        JournalCalls++;
+        Sequence.Add("journal");
+        if (JournalGate is not null)
+        {
+            await JournalGate.Task.WaitAsync(cancellationToken);
+        }
+    }
+
+    public Task CloseAdmissionAsync(
+        RecoverAssignmentCommandMessage command,
+        CancellationToken cancellationToken)
+    {
+        Sequence.Add("close");
+        return Task.CompletedTask;
+    }
+
+    public Task RequestCooperativeStopAsync(
+        RecoverAssignmentCommandMessage command,
+        CancellationToken cancellationToken)
+    {
+        Sequence.Add("stop");
+        return Task.CompletedTask;
+    }
+
+    public Task<AssignmentRecoveryProcessSnapshot> StopIsolatedProcessesAsync(
+        RecoverAssignmentCommandMessage command,
+        CancellationToken cancellationToken)
+        => Task.FromResult(new AssignmentRecoveryProcessSnapshot(Zero, []));
+
+    public Task DrainSupervisedOperationsAsync(
+        RecoverAssignmentCommandMessage command,
+        CancellationToken cancellationToken)
+        => Task.CompletedTask;
+
+    public Task<AssignmentRecoveryEventFlushResult> FlushAcknowledgedEventsAsync(
+        RecoverAssignmentCommandMessage command,
+        CancellationToken cancellationToken)
+        => Task.FromResult(new AssignmentRecoveryEventFlushResult(Zero, 0, null));
+
+    public Task<RecoveryRepositoryStatusMessage> InspectRepositoryAsync(
+        RecoverAssignmentCommandMessage command,
+        CancellationToken cancellationToken)
+        => Task.FromResult(new RecoveryRepositoryStatusMessage(
+            true, "head", "main", "clean", "clean", Zero, [], DateTimeOffset.UnixEpoch));
+
+    public Task<IReadOnlyList<RecoveryReservationDispositionMessage>> ResolveReservationsAsync(
+        RecoverAssignmentCommandMessage command,
+        CancellationToken cancellationToken)
+        => Task.FromResult<IReadOnlyList<RecoveryReservationDispositionMessage>>([]);
+
+    public Task<AssignmentRecoveryInventorySnapshot> ObserveInventoryAsync(
+        RecoverAssignmentCommandMessage command,
+        CancellationToken cancellationToken)
+        => Task.FromResult(new AssignmentRecoveryInventorySnapshot(Zero, Zero, Zero, Zero, Zero));
+}
+
 
 public class NodeAssignmentCredentialSourceTests
 {
@@ -1674,10 +1787,26 @@ public class AddPiNodeTests
             d.ServiceType == typeof(IRuntimeReadinessProvider)
             && d.ImplementationFactory is not null);
         Assert.Contains(services, d =>
+            d.ServiceType == typeof(PiCommandCenter.Node.Verification.IVerificationPolicyCatalog)
+            && d.ImplementationType == typeof(PiCommandCenter.Node.Verification.VerificationPolicyCatalogProvider));
+        Assert.Contains(services, d =>
 
             d.ServiceType == typeof(PiCommandCenter.Application.Git.ITrustedGitService)
             && d.ImplementationType == typeof(PiCommandCenter.Node.Git.RestrictedGitService));
         Assert.Contains(services, d => d.ServiceType == typeof(IHostedService));
+        Assert.Single(services, d => d.ServiceType == typeof(AssignmentProcessRegistry)
+            && d.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, d => d.ServiceType == typeof(NodeRecoveryRuntimeGateway)
+            && d.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, d => d.ServiceType == typeof(NodeAssignmentRecoveryRuntime)
+            && d.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, d => d.ServiceType == typeof(IAssignmentRecoveryRuntime)
+            && d.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, d => d.ServiceType == typeof(AssignmentRecoveryRunner)
+            && d.Lifetime == ServiceLifetime.Singleton);
+        Assert.Single(services, d => d.ServiceType == typeof(IAssignmentRecoveryRunner)
+            && d.Lifetime == ServiceLifetime.Singleton);
+
     }
 
     [Fact]
@@ -1719,5 +1848,147 @@ public class NodeWorkerStartupTests
             () => worker.LoadJournalAsync(CancellationToken.None));
 
         Assert.Equal(0, hub.StartCalls);
+    }
+}
+
+public class NodeWorkerRecoveryTests
+{
+    [Fact]
+    public async Task Recover_command_enters_runner_and_reports_progress_and_proof()
+    {
+        var runtime = new SilentAssignmentRecoveryRuntime();
+        var clock = new ImmediateTimeProvider();
+        var options = NodeWorkerTestHarness.CreateOptions();
+        var runner = new AssignmentRecoveryRunner(runtime, Options.Create(options), clock);
+        var (worker, hub, _, _) = NodeWorkerTestHarness.Create(
+            options: options,
+            recoveryRunner: runner);
+
+        var command = RecoverCommand(clock.GetUtcNow());
+        await hub.RaiseRecoverAsync(command);
+
+        Assert.Equal(1, runtime.JournalCalls);
+        Assert.Contains("journal", runtime.Sequence);
+        Assert.Contains("stop", runtime.Sequence);
+        Assert.True(runtime.Sequence.IndexOf("journal") < runtime.Sequence.IndexOf("stop"));
+        Assert.NotEmpty(hub.Progress);
+        Assert.Single(hub.Proofs);
+        Assert.Equal(command.RecoveryId, hub.Proofs[0].RecoveryId);
+    }
+
+    [Fact]
+    public async Task Duplicate_recover_attempt_shares_one_runtime_execution()
+    {
+        var runtime = new SilentAssignmentRecoveryRuntime
+        {
+            JournalGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var clock = new ImmediateTimeProvider();
+        var options = NodeWorkerTestHarness.CreateOptions();
+        var runner = new AssignmentRecoveryRunner(runtime, Options.Create(options), clock);
+        var (worker, hub, _, _) = NodeWorkerTestHarness.Create(
+            options: options,
+            recoveryRunner: runner);
+        var command = RecoverCommand(clock.GetUtcNow());
+
+        var first = hub.RaiseRecoverAsync(command);
+        var second = hub.RaiseRecoverAsync(command);
+        runtime.JournalGate.SetResult();
+        await Task.WhenAll(first, second);
+
+        Assert.Equal(1, runtime.JournalCalls);
+        Assert.Equal(1, runtime.JournalCalls);
+        Assert.NotEmpty(hub.Proofs);
+    }
+
+    [Fact]
+    public async Task Offline_progress_and_proof_do_not_throw()
+    {
+        var runtime = new SilentAssignmentRecoveryRuntime();
+        var clock = new ImmediateTimeProvider();
+        var options = NodeWorkerTestHarness.CreateOptions();
+        var runner = new AssignmentRecoveryRunner(runtime, Options.Create(options), clock);
+        var (worker, hub, _, _) = NodeWorkerTestHarness.Create(
+            options: options,
+            recoveryRunner: runner);
+        hub.ProgressException = new InvalidOperationException("offline");
+        hub.ProofException = new InvalidOperationException("offline");
+
+        await hub.RaiseRecoverAsync(RecoverCommand(clock.GetUtcNow()));
+
+        Assert.Equal(1, runtime.JournalCalls);
+    }
+
+    [Fact]
+    public async Task Recovered_assignment_is_not_restarted()
+    {
+        var roots = new FakeRootSessionSupervisor();
+        var runtime = new SilentAssignmentRecoveryRuntime();
+        var clock = new ImmediateTimeProvider();
+        var options = NodeWorkerTestHarness.CreateOptions();
+        var journal = new FakeAssignmentJournal();
+        var requestId = Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc");
+        var assignment = NodeWorkerTestHarness.Assignment(requestId, clock.GetUtcNow().AddMinutes(5));
+        journal.Entries[requestId] = new NodeAssignmentJournalEntry(
+            assignment,
+            AssignmentSupervisorState.StartBlocked,
+            RepositoryKnown: false,
+            PendingEventCount: 0);
+        var runner = new AssignmentRecoveryRunner(runtime, Options.Create(options), clock);
+        var (worker, hub, _, _) = NodeWorkerTestHarness.Create(
+            options: options,
+            roots: roots,
+            journal: journal,
+            recoveryRunner: runner);
+
+        await worker.LoadJournalAsync(CancellationToken.None);
+        await hub.RaiseRecoverAsync(RecoverCommand(clock.GetUtcNow(), requestId));
+        await worker.RunTickAsync(clock.GetUtcNow(), CancellationToken.None);
+
+        Assert.Empty(roots.StartedAssignments);
+    }
+
+    private static RecoverAssignmentCommandMessage RecoverCommand(
+        DateTimeOffset now,
+        Guid? requestId = null) =>
+        new(
+            Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            1,
+            Guid.Parse("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+            requestId ?? Guid.Parse("cccccccc-cccc-cccc-cccc-cccccccccccc"),
+            "claim-token",
+            7,
+            now.AddMinutes(5));
+}
+
+internal sealed class ImmediateTimeProvider : TimeProvider
+{
+    private readonly DateTimeOffset _now = new(2026, 9, 6, 12, 0, 0, TimeSpan.Zero);
+
+    public override DateTimeOffset GetUtcNow() => _now;
+
+    public override ITimer CreateTimer(
+        TimerCallback callback,
+        object? state,
+        TimeSpan dueTime,
+        TimeSpan period)
+    {
+        if (dueTime > TimeSpan.Zero && dueTime <= TimeSpan.FromSeconds(30))
+        {
+            callback(state);
+        }
+
+        return new NoopTimer();
+    }
+
+    private sealed class NoopTimer : ITimer
+    {
+        public bool Change(TimeSpan dueTime, TimeSpan period) => true;
+
+        public void Dispose()
+        {
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

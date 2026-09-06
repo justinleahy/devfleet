@@ -223,19 +223,11 @@ internal sealed class RuntimeReadinessProbe : IRuntimeReadinessProbe
         IReadOnlySet<string> available,
         string availableStatus = RuntimeReadinessStatuses.Ready)
     {
-        var availableProviders = available
-            .Select(AgentModelSelector.Parse)
-            .Select(model => model.Provider)
-            .ToHashSet(StringComparer.Ordinal);
         return candidates.ToDictionary(
             candidate => candidate.Value,
-            candidate =>
-            {
-                var isAvailable = candidate.IsProviderDefault
-                    ? availableProviders.Contains(candidate.Provider)
-                    : available.Contains(candidate.Value);
-                return isAvailable ? availableStatus : RuntimeReadinessStatuses.Unavailable;
-            },
+            candidate => available.Contains(candidate.Value)
+                ? availableStatus
+                : RuntimeReadinessStatuses.Unavailable,
             StringComparer.Ordinal);
     }
 
@@ -243,18 +235,11 @@ internal sealed class RuntimeReadinessProbe : IRuntimeReadinessProbe
         IEnumerable<AgentModelSelector> candidates,
         PiCatalogEvidence evidence)
     {
-        var availableProviders = evidence.Available
-            .Select(AgentModelSelector.Parse)
-            .Select(model => model.Provider)
-            .ToHashSet(StringComparer.Ordinal);
         return candidates.ToDictionary(
             candidate => candidate.Value,
             candidate =>
             {
-                var isAvailable = candidate.IsProviderDefault
-                    ? availableProviders.Contains(candidate.Provider)
-                    : evidence.Available.Contains(candidate.Value);
-                if (!isAvailable)
+                if (!evidence.Available.Contains(candidate.Value))
                 {
                     return RuntimeReadinessStatuses.Unavailable;
                 }

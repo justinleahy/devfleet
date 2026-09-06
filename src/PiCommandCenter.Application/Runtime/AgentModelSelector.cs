@@ -8,15 +8,11 @@ namespace PiCommandCenter.Application.Runtime;
 /// adapter: the reserved official-harness providers (<see cref="OfficialHarnessProviders"/>) route
 /// to their own adapters and every other syntactically valid provider uses the Pi runtime
 /// (<see cref="UsesPiRuntime"/>). The model id after the first <c>/</c> is handed to that provider
-/// verbatim and may itself contain slashes. The model id <see cref="DefaultModelId"/> asks the
-/// provider for its default model.
+/// verbatim, may itself contain slashes, and must name an explicit provider-native model.
 /// </summary>
 public sealed record AgentModelSelector
 {
     public const int MaxLength = 256;
-
-    /// <summary>Reserved model id meaning "the provider's default model".</summary>
-    public const string DefaultModelId = "default";
 
     public const string Codex = "codex";
     public const string ClaudeCode = "claude-code";
@@ -52,8 +48,6 @@ public sealed record AgentModelSelector
 
     /// <summary>Provider-native model id, everything after the first <c>/</c>.</summary>
     public string ModelId { get; }
-
-    public bool IsProviderDefault => ModelId == DefaultModelId;
 
     /// <summary>True when this provider is served by the Pi runtime adapter.</summary>
     public bool UsesPiRuntime => !OfficialHarnessProviders.Contains(Provider, StringComparer.Ordinal);
@@ -110,6 +104,12 @@ public sealed record AgentModelSelector
         if (string.IsNullOrWhiteSpace(provider) || string.IsNullOrWhiteSpace(modelId))
         {
             error = "Model selector must name both a provider and a model.";
+            return false;
+        }
+
+        if (modelId == "default")
+        {
+            error = "Model selector must name an explicit model; model id 'default' is not allowed.";
             return false;
         }
 

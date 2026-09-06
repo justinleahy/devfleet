@@ -65,17 +65,25 @@ public class ReservationScopeTests
     }
 
     [Fact]
-    public void Resource_conflicts_only_with_the_same_resource_name()
+    public void Project_build_conflicts_with_every_source_scope_and_same_resource()
     {
-        var build = ReservationScope.Create(ReservationScopeKind.Resource, "project-build");
-        var buildAgain = ReservationScope.Create(ReservationScopeKind.Resource, "project-build");
+        var build = ReservationScope.Create(ReservationScopeKind.Resource, ReservationScope.ProjectBuildResource);
+        var buildAgain = ReservationScope.Create(ReservationScopeKind.Resource, ReservationScope.ProjectBuildResource);
         var format = ReservationScope.Create(ReservationScopeKind.Resource, "project-format");
-        var file = ReservationScope.Create(ReservationScopeKind.File, "project-build");
+        var file = ReservationScope.Create(ReservationScopeKind.File, "src/a.cs");
+        var directory = ReservationScope.Create(ReservationScopeKind.Directory, "src/");
+        var fileNamedLikeBuild = ReservationScope.Create(ReservationScopeKind.File, ReservationScope.ProjectBuildResource);
 
         Assert.True(ReservationScope.ConflictsWith(build, buildAgain));
+        Assert.True(ReservationScope.ConflictsWith(build, file));
+        Assert.True(ReservationScope.ConflictsWith(file, build));
+        Assert.True(ReservationScope.ConflictsWith(build, directory));
+        Assert.True(ReservationScope.ConflictsWith(directory, build));
+        Assert.True(ReservationScope.ConflictsWith(build, fileNamedLikeBuild));
         Assert.False(ReservationScope.ConflictsWith(build, format));
-        Assert.False(ReservationScope.ConflictsWith(build, file));
-        Assert.False(ReservationScope.ConflictsWith(file, build));
+        Assert.False(ReservationScope.ConflictsWith(format, file));
+        Assert.False(ReservationScope.ConflictsWith(file, format));
+        Assert.False(ReservationScope.ConflictsWith(format, directory));
     }
 
     [Fact]

@@ -148,7 +148,7 @@
                         }
                         else
                         {
-                            <p class="window-none">No usage window reported.</p>
+                            <p class="window-none">@provider.EmptyMessage</p>
                         }
                     </article>
                 }
@@ -219,6 +219,9 @@
         "opencode-go" => ("opencode-go", "OpenCode"),
         "cursor" => ("cursor", "Cursor"),
         "google-antigravity" => ("google-antigravity", "Google Antigravity"),
+        "qwen-token-plan" => ("qwen-token-plan", "Qwen Token Plan"),
+        "qwen-token-plan-individual" => ("qwen-token-plan-individual", "Qwen Token Plan Individual"),
+        "qwen-token-plan-cn" => ("qwen-token-plan-cn", "Qwen Token Plan CN"),
         _ => ("unknown", "Unknown provider"),
     };
 
@@ -385,7 +388,8 @@
     private sealed record ProviderView(
         string Provider,
         string HeadingId,
-        IReadOnlyList<WindowView> Windows)
+        IReadOnlyList<WindowView> Windows,
+        string EmptyMessage)
     {
         public static ProviderView Build(ProviderSubscriptionUsageMessage provider, int index, DateTimeOffset now)
         {
@@ -401,8 +405,23 @@
                 windows = built;
             }
 
-            return new ProviderView(name, $"provider-{index}-{key}", windows);
+            return new ProviderView(
+                name,
+                $"provider-{index}-{key}",
+                windows,
+                EmptyState(provider.Provider, provider.Diagnostic));
         }
+
+        /// <summary>
+        /// Exact Qwen Token Plan ids with the sidecar's console-only diagnostic get a specific
+        /// remaining-quota notice. Every other empty window keeps the generic line. Diagnostics
+        /// themselves are never rendered.
+        /// </summary>
+        private static string EmptyState(string? provider, string? diagnostic) =>
+            diagnostic == "quota_console_only"
+            && provider is "qwen-token-plan" or "qwen-token-plan-individual" or "qwen-token-plan-cn"
+                ? "Alibaba exposes remaining Token Plan usage only in its console."
+                : "No usage window reported.";
 
         private static bool TryBuildWindows(
             IReadOnlyList<SubscriptionUsageWindowMessage> reported,
@@ -441,12 +460,25 @@
                     label,
                     (int)Math.Round(usedPercent, MidpointRounding.AwayFromZero),
                     window.ResetsAt is { } resets
-                        ? $"Resets {Utc(resets)} ({TimeText.Deadline(resets, now)})"
+                        ? $"Resets {Utc(resets)} ({ResetDeadline(resets, now)})"
                         : "Reset not reported");
             }
 
             windows = built;
             return true;
         }
+    }
+
+    private static string ResetDeadline(DateTimeOffset deadline, DateTimeOffset now)
+    {
+        var remaining = deadline - now;
+        if (remaining <= TimeSpan.Zero)
+        {
+            return TimeText.Deadline(deadline, now);
+        }
+
+        return remaining.TotalDays >= 1
+            ? $"in {(int)remaining.TotalDays}d {remaining.Hours}h"
+            : TimeText.Deadline(deadline, now);
     }
 }

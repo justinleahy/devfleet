@@ -1,0 +1,625 @@
+/* Phone-first recovery panel. Defaults assume a 320px viewport: every fact, target, stage, and
+   control occupies its own full-width row, and every interactive control is at least 44px tall.
+   The wider breakpoints fold those rows into label/value pairs and inline stage rows for desktop
+   density. Nothing here is decorative: the panel is read under time pressure on a phone. */
+
+.recovery {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+    padding: calc(var(--design-unit) * 3px);
+    min-width: 0;
+    border-inline-start: 3px solid var(--accent-fill-rest);
+}
+
+/* Head: identity stacked above the badges on a phone, one row from tablet up. */
+.recovery-head {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.recovery-identity {
+    min-width: 0;
+}
+
+.recovery-eyebrow {
+    margin: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.recovery-head h2 {
+    margin: 0;
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.recovery-lead {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+.state-block {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--design-unit) * 3px);
+    min-height: 44px;
+    color: var(--neutral-foreground-hint);
+}
+
+.panel-empty {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+/* Grouped sections: divider-separated bands rather than nested cards. */
+.group {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    padding-block-start: calc(var(--design-unit) * 3px);
+    border-block-start: 1px solid var(--neutral-stroke-divider-rest);
+    min-width: 0;
+}
+
+.group-title {
+    margin: 0;
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+    font-weight: 600;
+}
+
+.group-lead,
+.group-note {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.subgroup {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
+}
+
+.section-label {
+    margin: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+/* Facts: one column of stacked label/value blocks on a phone. */
+.facts {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 2px);
+    margin: 0;
+    min-width: 0;
+}
+
+.fact {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 0.5px);
+    min-width: 0;
+}
+
+.facts dt {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.facts dd {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.facts dd.num,
+.facts dd .stamp {
+    font-variant-numeric: tabular-nums;
+}
+
+.facts dd .stamp {
+    white-space: nowrap;
+}
+
+.mono {
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-size: var(--type-ramp-minus-1-font-size);
+    overflow-wrap: anywhere;
+    word-break: break-word;
+}
+
+.hint {
+    color: var(--neutral-foreground-hint);
+}
+
+.aside {
+    display: block;
+    color: var(--neutral-foreground-hint);
+}
+
+/* Unreported facts read as absent evidence, never as a zero or a clean result. */
+.unknown {
+    color: var(--neutral-foreground-hint);
+    font-style: italic;
+}
+
+.overdue {
+    color: var(--warning);
+    font-weight: 600;
+}
+
+/* Target lists: one bordered row per assignment or reservation. */
+.target-list,
+.blocker-list,
+.outcome-list,
+.affected-list,
+.guidance-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.target-list {
+    border-block-start: 1px solid var(--neutral-stroke-divider-rest);
+}
+
+.target {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    padding-block: calc(var(--design-unit) * 3px);
+    border-block-end: 1px solid var(--neutral-stroke-divider-rest);
+    min-width: 0;
+}
+
+.target-head {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
+}
+
+.target-title {
+    font-weight: 600;
+    min-width: 0;
+}
+
+/* Stages: named positions in the documented procedure, never a progress bar. */
+.stages {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: stage;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.stage {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 0.5px);
+    padding: calc(var(--design-unit) * 2px) 0 calc(var(--design-unit) * 2px) calc(var(--design-unit) * 4px);
+    border-inline-start: 3px solid var(--neutral-stroke-divider-rest);
+    counter-increment: stage;
+    min-width: 0;
+}
+
+.stage-name::before {
+    content: counter(stage) ". ";
+    color: var(--neutral-foreground-hint);
+    font-variant-numeric: tabular-nums;
+}
+
+.stage-state {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.stage.is-passed {
+    border-inline-start-color: var(--accent-fill-rest);
+}
+
+.stage.is-in-progress {
+    border-inline-start-color: var(--accent-fill-rest);
+}
+
+.stage.is-in-progress .stage-name {
+    font-weight: 600;
+}
+
+.stage.is-stalled-here {
+    border-inline-start-color: var(--warning);
+}
+
+.stage.is-stalled-here .stage-name,
+.stage.is-stalled-here .stage-state {
+    color: var(--warning);
+    font-weight: 600;
+}
+
+/* Blockers: the stable code stays visible beside its operator description. */
+.blocker,
+.outcome,
+.affected {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 0.5px);
+    padding-block: calc(var(--design-unit) * 2px);
+    border-block-end: 1px solid var(--neutral-stroke-divider-rest);
+    min-width: 0;
+}
+
+.blocker-code {
+    color: var(--warning);
+    font-weight: 600;
+}
+
+.blocker-text {
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.outcome-kind,
+.affected-kind {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.outcome-state,
+.affected-state {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+/* Intervention: warning-framed local steps, visually separate from the read-only body. */
+.intervention {
+    gap: calc(var(--design-unit) * 2px);
+    padding: calc(var(--design-unit) * 3px);
+    background: var(--neutral-fill-secondary-rest);
+    border: 1px solid var(--warning);
+    border-inline-start-width: 3px;
+    border-block-start-width: 1px;
+    border-radius: calc(var(--control-corner-radius) * 1px);
+}
+
+.intervention-eyebrow {
+    margin: 0;
+    color: var(--warning);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.steps {
+    margin: 0;
+    padding-inline-start: calc(var(--design-unit) * 5px);
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1.5px);
+    max-width: 68ch;
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.guidance-list {
+    gap: calc(var(--design-unit) * 1.5px);
+    max-width: 68ch;
+}
+
+.guidance-list li {
+    padding-inline-start: calc(var(--design-unit) * 3px);
+    border-inline-start: 2px solid var(--warning);
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+/* Confirmation: the exact mandated sentence is quoted, not paraphrased or truncated. */
+.confirm {
+    gap: calc(var(--design-unit) * 2px);
+    padding: calc(var(--design-unit) * 3px);
+    background: var(--neutral-fill-secondary-rest);
+    border: 1px solid var(--accent-fill-rest);
+    border-inline-start-width: 3px;
+    border-block-start-width: 1px;
+    border-radius: calc(var(--control-corner-radius) * 1px);
+}
+
+.confirm-eyebrow {
+    margin: 0;
+    color: var(--accent-foreground-rest);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.confirm-text {
+    margin: 0;
+    padding-inline-start: calc(var(--design-unit) * 3px);
+    border-inline-start: 2px solid var(--accent-fill-rest);
+    max-width: 68ch;
+    font-size: var(--type-ramp-base-font-size);
+    line-height: var(--type-ramp-base-line-height);
+}
+
+.confirm ::deep .field {
+    width: 100%;
+    min-width: 0;
+}
+
+.confirm ::deep .field-wide {
+    display: block;
+}
+
+/* Attestation: the most dangerous control in the panel, framed in the error accent so it never reads
+   as one more neutral form. Fields stack full width on a phone; every control clears 44px. */
+.attest {
+    gap: calc(var(--design-unit) * 2px);
+    padding: calc(var(--design-unit) * 3px);
+    background: var(--neutral-fill-secondary-rest);
+    border: 1px solid var(--error);
+    border-inline-start-width: 3px;
+    border-block-start-width: 1px;
+    border-radius: calc(var(--control-corner-radius) * 1px);
+}
+
+.attest-eyebrow {
+    margin: 0;
+    color: var(--error);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+/* Provenance is a standing warning, not a dismissible aside: it stays beside the fields. */
+.attest-provenance {
+    margin: 0;
+    padding-inline-start: calc(var(--design-unit) * 3px);
+    border-inline-start: 2px solid var(--error);
+    max-width: 68ch;
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.attest ::deep .field {
+    width: 100%;
+    min-width: 0;
+}
+
+.attest ::deep .field-wide {
+    display: block;
+}
+
+.attest-row {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.attest-row ::deep .attest-now,
+.attest-row ::deep .attest-now::part(control) {
+    width: 100%;
+    min-height: 44px;
+}
+
+.attest-checks {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+}
+
+/* Each confirmation is its own thumb-sized row: no accidental grouped toggling. */
+.attest-check {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    max-width: 68ch;
+}
+
+.attest-gaps {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--error);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+/* Actions: full-width, thumb-reachable controls on a phone. */
+.actions {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.actions ::deep .action,
+.actions ::deep .action::part(control) {
+    width: 100%;
+    min-height: 44px;
+}
+
+.action-note {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.actions-secondary {
+    padding-block-start: calc(var(--design-unit) * 3px);
+    border-block-start: 1px solid var(--neutral-stroke-divider-rest);
+}
+
+@media (min-width: 600px) {
+    .recovery {
+        padding: calc(var(--design-unit) * 4px);
+    }
+
+    /* Facts become compact label/value pairs. */
+    .fact {
+        grid-template-columns: 20ch minmax(0, 1fr);
+        column-gap: calc(var(--design-unit) * 3px);
+        align-items: baseline;
+    }
+
+    /* Stage name and its state sit on one row. */
+    .stage {
+        grid-template-columns: minmax(0, 1fr) 14ch;
+        column-gap: calc(var(--design-unit) * 3px);
+        align-items: baseline;
+    }
+
+    .stage-state {
+        text-align: end;
+    }
+
+    .blocker {
+        grid-template-columns: 26ch minmax(0, 1fr);
+        column-gap: calc(var(--design-unit) * 3px);
+        align-items: baseline;
+    }
+
+    .outcome,
+    .affected {
+        grid-template-columns: 12ch minmax(0, 1fr);
+        column-gap: calc(var(--design-unit) * 3px);
+        align-items: baseline;
+    }
+
+    .outcome-state,
+    .outcome-result,
+    .affected-state {
+        grid-column: 2;
+    }
+
+    /* Collection time and its "now" control share a row once both fit. */
+    .attest-row {
+        flex-direction: row;
+        align-items: flex-end;
+    }
+
+    .attest-row ::deep .field-wide {
+        flex: 1 1 34ch;
+    }
+
+    .attest-row ::deep .attest-now,
+    .attest-row ::deep .attest-now::part(control) {
+        width: auto;
+        min-width: 18ch;
+    }
+
+    .actions {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+
+    .actions ::deep .action,
+    .actions ::deep .action::part(control) {
+        width: auto;
+        min-width: 24ch;
+    }
+
+    .action-note {
+        flex: 1 1 30ch;
+    }
+}
+
+@media (min-width: 960px) {
+    /* Heading and badges share one row once there is room for both. */
+    .recovery-head {
+        flex-direction: row;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .badge-row {
+        justify-content: flex-end;
+        flex-shrink: 0;
+    }
+
+    .target-head {
+        flex-direction: row;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: calc(var(--design-unit) * 3px);
+    }
+}
+
+@media (min-width: 1280px) {
+    /* Desktop density: two label/value pairs per row, prose facts spanning both. */
+    .facts {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        column-gap: calc(var(--design-unit) * 6px);
+    }
+
+    .fact-wide {
+        grid-column: 1 / -1;
+    }
+}

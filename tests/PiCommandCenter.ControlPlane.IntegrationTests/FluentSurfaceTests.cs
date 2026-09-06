@@ -162,6 +162,12 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
                 assignment.MarkRunning(now);
                 assignment.MarkRecoveryRequired(now);
                 break;
+            case ExecutionAssignmentState.Cancelling:
+                request.BeginPlanning(now);
+                request.BeginExecuting(now);
+                assignment.MarkRunning(now);
+                assignment.BeginCancelling(now);
+                break;
             case ExecutionAssignmentState.Completed:
                 AdvanceToVerifying(request, now);
                 request.Complete(now);
@@ -423,6 +429,71 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
     }
 
     [Fact]
+    public async Task Project_page_offers_the_recovery_action_and_hosts_the_recovery_panel()
+    {
+        var client = _fixture.CreateClient();
+        var projectId = await RegisterProjectAsync(client, "Recovery entry project");
+
+        var html = await GetHtmlAsync(client, $"/projects/{projectId}");
+
+        // The action and the panel it addresses exist for any project, stuck or not.
+        Assert.Contains("Recover project", html);
+        Assert.Contains("#project-recovery", html);
+        Assert.Contains("Project recovery", html);
+    }
+
+    [Theory]
+    [InlineData(ExecutionAssignmentState.RecoveryRequired)]
+    [InlineData(ExecutionAssignmentState.Cancelling)]
+    [InlineData(ExecutionAssignmentState.Finalizing)]
+    public async Task Request_page_links_a_retained_assignment_to_the_project_recovery_panel(
+        ExecutionAssignmentState state)
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedAssignmentAsync(
+            client,
+            $"Recovery link {state} project",
+            $"retained {state} request",
+            state);
+
+        var html = await GetHtmlAsync(client, $"/requests/{seed.Request.RequestId}");
+
+        Assert.Contains("Recover project", html);
+        Assert.Contains($"/projects/{seed.Request.ProjectId}#project-recovery", html);
+        AssertClaimTokenIsNotRendered(html, seed);
+    }
+
+    [Fact]
+    public async Task Project_page_calls_out_a_retained_recovery_required_assignment()
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedAssignmentAsync(
+            client,
+            "Recovery callout project",
+            "recovery callout request",
+            ExecutionAssignmentState.RecoveryRequired);
+
+        var html = await GetHtmlAsync(client, $"/projects/{seed.Request.ProjectId}");
+
+        Assert.Contains("This project needs recovery", html);
+        Assert.Contains("Open project recovery", html);
+        Assert.Contains("#project-recovery", html);
+    }
+
+    [Fact]
+    public async Task Queued_request_without_an_assignment_keeps_its_scheduling_fix_and_no_recovery_callout()
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedBoundRequestAsync(client, "No recovery needed", "queued waiting request");
+
+        var html = await GetHtmlAsync(client, $"/projects/{seed.ProjectId}");
+
+        // The offline-node scheduling reason is the specific fix; recovery is not implied.
+        Assert.Contains("Reconnect the designated node.", html);
+        Assert.DoesNotContain("Open project recovery", html);
+    }
+
+    [Fact]
     public async Task Terminal_request_retains_the_original_assignment_history_after_the_binding_changes()
     {
         var client = _fixture.CreateClient();
@@ -641,6 +712,125 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
         Assert.Contains("&lt; 0.0001", html);
         Assert.DoesNotContain("0.0000", html);
     }
+
+    /// <summary>
+    /// How many times <paramref name="needle"/> occurs, so a value that must be rendered twice —
+    /// once as the recorded original and once as an editable draft field — can be told apart from
+    /// a value that is only displayed.
+    /// </summary>
+    private static int Occurrences(string html, string needle)
+    {
+        var count = 0;
+        var index = html.IndexOf(needle, StringComparison.Ordinal);
+        while (index >= 0)
+        {
+            count++;
+            index = html.IndexOf(needle, index + needle.Length, StringComparison.Ordinal);
+        }
+
+        return count;
+    }
+
+    [Fact]
+    public async Task Terminal_request_offers_an_editable_prefilled_retry_as_a_new_queued_request()
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedAssignmentAsync(
+            client,
+            "Retry offer project",
+            "completed request worth retrying",
+            ExecutionAssignmentState.Completed);
+
+        var html = await GetHtmlAsync(client, $"/requests/{seed.Request.RequestId}");
+
+        Assert.Contains("Retry as new request", html);
+        Assert.Contains("Edit and queue the retry", html);
+        Assert.Contains("Queue linked retry", html);
+
+        // The retry is ordinary queued work, never a resumption of the terminal execution.
+        Assert.Contains("execution cannot resume", html);
+        Assert.Contains("the same scheduling eligibility as any other queued work", html);
+
+        // The project recovery hold is a separate act the operator still has to perform.
+        Assert.Contains("A project recovery hold is separate and stays in force", html);
+        Assert.Contains("must be resumed from", html);
+        Assert.Contains($"/projects/{seed.Request.ProjectId}#project-recovery", html);
+
+        // Prefilled: the seeded prompt is rendered once as the recorded original and again as
+        // the editable draft field.
+        Assert.True(
+            Occurrences(html, "Exercise the operator placement surface.") >= 2,
+            "the retry draft must be prefilled with the original prompt");
+        Assert.Contains("completed request worth retrying", html);
+
+        // Every dimension stays editable, so each enum offers the choices the original did not use.
+        Assert.Contains("Analysis", html);
+        Assert.Contains("Urgent", html);
+        AssertClaimTokenIsNotRendered(html, seed);
+    }
+
+    [Fact]
+    public async Task Request_with_a_live_execution_is_offered_no_retry()
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedAssignmentAsync(
+            client,
+            "Retry absent project",
+            "finalizing request without a retry",
+            ExecutionAssignmentState.Finalizing);
+
+        var html = await GetHtmlAsync(client, $"/requests/{seed.Request.RequestId}");
+
+        Assert.Contains("Assignment is finalizing", html);
+        Assert.DoesNotContain("Retry as new request", html);
+        Assert.DoesNotContain("Edit and queue the retry", html);
+        Assert.DoesNotContain("Queue linked retry", html);
+    }
+
+    /// <summary>
+    /// A queued retry linked to a request in the same project, persisted the way the queue
+    /// persists one, so the request page renders the link from projected state alone.
+    /// </summary>
+    private async Task<LinkedRetrySeed> SeedLinkedRetryAsync(HttpClient client, string displayName)
+    {
+        var bound = await SeedBoundRequestAsync(client, displayName, "original request of the retry");
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
+        var original = await db.WorkRequests.SingleAsync(
+            candidate => candidate.Id == new WorkRequestId(bound.RequestId));
+        var retry = WorkRequest.Enqueue(
+            original.ProjectId,
+            WorkRequestKind.Development,
+            RequestPriority.Normal,
+            RiskLevel.Standard,
+            "linked retry request",
+            "Queue the retry drafted from the original request.",
+            DateTimeOffset.UtcNow,
+            original.Id);
+
+        db.WorkRequests.Add(retry);
+        await db.SaveChangesAsync();
+        return new LinkedRetrySeed(bound.ProjectId, bound.RequestId, retry.Id.Value);
+    }
+
+    [Fact]
+    public async Task Linked_retry_names_the_request_it_was_drafted_from_and_claims_nothing_from_it()
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedLinkedRetryAsync(client, "Retry linkage project");
+
+        var html = await GetHtmlAsync(client, $"/requests/{seed.RetryId}");
+
+        Assert.Contains("Retry of", html);
+        Assert.Contains($"/requests/{seed.OriginalId}", html);
+        Assert.Contains("the request this retry was drafted from", html);
+        Assert.Contains("never resumed that execution", html);
+
+        // The retry is queued, not terminal, so it is offered no retry of its own.
+        Assert.DoesNotContain("Queue linked retry", html);
+    }
+
+    private sealed record LinkedRetrySeed(Guid ProjectId, Guid OriginalId, Guid RetryId);
 
     private sealed record BoundRequestSeed(
         Guid ProjectId,

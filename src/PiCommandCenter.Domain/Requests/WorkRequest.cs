@@ -18,7 +18,8 @@ public sealed class WorkRequest
         WorkRequestStatus? blockedPhase,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt,
-        long version)
+        long version,
+        WorkRequestId? originalRequestId)
     {
         Id = id;
         ProjectId = projectId;
@@ -32,6 +33,7 @@ public sealed class WorkRequest
         CreatedAt = createdAt;
         UpdatedAt = updatedAt;
         Version = version;
+        OriginalRequestId = originalRequestId;
     }
 
     public WorkRequestId Id { get; }
@@ -67,6 +69,12 @@ public sealed class WorkRequest
     public long Version { get; private set; }
 
     /// <summary>
+    /// Immutable link to the request this retry was drafted from. Null for ordinary enqueue.
+    /// Does not confer assignment, session, reservation, or execution authority.
+    /// </summary>
+    public WorkRequestId? OriginalRequestId { get; }
+
+    /// <summary>
     /// Creates a new work request in the <see cref="WorkRequestStatus.Queued"/> state — the only
     /// legal way to enter the queue. Throws <see cref="ArgumentException"/> on invalid input.
     /// </summary>
@@ -77,7 +85,8 @@ public sealed class WorkRequest
         RiskLevel riskLevel,
         string title,
         string prompt,
-        DateTimeOffset createdAt)
+        DateTimeOffset createdAt,
+        WorkRequestId? originalRequestId = null)
     {
         var (cleanTitle, cleanPrompt) = Normalize(title, prompt);
 
@@ -93,7 +102,8 @@ public sealed class WorkRequest
             blockedPhase: null,
             createdAt,
             createdAt,
-            version: 1);
+            version: 1,
+            originalRequestId);
     }
 
     /// <summary>
@@ -112,7 +122,8 @@ public sealed class WorkRequest
         WorkRequestStatus? blockedPhase,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt,
-        long version)
+        long version,
+        WorkRequestId? originalRequestId = null)
     {
         var (cleanTitle, cleanPrompt) = Normalize(title, prompt);
         if (status == WorkRequestStatus.Blocked && blockedPhase is null)
@@ -137,7 +148,8 @@ public sealed class WorkRequest
             blockedPhase,
             createdAt,
             updatedAt,
-            version);
+            version,
+            originalRequestId);
     }
 
     /// <summary>Transitions a queued request into <see cref="WorkRequestStatus.Starting"/>.</summary>

@@ -8,6 +8,7 @@ using PiCommandCenter.Application.Reservations;
 using PiCommandCenter.Domain.Reservations;
 using PiCommandCenter.Application.Transport;
 using PiCommandCenter.Application.Verification;
+using PiCommandCenter.Application.Recovery;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Mail;
@@ -36,11 +37,22 @@ public static class NodeTransportLimits
     public const int MaxMailInboxCount = 200;
     public const int MaxSessionIdLength = 128;
     public const int MaxVerificationIdLength = 128;
+    public const int MaxVerificationFingerprintLength = VerificationRun.MaxFingerprintLength;
+    public const int MaxVerificationPolicyRevisionLength = VerificationRun.MaxPolicyRevisionLength;
     public const int MaxVerificationOutputBytes = 16_384;
     public const int MaxArtifactPathBytes = 1024;
+    public const int MaxVerificationReplayRuns = VerificationReplayLimits.MaxRuns;
     public const int MaxCompletionSummaryBytes = 64 * 1024;
     public const int MaxChangedFiles = 500;
     public const int MaxReviewFindings = 200;
+    public const int MaxRecoveryClaimTokenLength = 128;
+    public const int MaxRecoveryStageLength = 128;
+    public const int MaxRecoveryReasonCodes = 16;
+    public const int MaxRecoveryReasonCodeLength = 64;
+    public const int MaxRecoveryProcessIdentities = 32;
+    public const int MaxRecoveryReservationDispositions = 32;
+    public const int MaxRecoveryInterruptedIndicators = 16;
+    public const int MaxRecoverySummaryLength = 256;
 }
 
 /// <summary>
@@ -58,9 +70,12 @@ public sealed class NodeHub(
     IVerificationRunStore verificationRuns,
     IAssignmentTerminalizationService terminalization,
     IAssignmentOperationAuthorizer assignmentAuthorizer,
+    IRecoveryAttemptCoordinator recoveryAttempts,
+    IRecoveryAttemptDispatcher recoveryDispatcher,
     NodeConnectionDirectory nodeConnections,
     TimeProvider timeProvider,
     ILogger<NodeHub> logger) : Hub
+
 {
     public async Task<NodeDto> Register(NodeRegistrationMessage message)
     {
@@ -76,7 +91,10 @@ public sealed class NodeHub(
             timeProvider.GetUtcNow(),
             Context.ConnectionAborted).ConfigureAwait(false);
         nodeConnections.Bind(nodeId, Context.ConnectionId);
+        await recoveryDispatcher.DispatchForNodeAsync(new NodeId(nodeId), Context.ConnectionAborted)
+            .ConfigureAwait(false);
         return registered;
+
     }
 
     public async Task<NodeDto> Heartbeat(NodeHeartbeatMessage message)
@@ -569,6 +587,28 @@ public sealed class NodeHub(
             throw new HubException($"Unknown verification status '{message.Status}'.");
         }
 
+        if (string.IsNullOrWhiteSpace(message.Fingerprint)
+            || message.Fingerprint.Length > NodeTransportLimits.MaxVerificationFingerprintLength)
+        {
+            throw new HubException("Verification fingerprint is required and bounded.");
+        }
+
+        if (string.IsNullOrWhiteSpace(message.PolicyRevision)
+            || message.PolicyRevision.Length > NodeTransportLimits.MaxVerificationPolicyRevisionLength)
+        {
+            throw new HubException("Verification policy revision is required and bounded.");
+        }
+
+        if (!Enum.IsDefined(typeof(VerificationRunKind), message.RunKind))
+        {
+            throw new HubException($"Unknown verification run kind '{message.RunKind}'.");
+        }
+
+        if (message.AttemptId == Guid.Empty)
+        {
+            throw new HubException("Verification attempt id is required.");
+        }
+
         try
         {
             var recorded = await verificationRuns.RecordAsync(
@@ -583,7 +623,11 @@ public sealed class NodeHub(
                     message.CompletedAt,
                     message.OutputSummary,
                     message.OutputArtifactPath,
-                    message.Mandatory),
+                    message.Mandatory,
+                    message.Fingerprint.Trim(),
+                    message.PolicyRevision.Trim(),
+                    (VerificationRunKind)message.RunKind,
+                    message.AttemptId),
                 Context.ConnectionAborted).ConfigureAwait(false);
 
             return ToMessage(message.CorrelationId, message.ProjectId, message.SessionId, recorded);
@@ -592,6 +636,37 @@ public sealed class NodeHub(
         {
             throw new HubException(ex.InnerException?.Message ?? ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Bounded newest-first replay of persisted final and intermediate runs for the
+    /// authenticated assignment and session. Artifact paths are never returned.
+    /// </summary>
+    public async Task<VerificationRunReplayListMessage> ListVerificationRuns(ListVerificationRunsMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        RequireCorrelation(message.CorrelationId, message.ProjectId, message.RequestId, message.SessionId);
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.SessionId).ConfigureAwait(false);
+
+        var runs = await verificationRuns.ListRecentAsync(
+            new WorkRequestId(message.RequestId),
+            NodeTransportLimits.MaxVerificationReplayRuns,
+            Context.ConnectionAborted).ConfigureAwait(false);
+
+        return new VerificationRunReplayListMessage(
+            message.CorrelationId,
+            message.ProjectId,
+            message.RequestId,
+            message.SessionId,
+            NodeTransportLimits.MaxVerificationReplayRuns,
+            [.. runs.Select(run => ToReplayMessage(
+                message.CorrelationId, message.ProjectId, message.SessionId, run))]);
     }
 
     /// <summary>
@@ -690,6 +765,32 @@ public sealed class NodeHub(
         }
     }
 
+    /// <summary>
+    /// Node-attested recovery progress. Identity comes from the authenticated
+    /// connection, never from the payload.
+    /// </summary>
+    public async Task ReportRecoveryProgress(AssignmentRecoveryProgressMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var nodeId = GetAuthenticatedNodeId();
+        RequireRecoveryProgressBounds(message);
+        await recoveryAttempts.AcceptProgressAsync(nodeId, message, Context.ConnectionAborted)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Node-attested recovery proof. Identity comes from the authenticated
+    /// connection, never from the payload.
+    /// </summary>
+    public async Task<RecoveryProofDecisionMessage> ReportRecoveryProof(AssignmentRecoveryProofMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var nodeId = GetAuthenticatedNodeId();
+        RequireRecoveryProofBounds(message);
+        return await recoveryAttempts.AcceptProofAsync(nodeId, message, Context.ConnectionAborted)
+            .ConfigureAwait(false);
+    }
+
     private static void RequireEvidenceBounds(CompletionEvidenceMessage? evidence)
     {
         if (evidence is null)
@@ -714,6 +815,18 @@ public sealed class NodeHub(
             throw new HubException(
                 $"Review finding list exceeds the limit of {NodeTransportLimits.MaxReviewFindings}.");
         }
+
+        if (evidence.VerificationFingerprint is { Length: > NodeTransportLimits.MaxVerificationFingerprintLength })
+        {
+            throw new HubException(
+                $"Verification fingerprint exceeds the limit of {NodeTransportLimits.MaxVerificationFingerprintLength} characters.");
+        }
+
+        if (evidence.VerificationPolicyRevision is { Length: > NodeTransportLimits.MaxVerificationPolicyRevisionLength })
+        {
+            throw new HubException(
+                $"Verification policy revision exceeds the limit of {NodeTransportLimits.MaxVerificationPolicyRevisionLength} characters.");
+        }
     }
 
     private static CompletionEvidence? ToEvidence(CompletionEvidenceMessage? evidence) =>
@@ -727,7 +840,9 @@ public sealed class NodeHub(
                     .ToArray(),
                 evidence.VerificationSummary,
                 evidence.RequestBranch,
-                evidence.CheckpointCommitId);
+                evidence.CheckpointCommitId,
+                evidence.VerificationFingerprint,
+                evidence.VerificationPolicyRevision);
 
     private static CompletionGateDecisionMessage ToDecisionMessage(
         Guid correlationId,
@@ -838,6 +953,8 @@ public sealed class NodeHub(
 
         return nodeId;
     }
+
+    private NodeId GetAuthenticatedNodeId() => new(RequireAuthenticatedNodeId());
 
     private Guid RequireRegisteredNodeId()
     {
@@ -970,7 +1087,32 @@ public sealed class NodeHub(
                 route.Readiness,
                 route.EvidenceSource,
                 route.ObservedAt,
-                route.RoutingRevision)).ToArray());
+                route.RoutingRevision)).ToArray(),
+            ToVerificationPolicyDto(status.VerificationPolicy));
+    }
+
+    private static VerificationPolicyCatalogMessage? ToVerificationPolicyDto(
+        VerificationPolicyCatalogMessage? policy)
+    {
+        if (policy is null)
+        {
+            return null;
+        }
+
+        return new VerificationPolicyCatalogMessage(
+            policy.ObservedAt,
+            policy.BaselineAvailable,
+            policy.BaselineVersion,
+            (policy.Profiles ?? []).Select(profile => new VerificationPolicyProfileMessage(
+                profile.Id,
+                profile.Revision,
+                profile.DisplayLabel,
+                (profile.Commands ?? []).Select(command => new VerificationPolicyCommandMessage(
+                    command.Id,
+                    command.DisplayLabel,
+                    command.WorkingDirectoryLabel,
+                    command.Mandatory,
+                    command.TimeoutSeconds)).ToArray())).ToArray());
     }
 
     private static ExecutionAssignmentInventoryDto ToDto(
@@ -1018,7 +1160,12 @@ public sealed class NodeHub(
         assignment.RequestKind.ToString(),
         assignment.RequestRiskLevel.ToString(),
         assignment.CreateRequestBranch,
-        assignment.CreateRequestCommit);
+        assignment.CreateRequestCommit,
+        assignment.VerificationPolicyRevision,
+        assignment.BaselineVersion,
+        assignment.TrustedVerificationProfileId,
+        assignment.TrustedVerificationProfileRevision,
+        assignment.MandatoryCommandIdsJson);
 
     private static NodeEventDto ToDto(NodeEventMessage message, Guid nodeId) => new(
         message.EventId,
@@ -1193,6 +1340,188 @@ public sealed class NodeHub(
         }
     }
 
+    private static void RequireRecoveryProgressBounds(AssignmentRecoveryProgressMessage message)
+    {
+        RequireRecoveryCorrelation(message.RecoveryId, message.Attempt, message.ProjectId, message.RequestId, message.ClaimToken, message.ObservedAt);
+        if (message.Stage is { Length: > NodeTransportLimits.MaxRecoveryStageLength })
+        {
+            throw new HubException(
+                $"Recovery stage exceeds the limit of {NodeTransportLimits.MaxRecoveryStageLength} characters.");
+        }
+
+        RequireKnownCount(message.Children, "children");
+        RequireKnownCount(message.Operations, "operations");
+        RequireKnownCount(message.Processes, "processes");
+        RequireKnownCount(message.PendingEvents, "pending events");
+        RequireKnownCount(message.Reservations, "reservations");
+        RequireReasonCodes(message.ReasonCodes);
+    }
+
+    private static void RequireRecoveryProofBounds(AssignmentRecoveryProofMessage message)
+    {
+        RequireRecoveryCorrelation(message.RecoveryId, message.Attempt, message.ProjectId, message.RequestId, message.ClaimToken, message.ObservedAt);
+        RequireKnownCount(message.Children, "children");
+        RequireKnownCount(message.Operations, "operations");
+        RequireKnownCount(message.Processes, "processes");
+        RequireKnownCount(message.PendingEvents, "pending events");
+        RequireKnownCount(message.Reservations, "reservations");
+
+        if (message.EventAcknowledgementUnknownReasonCode is { Length: > NodeTransportLimits.MaxRecoveryReasonCodeLength })
+        {
+            throw new HubException(
+                $"Recovery acknowledgement reason exceeds the limit of {NodeTransportLimits.MaxRecoveryReasonCodeLength} characters.");
+        }
+
+        var identities = message.ProcessIdentities ?? [];
+        if (identities.Count > NodeTransportLimits.MaxRecoveryProcessIdentities)
+        {
+            throw new HubException(
+                $"Recovery process identity list exceeds the limit of {NodeTransportLimits.MaxRecoveryProcessIdentities}.");
+        }
+
+        foreach (var identity in identities)
+        {
+            if (identity is null)
+            {
+                throw new HubException("Recovery process identity is required.");
+            }
+
+            if (identity.GroupOrScopeId is { Length: > NodeTransportLimits.MaxRecoverySummaryLength })
+            {
+                throw new HubException(
+                    $"Recovery process group exceeds the limit of {NodeTransportLimits.MaxRecoverySummaryLength} characters.");
+            }
+        }
+
+        var dispositions = message.ReservationDispositions ?? [];
+        if (dispositions.Count > NodeTransportLimits.MaxRecoveryReservationDispositions)
+        {
+            throw new HubException(
+                $"Recovery reservation disposition list exceeds the limit of {NodeTransportLimits.MaxRecoveryReservationDispositions}.");
+        }
+
+        foreach (var disposition in dispositions)
+        {
+            if (disposition is null
+                || string.IsNullOrWhiteSpace(disposition.Disposition)
+                || disposition.Disposition.Length > NodeTransportLimits.MaxRecoveryReasonCodeLength)
+            {
+                throw new HubException("Recovery reservation disposition is required and bounded.");
+            }
+
+            if (disposition.ReasonCode is { Length: > NodeTransportLimits.MaxRecoveryReasonCodeLength })
+            {
+                throw new HubException(
+                    $"Recovery reservation reason exceeds the limit of {NodeTransportLimits.MaxRecoveryReasonCodeLength} characters.");
+            }
+        }
+
+        if (message.Repository is { } repository)
+        {
+            RequireBoundedSummary(repository.Head, "repository head");
+            RequireBoundedSummary(repository.Branch, "repository branch");
+            RequireBoundedSummary(repository.IndexSummary, "repository index summary");
+            RequireBoundedSummary(repository.WorktreeSummary, "repository worktree summary");
+            RequireKnownCount(repository.UntrackedCount, "untracked files");
+            var indicators = repository.InterruptedOperationIndicators ?? [];
+            if (indicators.Count > NodeTransportLimits.MaxRecoveryInterruptedIndicators)
+            {
+                throw new HubException(
+                    $"Recovery interrupted-operation list exceeds the limit of {NodeTransportLimits.MaxRecoveryInterruptedIndicators}.");
+            }
+
+            foreach (var indicator in indicators)
+            {
+                if (string.IsNullOrWhiteSpace(indicator)
+                    || indicator.Length > NodeTransportLimits.MaxRecoveryReasonCodeLength)
+                {
+                    throw new HubException("Recovery interrupted-operation indicator is required and bounded.");
+                }
+            }
+        }
+    }
+
+    private static void RequireRecoveryCorrelation(
+        Guid recoveryId,
+        int attempt,
+        Guid projectId,
+        Guid requestId,
+        string claimToken,
+        DateTimeOffset observedAt)
+    {
+        if (recoveryId == Guid.Empty)
+        {
+            throw new HubException("Recovery id is required.");
+        }
+
+        if (attempt < 1)
+        {
+            throw new HubException("Recovery attempt is required.");
+        }
+
+        if (projectId == Guid.Empty)
+        {
+            throw new HubException("Project id is required.");
+        }
+
+        if (requestId == Guid.Empty)
+        {
+            throw new HubException("Request id is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(claimToken)
+            || claimToken.Length > NodeTransportLimits.MaxRecoveryClaimTokenLength)
+        {
+            throw new HubException("Recovery claim token is required and bounded.");
+        }
+
+        if (observedAt == default)
+        {
+            throw new HubException("Recovery observation time is required.");
+        }
+    }
+
+    private static void RequireKnownCount(RecoveryKnownCountMessage? count, string name)
+    {
+        if (count is null || !count.IsValid)
+        {
+            throw new HubException($"Recovery {name} inventory is required and must be known or explicitly unknown.");
+        }
+
+        if (count.UnknownReasonCode is { Length: > NodeTransportLimits.MaxRecoveryReasonCodeLength })
+        {
+            throw new HubException(
+                $"Recovery {name} unknown reason exceeds the limit of {NodeTransportLimits.MaxRecoveryReasonCodeLength} characters.");
+        }
+    }
+
+    private static void RequireReasonCodes(IReadOnlyList<string>? reasonCodes)
+    {
+        var codes = reasonCodes ?? [];
+        if (codes.Count > NodeTransportLimits.MaxRecoveryReasonCodes)
+        {
+            throw new HubException(
+                $"Recovery reason-code list exceeds the limit of {NodeTransportLimits.MaxRecoveryReasonCodes}.");
+        }
+
+        foreach (var code in codes)
+        {
+            if (string.IsNullOrWhiteSpace(code) || code.Length > NodeTransportLimits.MaxRecoveryReasonCodeLength)
+            {
+                throw new HubException("Recovery reason code is required and bounded.");
+            }
+        }
+    }
+
+    private static void RequireBoundedSummary(string? value, string name)
+    {
+        if (value is { Length: > NodeTransportLimits.MaxRecoverySummaryLength })
+        {
+            throw new HubException(
+                $"Recovery {name} exceeds the limit of {NodeTransportLimits.MaxRecoverySummaryLength} characters.");
+        }
+    }
+
     private static VerificationRunResultMessage ToMessage(
         Guid correlationId,
         Guid projectId,
@@ -1212,7 +1541,37 @@ public sealed class NodeHub(
         run.CompletedAt,
         run.OutputSummary,
         run.OutputArtifactPath,
-        run.Mandatory);
+        run.Mandatory,
+        run.Fingerprint,
+        run.PolicyRevision,
+        (int)run.RunKind,
+        run.RunKind.ToString(),
+        run.AttemptId);
+
+    private static VerificationRunReplayMessage ToReplayMessage(
+        Guid correlationId,
+        Guid projectId,
+        string sessionId,
+        VerificationRunDto run) => new(
+        correlationId,
+        projectId,
+        run.RequestId,
+        sessionId,
+        run.Id,
+        run.ProfileId,
+        run.CommandId,
+        (int)run.Status,
+        run.Status.ToString(),
+        run.ExitCode,
+        run.StartedAt,
+        run.CompletedAt,
+        run.OutputSummary,
+        run.Mandatory,
+        run.Fingerprint,
+        run.PolicyRevision,
+        (int)run.RunKind,
+        run.RunKind.ToString(),
+        run.AttemptId);
 
     private static RequestResultMessage ToResultMessage(RequestResultDto result) => new(
         result.RequestId,

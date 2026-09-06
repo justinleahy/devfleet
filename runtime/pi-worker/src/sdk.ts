@@ -107,18 +107,15 @@ export async function createRestrictedResourceLoader(
   return { resourceLoader, settingsManager };
 }
 
-/** Model id that selects the first authenticated model of the named provider. */
-const PROVIDER_DEFAULT_MODEL_ID = "default";
-
 /** The slice of `ModelRuntime` the resolver needs; kept narrow so tests can fake it. */
 export type ModelCatalog = Pick<ModelRuntime, "getModel" | "getAvailable">;
 
 /**
- * Resolve a `provider/model` override to a model authenticated on this node.
- * `provider/default` picks the first authenticated model of exactly that
- * provider; an explicit id must exist in the catalog and be authenticated.
- * DevFleet decodes its flat `<provider>/<model>` selector before this boundary,
- * so this resolver receives the exact Pi provider and model chosen by the operator.
+ * Resolve an explicit `provider/model` override to the exact model authenticated
+ * on this node. The id must exist in the catalog and be authenticated for that
+ * provider. DevFleet decodes its flat `<provider>/<model>` selector before this
+ * boundary, so this resolver receives the exact Pi provider and model chosen by
+ * the operator.
  */
 export async function resolveConfiguredModel(modelRuntime: ModelCatalog, value: string) {
   const separator = value.indexOf("/");
@@ -127,14 +124,12 @@ export async function resolveConfiguredModel(modelRuntime: ModelCatalog, value: 
   }
   const provider = value.slice(0, separator);
   const id = value.slice(separator + 1);
-  const available = await modelRuntime.getAvailable(provider);
-  if (id === PROVIDER_DEFAULT_MODEL_ID) {
-    const model = available[0];
-    if (model === undefined) {
-      throw new Error(`Pi provider '${provider}' has no authenticated models on this node`);
-    }
-    return model;
+  if (id === "default") {
+    throw new Error(
+      `Pi model '${value}' must name an explicit model; model id 'default' is not allowed`,
+    );
   }
+  const available = await modelRuntime.getAvailable(provider);
   const model = modelRuntime.getModel(provider, id);
   if (model === undefined) {
     throw new Error(`Pi model '${value}' is not present in the node catalog`);

@@ -41,7 +41,13 @@ export interface UsageProviderBinding {
   piProvider: string;
   /** Provider id emitted in the report and shown on the DevFleet card. */
   provider: string;
-  collect: UsageCollector;
+  /** Real usage source. Omitted when `unavailableDiagnostic` is the whole card. */
+  collect?: UsageCollector;
+  /**
+   * When set, emit this unavailable diagnostic after auth gating (and any
+   * endpoint guard) without resolving credentials or calling a collector.
+   */
+  unavailableDiagnostic?: string;
   /** Expected effective provider base URL. `null` means Pi's builtin has none. */
   expectedBaseUrl?: string | null;
 }
@@ -63,6 +69,13 @@ export const USAGE_PROVIDERS: readonly UsageProviderBinding[] = [
     collect: opencodeGoUsage,
     expectedBaseUrl: null,
   },
+  { piProvider: "qwen-token-plan", provider: "qwen-token-plan", unavailableDiagnostic: "quota_console_only" },
+  {
+    piProvider: "qwen-token-plan-individual",
+    provider: "qwen-token-plan-individual",
+    unavailableDiagnostic: "quota_console_only",
+  },
+  { piProvider: "qwen-token-plan-cn", provider: "qwen-token-plan-cn", unavailableDiagnostic: "quota_console_only" },
 ];
 
 /** The slice of `ModelRuntime` the coordinator needs; kept narrow so tests can fake it. */
@@ -191,6 +204,13 @@ async function collectProvider(
     }
   }
 
+  if (binding.unavailableDiagnostic !== undefined) {
+    return unavailableReport(binding.provider, fetchedAt, binding.unavailableDiagnostic);
+  }
+
+  const collect = binding.collect;
+  if (collect === undefined) return fail("collector_failed");
+
   let auth: AuthResult | undefined;
   try {
     auth = await runtime.getAuth(binding.piProvider, { signal });
@@ -201,7 +221,7 @@ async function collectProvider(
 
   let report: UsageReport;
   try {
-    report = sanitizeReport(binding.provider, now(), await binding.collect(auth, request, signal));
+    report = sanitizeReport(binding.provider, now(), await collect(auth, request, signal));
   } catch {
     return fail("collector_failed");
   }

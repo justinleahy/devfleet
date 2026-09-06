@@ -377,7 +377,7 @@ public sealed class NodeHubReservationTests : IClassFixture<ControlPlaneFixture>
             AgentName = sessionId,
             Role = "implementer",
             Runtime = "pi",
-            Model = "codex/default",
+            Model = "codex/gpt-5.6-sol",
             Liveness = nameof(AgentLiveness.Online),
             Activity = nameof(AgentActivity.Idle),
             Attention = "None",

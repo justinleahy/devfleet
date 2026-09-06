@@ -1,4 +1,5 @@
 using PiCommandCenter.Domain;
+using PiCommandCenter.Domain.Projects;
 using PiCommandCenter.Domain.Requests;
 
 namespace PiCommandCenter.Application.Runtime;
@@ -22,7 +23,14 @@ public sealed record AgentStartRequest
         AgentRuntimeMode mode,
         string model,
         AgentRuntimeAuthorizationContext? authorization = null,
-        bool createRequestCommit = false)
+        bool createRequestCommit = false,
+        WorkspaceBindingId? workspaceBindingId = null,
+        long? bindingValidationRevisionSnapshot = null,
+        string? verificationPolicyRevision = null,
+        string? baselineVersion = null,
+        string? trustedVerificationProfileId = null,
+        string? trustedVerificationProfileRevision = null,
+        IReadOnlyList<string>? mandatoryVerificationCommandIds = null)
     {
         SessionId = Require(sessionId, nameof(sessionId));
         ProjectId = projectId;
@@ -36,6 +44,23 @@ public sealed record AgentStartRequest
         Model = AgentModelSelector.Parse(model);
         Authorization = authorization;
         CreateRequestCommit = createRequestCommit;
+        WorkspaceBindingId = workspaceBindingId;
+        BindingValidationRevisionSnapshot = ValidateRevision(
+            bindingValidationRevisionSnapshot,
+            nameof(bindingValidationRevisionSnapshot));
+        VerificationPolicyRevision = Optional(
+            verificationPolicyRevision,
+            nameof(verificationPolicyRevision));
+        BaselineVersion = Optional(baselineVersion, nameof(baselineVersion));
+        TrustedVerificationProfileId = Optional(
+            trustedVerificationProfileId,
+            nameof(trustedVerificationProfileId));
+        TrustedVerificationProfileRevision = Optional(
+            trustedVerificationProfileRevision,
+            nameof(trustedVerificationProfileRevision));
+        MandatoryVerificationCommandIds = NormalizeCommandIds(
+            mandatoryVerificationCommandIds,
+            nameof(mandatoryVerificationCommandIds));
     }
 
     /// <summary>Orchestrator-assigned session id (the projection identity).</summary>
@@ -76,6 +101,27 @@ public sealed record AgentStartRequest
     /// <summary>Whether the trusted supervisor must create a request checkpoint at completion.</summary>
     public bool CreateRequestCommit { get; }
 
+    /// <summary>Workspace binding captured by the execution assignment.</summary>
+    public WorkspaceBindingId? WorkspaceBindingId { get; }
+
+    /// <summary>Validation revision captured with the assigned workspace binding.</summary>
+    public long? BindingValidationRevisionSnapshot { get; }
+
+    /// <summary>Captured effective verification-policy revision, or null for a pre-upgrade assignment.</summary>
+    public string? VerificationPolicyRevision { get; }
+
+    /// <summary>Captured baseline version, or null for a pre-upgrade assignment.</summary>
+    public string? BaselineVersion { get; }
+
+    /// <summary>Captured trusted verification profile id, when the assignment selected one.</summary>
+    public string? TrustedVerificationProfileId { get; }
+
+    /// <summary>Captured trusted verification profile revision, when the assignment selected one.</summary>
+    public string? TrustedVerificationProfileRevision { get; }
+
+    /// <summary>Captured command ids that must pass before the assignment can complete.</summary>
+    public IReadOnlyList<string>? MandatoryVerificationCommandIds { get; }
+
     private static string Require(string value, string paramName)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Trim().Length == 0)
@@ -100,5 +146,36 @@ public sealed record AgentStartRequest
         }
 
         return clean;
+    }
+
+    private static long? ValidateRevision(long? revision, string paramName)
+    {
+        if (revision is <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                paramName,
+                revision,
+                "Binding validation revision must be positive when present.");
+        }
+
+        return revision;
+    }
+
+    private static IReadOnlyList<string>? NormalizeCommandIds(
+        IReadOnlyList<string>? commandIds,
+        string paramName)
+    {
+        if (commandIds is null)
+        {
+            return null;
+        }
+
+        var normalized = new string[commandIds.Count];
+        for (var index = 0; index < commandIds.Count; index++)
+        {
+            normalized[index] = Require(commandIds[index], paramName);
+        }
+
+        return normalized;
     }
 }

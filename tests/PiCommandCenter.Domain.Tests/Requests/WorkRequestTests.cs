@@ -31,6 +31,26 @@ public class WorkRequestTests
     }
 
     [Fact]
+    public void Enqueue_preserves_an_optional_original_request_id()
+    {
+        var original = WorkRequestId.New();
+
+        var retry = WorkRequest.Enqueue(
+            Project,
+            WorkRequestKind.Development,
+            RequestPriority.Normal,
+            RiskLevel.Standard,
+            "Retry",
+            "Retry the work",
+            Now,
+            original);
+
+        Assert.Equal(original, retry.OriginalRequestId);
+        Assert.Equal(WorkRequestStatus.Queued, retry.Status);
+        Assert.Null(Enqueue().OriginalRequestId);
+    }
+
+    [Fact]
     public void Enqueue_normalizes_title_and_prompt()
     {
         var request = Enqueue();
@@ -204,6 +224,7 @@ public class WorkRequestTests
     public void Rehydrate_round_trips_state_and_version()
     {
         var id = WorkRequestId.New();
+        var original = WorkRequestId.New();
         var createdAt = new DateTimeOffset(2026, 2, 2, 0, 0, 0, TimeSpan.Zero);
         var updatedAt = createdAt.AddHours(4);
 
@@ -227,6 +248,24 @@ public class WorkRequestTests
         Assert.Equal(createdAt, request.CreatedAt);
         Assert.Equal(updatedAt, request.UpdatedAt);
         Assert.Equal(9, request.Version);
+        Assert.Null(request.OriginalRequestId);
+
+        var linked = WorkRequest.Rehydrate(
+            id,
+            Project,
+            WorkRequestKind.Review,
+            RequestPriority.High,
+            RiskLevel.Small,
+            "Review diff",
+            "Review the changes",
+            WorkRequestStatus.Executing,
+            blockedPhase: null,
+            createdAt,
+            updatedAt,
+            version: 9,
+            original);
+
+        Assert.Equal(original, linked.OriginalRequestId);
     }
 
     [Fact]

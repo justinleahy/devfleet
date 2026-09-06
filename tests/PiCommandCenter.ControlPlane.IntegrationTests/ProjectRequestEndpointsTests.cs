@@ -323,6 +323,89 @@ public class ProjectRequestEndpointsTests : IClassFixture<ControlPlaneFixture>
         Assert.Null(rejected.Headers.Location);
     }
 
+    [Fact]
+    public async Task Linked_retry_is_accepted_and_exposes_the_original_request_id()
+    {
+        using var client = _fixture.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var original = await EnqueueAsync(client, projectId, "original", priority: 1);
+        var originalId = original.GetProperty("id").GetGuid();
+
+        var response = await client.PostAsJsonAsync(
+            $"/api/projects/{projectId}/requests",
+            new
+            {
+                kind = 0,
+                priority = 1,
+                riskLevel = 1,
+                title = "retry",
+                prompt = "Retry with an editable copy",
+                originalRequestId = originalId,
+            },
+            Json);
+        var body = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
+
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+        Assert.Equal(originalId, body.GetProperty("originalRequestId").GetGuid());
+        Assert.Equal("retry", body.GetProperty("title").GetString());
+        Assert.Equal("Queued", body.GetProperty("statusName").GetString());
+        Assert.Equal(JsonValueKind.Null, body.GetProperty("assignment").ValueKind);
+
+        var getResponse = await client.GetAsync($"/api/requests/{body.GetProperty("id").GetGuid()}");
+        var fetched = await getResponse.Content.ReadFromJsonAsync<JsonElement>(Json);
+        Assert.Equal(HttpStatusCode.OK, getResponse.StatusCode);
+        Assert.Equal(originalId, fetched.GetProperty("originalRequestId").GetGuid());
+    }
+
+    [Fact]
+    public async Task Linked_retry_returns_not_found_for_a_missing_original()
+    {
+        using var client = _fixture.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var missing = Guid.NewGuid();
+
+        var response = await client.PostAsJsonAsync(
+            $"/api/projects/{projectId}/requests",
+            new
+            {
+                kind = 0,
+                priority = 1,
+                riskLevel = 1,
+                title = "retry",
+                prompt = "Missing original",
+                originalRequestId = missing,
+            },
+            Json);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
+        Assert.Contains(missing.ToString(), problem.GetProperty("detail").GetString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Linked_retry_returns_bad_request_for_a_cross_project_original()
+    {
+        using var client = _fixture.CreateClient();
+        var projectId = await CreateProjectAsync(client);
+        var otherProjectId = await CreateProjectAsync(client);
+        var original = await EnqueueAsync(client, projectId, "original", priority: 1);
+
+        var response = await client.PostAsJsonAsync(
+            $"/api/projects/{otherProjectId}/requests",
+            new
+            {
+                kind = 0,
+                priority = 1,
+                riskLevel = 1,
+                title = "retry",
+                prompt = "Cross project original",
+                originalRequestId = original.GetProperty("id").GetGuid(),
+            },
+            Json);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     private sealed record SeededAssignment(
         Guid RequestId,
         Guid ProjectId,

@@ -1,7 +1,5 @@
 /**
- * Model override resolution (SPEC.md section 25.1): a `provider/model`
- * override may only land on that provider, `provider/default` picks the first
- * authenticated model of that provider, and explicit ids stay exact.
+ * Exact model override resolution (SPEC.md section 25.1).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -32,20 +30,15 @@ const codexB = { provider: "openai-codex", id: "gpt-6-mini" };
 const anthropic = { provider: "anthropic", id: "claude-opus-4-5" };
 
 describe("model override resolution", () => {
-  it("resolves provider/default to the first authenticated model of that provider", async () => {
+  it("rejects provider/default instead of selecting an authenticated model", async () => {
     const catalog = fakeCatalog([anthropic, codexA, codexB], [anthropic, codexB, codexA]);
-    assert.deepEqual(await resolveConfiguredModel(catalog, "openai-codex/default"), codexB);
-  });
-
-  it("never leaves the provider when only other providers are authenticated", async () => {
-    const catalog = fakeCatalog([anthropic, codexA], [anthropic]);
     await assert.rejects(
       resolveConfiguredModel(catalog, "openai-codex/default"),
-      /provider 'openai-codex' has no authenticated models/,
+      /must name an explicit model; model id 'default' is not allowed/,
     );
   });
 
-  it("keeps explicit ids exact instead of substituting a provider default", async () => {
+  it("returns the exact requested catalog model", async () => {
     const catalog = fakeCatalog([codexA, codexB], [codexA, codexB]);
     assert.deepEqual(await resolveConfiguredModel(catalog, "openai-codex/gpt-6-mini"), codexB);
     await assert.rejects(
@@ -54,8 +47,9 @@ describe("model override resolution", () => {
     );
   });
 
-  it("rejects an explicit id whose provider is not authenticated", async () => {
-    const catalog = fakeCatalog([codexA, anthropic], [anthropic]);
+  it("requires authentication for the exact provider and model", async () => {
+    const anthropicWithSameId = { provider: "anthropic", id: codexA.id };
+    const catalog = fakeCatalog([codexA, anthropicWithSameId], [anthropicWithSameId]);
     await assert.rejects(
       resolveConfiguredModel(catalog, "openai-codex/gpt-6-astra"),
       /no configured authentication/,

@@ -30,4 +30,5 @@ public sealed record NodeExecutionStatusMessage(
     int AvailableRequestSlots,
     IReadOnlyList<Guid> ActiveAssignmentIds,
     string RoutingRevision,
-    IReadOnlyList<RuntimeRouteReadinessMessage> Routes);
+    IReadOnlyList<RuntimeRouteReadinessMessage> Routes,
+    VerificationPolicyCatalogMessage? VerificationPolicy = null);

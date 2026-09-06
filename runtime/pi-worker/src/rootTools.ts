@@ -239,8 +239,8 @@ export function buildRootTools(request: ToolRequest): RootTool[] {
     roundTripTool(
       "request_verification",
       "Request Verification",
-      "Run a configured verification profile for the bound request; optional commandId targets one command.",
-      { profileId: s("Configured verification profile id (required)"), commandId: optional("Specific verification command id") },
+      "Request the effective verification policy for the current repository fingerprint. The node selects baseline and project checks; this tool takes no profile or command.",
+      {},
       request,
     ),
     roundTripTool(

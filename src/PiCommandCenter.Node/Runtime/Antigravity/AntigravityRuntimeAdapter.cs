@@ -21,26 +21,14 @@ namespace PiCommandCenter.Node.Runtime.Antigravity;
 /// </summary>
 public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
 {
-    internal static IReadOnlyList<string> BuildLaunchArguments(string? model)
-    {
-        var arguments = new List<string>
-        {
-            "--input-format", "stream-json", "--output-format", "stream-json",
-        };
-        if (model is not null)
-        {
-            arguments.Add("--model");
-            arguments.Add(model);
-        }
-
-        return arguments;
-    }
+    internal static IReadOnlyList<string> BuildLaunchArguments(string model)
+        => ["--input-format", "stream-json", "--output-format", "stream-json", "--model", model];
 
     /// <summary>
-    /// <c>--model</c> value for a selector: the provider-native id, or null when the selector asks
-    /// for the provider default so <c>agy</c> picks its own. Rejects non-antigravity runtimes.
+    /// Returns the provider-native <c>--model</c> value for an Antigravity selector.
+    /// Rejects non-Antigravity runtimes.
     /// </summary>
-    internal static string? ResolveModelArgument(AgentModelSelector selector)
+    internal static string ResolveModelArgument(AgentModelSelector selector)
     {
         if (selector.Provider != AgentModelSelector.Antigravity)
         {
@@ -48,7 +36,7 @@ public sealed class AntigravityRuntimeAdapter : IAgentRuntimeAdapter
                 $"Antigravity runtime only accepts '{AgentModelSelector.Antigravity}/<model>' selectors; got '{selector}'.");
         }
 
-        return selector.IsProviderDefault ? null : selector.ModelId;
+        return selector.ModelId;
     }
 
     private readonly AntigravityOptions _options;

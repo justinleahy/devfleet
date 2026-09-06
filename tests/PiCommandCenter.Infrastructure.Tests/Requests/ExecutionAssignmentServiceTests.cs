@@ -11,6 +11,8 @@ using PiCommandCenter.Domain.Projects;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Requests;
+using PiCommandCenter.Infrastructure.Recovery;
+
 
 namespace PiCommandCenter.Infrastructure.Tests.Requests;
 
@@ -49,7 +51,109 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
             request => request.Id == high.Id)).Status);
         Assert.Equal(WorkRequestStatus.Queued, (await reload.WorkRequests.SingleAsync(
             request => request.Id == low.Id)).Status);
-        Assert.Equal(high.Id, (await reload.ExecutionAssignments.SingleAsync()).RequestId);
+        var assignment = await reload.ExecutionAssignments.SingleAsync();
+        Assert.Equal(high.Id, assignment.RequestId);
+        Assert.Equal("baseline:1", assignment.VerificationPolicyRevision);
+        Assert.Equal("1", assignment.BaselineVersion);
+        Assert.Null(assignment.TrustedVerificationProfileId);
+        Assert.Null(assignment.TrustedVerificationProfileRevision);
+        Assert.Equal("""["repository-integrity"]""", assignment.MandatoryCommandIdsJson);
+    }
+
+    [Fact]
+    public async Task Claim_captures_selected_profile_mandatory_ids_from_the_advertised_catalog()
+    {
+        await using var db = CreateContext();
+        var node = SeedOnlineReadyNode(db, Catalog(
+            profiles:
+            [
+                Profile(
+                    "dotnet",
+                    "rev-7",
+                    Command("runtime-test", mandatory: false),
+                    Command("dotnet-test", mandatory: true)),
+            ]));
+        var project = SeedProject(db);
+        project.SelectTrustedVerificationProfile("dotnet", "rev-7", _clock.GetUtcNow());
+        SeedValidBinding(db, project, node.Id);
+        SeedRequest(db, project);
+        await SaveAsync(db);
+
+        var result = await CreateService(db).ClaimNextAsync(node.Id, TimeSpan.FromMinutes(5));
+
+        Assert.NotNull(result);
+        Assert.Equal("baseline:1+dotnet@rev-7", result.VerificationPolicyRevision);
+        Assert.Equal("1", result.BaselineVersion);
+        Assert.Equal("dotnet", result.TrustedVerificationProfileId);
+        Assert.Equal("rev-7", result.TrustedVerificationProfileRevision);
+        Assert.Equal("""["repository-integrity","dotnet-test"]""", result.MandatoryCommandIdsJson);
+    }
+
+    [Fact]
+    public async Task Claim_fails_closed_when_the_advertised_catalog_no_longer_matches_the_selection()
+    {
+        await using var db = CreateContext();
+        var node = SeedOnlineReadyNode(db, Catalog(
+            profiles: [Profile("dotnet", "rev-7", Command("dotnet-test", mandatory: true))]));
+        var project = SeedProject(db);
+        project.SelectTrustedVerificationProfile("dotnet", "rev-7", _clock.GetUtcNow());
+        SeedValidBinding(db, project, node.Id);
+        SeedRequest(db, project);
+        await SaveAsync(db);
+        node = await db.FleetNodes.SingleAsync();
+        SetExecutionStatus(node, SeedOnlineReadyNodeStatus(Catalog(profiles: [])));
+        await SaveAsync(db);
+
+        var result = await CreateService(db).ClaimNextAsync(node.Id, TimeSpan.FromMinutes(5));
+
+        Assert.Null(result);
+        Assert.False(await db.ExecutionAssignments.AnyAsync());
+    }
+
+    [Fact]
+    public async Task Reconcile_lazily_captures_a_missing_policy_snapshot_from_the_current_catalog()
+    {
+        await using var db = CreateContext();
+        var world = SeedAssignment(db, ExecutionAssignmentState.Running);
+        world.Project.SelectTrustedVerificationProfile("dotnet", "rev-3", _clock.GetUtcNow());
+        SetExecutionStatus(
+            world.Node,
+            SeedOnlineReadyNodeStatus(Catalog(
+                profiles: [Profile("dotnet", "rev-3", Command("suite", mandatory: true))])));
+        await SaveAsync(db);
+
+        var result = Assert.Single(await CreateService(db).ReconcileAsync(
+            world.Node.Id,
+            [Inventory(world)],
+            TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(AssignmentReconciliationDisposition.Resume, result.Disposition);
+        await using var reload = CreateContext();
+        var assignment = await reload.ExecutionAssignments.SingleAsync();
+        Assert.Equal("baseline:1+dotnet@rev-3", assignment.VerificationPolicyRevision);
+        Assert.Equal("dotnet", assignment.TrustedVerificationProfileId);
+        Assert.Equal("rev-3", assignment.TrustedVerificationProfileRevision);
+        Assert.Equal("""["repository-integrity","suite"]""", assignment.MandatoryCommandIdsJson);
+    }
+
+    [Fact]
+    public async Task Reconcile_marks_recovery_when_a_missing_snapshot_cannot_be_captured()
+    {
+        await using var db = CreateContext();
+        var world = SeedAssignment(db, ExecutionAssignmentState.Running);
+        world.Project.SelectTrustedVerificationProfile("dotnet", "rev-missing", _clock.GetUtcNow());
+        await SaveAsync(db);
+
+        var result = Assert.Single(await CreateService(db).ReconcileAsync(
+            world.Node.Id,
+            [Inventory(world)],
+            TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(AssignmentReconciliationDisposition.RecoveryRequired, result.Disposition);
+        await using var reload = CreateContext();
+        var assignment = await reload.ExecutionAssignments.SingleAsync();
+        Assert.Null(assignment.VerificationPolicyRevision);
+        Assert.Equal(ExecutionAssignmentState.RecoveryRequired, assignment.State);
     }
 
     [Fact]
@@ -76,6 +180,87 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
         Assert.Single(await reload.ExecutionAssignments.ToListAsync());
         Assert.Equal(WorkRequestStatus.Starting, (await reload.WorkRequests.SingleAsync()).Status);
     }
+
+    [Fact]
+    public async Task Enqueued_work_on_a_held_project_stays_queued()
+    {
+        await using var db = CreateContext();
+        var node = SeedOnlineReadyNode(db);
+        var project = SeedProject(db);
+        SeedValidBinding(db, project, node.Id);
+        var request = SeedRequest(db, project);
+        SeedHold(db, project.Id);
+        await SaveAsync(db);
+
+        var claimed = await CreateService(db).ClaimNextAsync(node.Id, TimeSpan.FromMinutes(5));
+
+        Assert.Null(claimed);
+        Assert.False(await db.ExecutionAssignments.AnyAsync());
+        Assert.Equal(WorkRequestStatus.Queued, (await db.WorkRequests.SingleAsync()).Status);
+        Assert.Equal(request.Id, (await db.WorkRequests.SingleAsync()).Id);
+    }
+
+    [Fact]
+    public async Task Unheld_project_still_admits_a_claim()
+    {
+        await using var db = CreateContext();
+        var node = SeedOnlineReadyNode(db);
+        var project = SeedProject(db);
+        SeedValidBinding(db, project, node.Id);
+        var request = SeedRequest(db, project);
+        await SaveAsync(db);
+
+        var claimed = await CreateService(db).ClaimNextAsync(node.Id, TimeSpan.FromMinutes(5));
+
+        Assert.NotNull(claimed);
+        Assert.Equal(request.Id, claimed.RequestId);
+    }
+
+    [Fact]
+    public async Task Competing_claim_and_recovery_hold_never_admit_a_post_hold_claim()
+    {
+        await using (var seed = CreateContext())
+        {
+            var node = SeedOnlineReadyNode(seed);
+            var project = SeedProject(seed);
+            SeedValidBinding(seed, project, node.Id);
+            SeedRequest(seed, project);
+            await SaveAsync(seed);
+        }
+
+        await using var claimDb = CreateContext();
+        await using var holdDb = CreateContext();
+        var nodeId = await claimDb.FleetNodes.Select(node => node.Id).SingleAsync();
+        var projectId = await holdDb.Projects.Select(project => project.Id).SingleAsync();
+
+        var claimTask = CreateService(claimDb).ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
+        SeedHold(holdDb, projectId);
+        var holdTask = holdDb.SaveChangesAsync();
+        await Task.WhenAll(claimTask, holdTask);
+
+        await using var reload = CreateContext();
+        var holdPresent = await reload.Set<RecoveryHoldRow>().AnyAsync();
+        Assert.True(holdPresent);
+        var assignments = await reload.ExecutionAssignments.ToListAsync();
+        Assert.True(assignments.Count is 0 or 1);
+        var request = await reload.WorkRequests.SingleAsync();
+        if (assignments.Count == 1)
+        {
+            Assert.Equal(WorkRequestStatus.Starting, request.Status);
+        }
+        else
+        {
+            Assert.Equal(WorkRequestStatus.Queued, request.Status);
+        }
+
+        await using var afterHoldDb = CreateContext();
+        var afterHoldClaim = await CreateService(afterHoldDb)
+            .ClaimNextAsync(nodeId, TimeSpan.FromMinutes(5));
+        Assert.Null(afterHoldClaim);
+        await using var finalReload = CreateContext();
+        Assert.Equal(assignments.Count, await finalReload.ExecutionAssignments.CountAsync());
+    }
+
 
     [Fact]
     public async Task Cancelling_queued_work_prevents_it_from_being_claimed()
@@ -316,7 +501,13 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
         Assert.Equal(ExecutionAssignmentState.Running, persisted.State);
         Assert.Equal(_clock.GetUtcNow(), persisted.LastRenewedAt);
         Assert.Equal(_clock.GetUtcNow().AddMinutes(5), persisted.LeaseExpiresAt);
-        Assert.Equal(3, persisted.Version);
+        Assert.Equal("baseline:1", persisted.VerificationPolicyRevision);
+        Assert.Equal("1", persisted.BaselineVersion);
+        Assert.Null(persisted.TrustedVerificationProfileId);
+        Assert.Null(persisted.TrustedVerificationProfileRevision);
+        Assert.Equal("""["repository-integrity"]""", persisted.MandatoryCommandIdsJson);
+        Assert.True(persisted.HasCapturedVerificationPolicy);
+        Assert.Equal(4, persisted.Version);
     }
     [Fact]
     public async Task Reconcile_preserves_a_start_blocked_assignment_for_node_retry()
@@ -515,7 +706,8 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
         _clock,
         db,
         CreateEvaluator(db),
-        new RecordingProjectionNotifier());
+        new RecordingProjectionNotifier(),
+        Options.Create(new NodeLivenessOptions { HeartbeatSeconds = 10 }));
 
     private RequestCancellationService CreateCancellationService(ControlPlaneDbContext db) => new(
         _clock,
@@ -561,10 +753,23 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
         }
     }
 
-    private FleetNode SeedOnlineReadyNode(ControlPlaneDbContext db)
+    private FleetNode SeedOnlineReadyNode(
+        ControlPlaneDbContext db,
+        VerificationPolicyCatalogMessage? catalog = null)
+    {
+        var node = FleetNode.Register(NodeId.New(), "ready-node", "1.0.0", "{}", _clock.GetUtcNow());
+        node.Heartbeat(
+            "1.0.0",
+            "{}",
+            _clock.GetUtcNow(),
+            executionStatusJson: SeedOnlineReadyNodeStatus(catalog ?? Catalog()));
+        db.FleetNodes.Add(node);
+        return node;
+    }
+
+    private string SeedOnlineReadyNodeStatus(VerificationPolicyCatalogMessage catalog)
     {
         var now = _clock.GetUtcNow();
-        var node = FleetNode.Register(NodeId.New(), "ready-node", "1.0.0", "{}", now);
         var executionStatus = new NodeExecutionStatusDto(
             now,
             AvailableRequestSlots: 1,
@@ -574,20 +779,46 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
             [
                 new RuntimeRouteReadinessDto(
                     "implementer",
-                    "codex/default",
+                    "codex/gpt-5.6-sol",
                     "ready",
                     "runtime-adapter",
                     now,
                     "routing-v1"),
-            ]);
-        node.Heartbeat(
-            "1.0.0",
-            "{}",
-            now,
-            executionStatusJson: JsonSerializer.Serialize(executionStatus, TestRepositories.WebJson));
-        db.FleetNodes.Add(node);
-        return node;
+            ],
+            catalog);
+        return JsonSerializer.Serialize(executionStatus, TestRepositories.WebJson);
     }
+
+    private void SetExecutionStatus(FleetNode node, string statusJson) => node.Heartbeat(
+        "1.0.0",
+        "{}",
+        _clock.GetUtcNow(),
+        executionStatusJson: statusJson);
+
+    private VerificationPolicyCatalogMessage Catalog(
+        bool baselineAvailable = true,
+        string baselineVersion = "1",
+        IReadOnlyList<VerificationPolicyProfileMessage>? profiles = null) => new(
+        _clock.GetUtcNow(),
+        baselineAvailable,
+        baselineVersion,
+        profiles ?? []);
+
+    private static VerificationPolicyProfileMessage Profile(
+        string id,
+        string revision,
+        params VerificationPolicyCommandMessage[] commands) => new(
+        id,
+        revision,
+        id,
+        commands);
+
+    private static VerificationPolicyCommandMessage Command(string id, bool mandatory) => new(
+        id,
+        id,
+        "repository",
+        mandatory,
+        TimeoutSeconds: 30);
 
     private Project SeedProject(ControlPlaneDbContext db)
     {
@@ -606,6 +837,33 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
         db.Projects.Add(project);
         return project;
     }
+    private static void SeedHold(ControlPlaneDbContext db, ProjectId projectId)
+    {
+        var operationId = Guid.NewGuid();
+        var nowTicks = DateTimeOffset.UtcNow.UtcTicks;
+        db.Set<RecoveryOperationRow>().Add(new RecoveryOperationRow
+        {
+            Id = operationId,
+            ProjectId = projectId.Value,
+            Status = "Running",
+            Attempt = 1,
+            InventoryRevision = "inv-1",
+            Reason = "stuck",
+            Actor = "operator",
+            CreatedAtUtcTicks = nowTicks,
+            UpdatedAtUtcTicks = nowTicks,
+            LastProgressUtcTicks = nowTicks,
+            Version = 1,
+        });
+        db.Set<RecoveryHoldRow>().Add(new RecoveryHoldRow
+        {
+            ProjectId = projectId.Value,
+            OperationId = operationId,
+            EstablishedAtUtcTicks = nowTicks,
+            Version = 1,
+        });
+    }
+
 
     private WorkspaceBinding SeedValidBinding(
         ControlPlaneDbContext db,
@@ -683,7 +941,7 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
             terminalAt,
             version: 1);
         db.ExecutionAssignments.Add(assignment);
-        return new AssignmentWorld(node, request, assignment);
+        return new AssignmentWorld(node, project, request, assignment);
     }
 
     private static async Task SaveAsync(ControlPlaneDbContext db)
@@ -694,6 +952,7 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
 
     private sealed record AssignmentWorld(
         FleetNode Node,
+        Project Project,
         WorkRequest Request,
         ExecutionAssignment Assignment);
 }

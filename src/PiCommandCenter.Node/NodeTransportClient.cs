@@ -8,6 +8,7 @@ using PiCommandCenter.Domain.Verification;
 using PiCommandCenter.Node.Projects;
 using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.SubscriptionUsage;
+using PiCommandCenter.Node.Verification;
 
 namespace PiCommandCenter.Node;
 
@@ -26,6 +27,7 @@ public sealed class NodeTransportClient : INodeHubOps
     private readonly ISubscriptionUsageCache _usage;
     private readonly IWorkspaceBindingValidator _workspaceBindingValidator;
     private readonly IWorkspaceDirectoryBrowser _workspaceDirectoryBrowser;
+    private readonly IVerificationPolicyCatalog _verificationPolicies;
     private HubConnection? _connection;
     private NodeCredential? _credential;
 
@@ -42,6 +44,10 @@ public sealed class NodeTransportClient : INodeHubOps
     /// <summary>Raised when the Control Plane cancels an assignment owned by this node.</summary>
     public event Func<CancelAssignmentCommand, Task>? CancelAssignmentReceived;
 
+    /// <summary>Raised when the Control Plane commands this node to recover an assignment.</summary>
+    public event Func<RecoverAssignmentCommandMessage, Task>? RecoverAssignmentReceived;
+
+
     public NodeTransportClient(
         IOptions<NodeOptions> options,
         NodeCredentialLoader credentials,
@@ -50,6 +56,7 @@ public sealed class NodeTransportClient : INodeHubOps
         ISubscriptionUsageCache usage,
         IWorkspaceBindingValidator workspaceBindings,
         IWorkspaceDirectoryBrowser workspaceDirectoryBrowser,
+        IVerificationPolicyCatalog verificationPolicies,
         ILogger<NodeTransportClient> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -60,6 +67,7 @@ public sealed class NodeTransportClient : INodeHubOps
         ArgumentNullException.ThrowIfNull(usage);
         ArgumentNullException.ThrowIfNull(workspaceBindings);
         ArgumentNullException.ThrowIfNull(workspaceDirectoryBrowser);
+        ArgumentNullException.ThrowIfNull(verificationPolicies);
         _options = options.Value;
         _credentials = credentials;
         _routing = routing;
@@ -67,6 +75,7 @@ public sealed class NodeTransportClient : INodeHubOps
         _usage = usage;
         _workspaceBindingValidator = workspaceBindings;
         _workspaceDirectoryBrowser = workspaceDirectoryBrowser;
+        _verificationPolicies = verificationPolicies;
         _logger = logger;
     }
 
@@ -96,6 +105,7 @@ public sealed class NodeTransportClient : INodeHubOps
         connection.Closed += OnClosedAsync;
         connection.On<CancelSessionCommand>("CancelSession", OnCancelSessionAsync);
         connection.On<CancelAssignmentCommand>("CancelAssignment", OnCancelAssignmentAsync);
+        connection.On<RecoverAssignmentCommandMessage>("RecoverAssignment", OnRecoverAssignmentAsync);
         connection.On<NodeRuntimeConfigurationMessage>(
             "GetRuntimeConfiguration",
             () => Task.FromResult(_routing.Current));
@@ -114,6 +124,12 @@ public sealed class NodeTransportClient : INodeHubOps
         connection.On<WorkspaceDirectoryBrowseRequestMessage, WorkspaceDirectoryBrowseResponseMessage>(
             WorkspaceDirectoryBrowseCallback.MethodName,
             request => _workspaceDirectoryBrowser.BrowseAsync(request));
+        connection.On<VerificationPolicyCatalogMessage>(
+            "GetVerificationPolicyCatalog",
+            () => Task.FromResult(_verificationPolicies.Capture()));
+        connection.On<VerificationProfileSelectionRequestMessage, VerificationProfileSelectionResultMessage>(
+            "ValidateVerificationProfileSelection",
+            request => Task.FromResult(_verificationPolicies.ValidateSelection(request)));
         await connection.StartAsync(cancellationToken).ConfigureAwait(false);
         _connection = connection;
 
@@ -373,7 +389,61 @@ public sealed class NodeTransportClient : INodeHubOps
             result.CompletedAt,
             result.OutputSummary,
             result.OutputArtifactPath,
-            result.Mandatory);
+            result.Mandatory,
+            result.Fingerprint,
+            result.PolicyRevision,
+            (VerificationRunKind)result.RunKind,
+            result.AttemptId);
+    }
+
+    /// <summary>Loads bounded persisted verification runs for coordinator reuse.</summary>
+    public async Task<IReadOnlyList<VerificationRunDto>> ListVerificationRunsAsync(
+        Guid projectId,
+        Guid requestId,
+        string claimToken,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(claimToken);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        var correlationId = Guid.NewGuid();
+        var connection = RequireConnection();
+        var listed = await connection.InvokeAsync<VerificationRunReplayListMessage>(
+            "ListVerificationRuns",
+            new ListVerificationRunsMessage(
+                correlationId,
+                projectId,
+                requestId,
+                claimToken,
+                sessionId),
+            cancellationToken).ConfigureAwait(false);
+
+        if (listed.CorrelationId != correlationId
+            || listed.ProjectId != projectId
+            || listed.RequestId != requestId
+            || !string.Equals(listed.SessionId, sessionId, StringComparison.Ordinal)
+            || listed.Runs.Length > VerificationReplayLimits.MaxRuns)
+        {
+            throw new InvalidOperationException(
+                "The verification replay response does not match the submitted request.");
+        }
+
+        return [.. listed.Runs.Select(result => new VerificationRunDto(
+            result.Id,
+            result.RequestId,
+            result.ProfileId,
+            result.CommandId,
+            (VerificationRunStatus)result.Status,
+            result.ExitCode,
+            result.StartedAt,
+            result.CompletedAt,
+            result.OutputSummary,
+            OutputArtifactPath: null,
+            result.Mandatory,
+            result.Fingerprint,
+            result.PolicyRevision,
+            (VerificationRunKind)result.RunKind,
+            result.AttemptId))];
     }
 
     internal static VerificationRunMessage CreateVerificationRunMessage(
@@ -399,7 +469,12 @@ public sealed class NodeTransportClient : INodeHubOps
             run.CompletedAt,
             run.OutputSummary,
             run.OutputArtifactPath,
-            run.Mandatory);
+            run.Mandatory,
+            run.Fingerprint,
+            run.PolicyRevision,
+            (int)run.RunKind,
+            run.RunKind.ToString(),
+            run.AttemptId);
     }
 
     /// <summary>First terminalization step (one-argument hub method).</summary>
@@ -499,7 +574,9 @@ public sealed class NodeTransportClient : INodeHubOps
                     f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
                 evidence.VerificationSummary,
                 evidence.RequestBranch,
-                evidence.CheckpointCommitId);
+                evidence.CheckpointCommitId,
+                evidence.VerificationFingerprint,
+                evidence.VerificationPolicyRevision);
 
     /// <summary>Fails closed when the authority's decision does not echo the submitted fence.</summary>
     private static CompletionGateDecision MapDecision(
@@ -597,6 +674,30 @@ public sealed class NodeTransportClient : INodeHubOps
             cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task ReportRecoveryProgressAsync(
+        AssignmentRecoveryProgressMessage message,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var connection = RequireConnection();
+        await connection.InvokeAsync(
+            "ReportRecoveryProgress",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task ReportRecoveryProofAsync(
+        AssignmentRecoveryProofMessage message,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var connection = RequireConnection();
+        await connection.InvokeAsync(
+            "ReportRecoveryProof",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task OnCancelSessionAsync(CancelSessionCommand command)
     {
         if (CancelSessionReceived is not { } handler)
@@ -637,6 +738,31 @@ public sealed class NodeTransportClient : INodeHubOps
                 exception,
                 "CancelAssignment handler failed for {RequestId}.",
                 command.RequestId);
+        }
+    }
+
+    internal async Task OnRecoverAssignmentAsync(RecoverAssignmentCommandMessage command)
+    {
+        if (RecoverAssignmentReceived is not { } handler)
+        {
+            _logger.LogWarning(
+                "RecoverAssignment for {RequestId} attempt {Attempt} received but no worker subscribed; recovery is not started.",
+                command.RequestId,
+                command.Attempt);
+            return;
+        }
+
+        try
+        {
+            await handler(command).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "RecoverAssignment handler failed for {RequestId} attempt {Attempt}.",
+                command.RequestId,
+                command.Attempt);
         }
     }
 

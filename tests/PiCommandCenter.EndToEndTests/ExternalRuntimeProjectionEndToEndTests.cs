@@ -77,7 +77,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
             _root,
             "Review",
             AgentRuntimeMode.Child,
-            "claude-code/default");
+            "claude-code/fable-5-1");
 
         var start = adapter.StartAsync(request, CancellationToken.None);
         await process.WriteStdoutAsync(
@@ -128,7 +128,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
             _root,
             "Review the diff",
             AgentRuntimeMode.Child,
-            "antigravity/default");
+            "antigravity/gemini-3-pro");
 
         var start = adapter.StartAsync(request, CancellationToken.None);
         await process.WaitForPromptAsync(TimeSpan.FromSeconds(5));
@@ -203,7 +203,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
         Assert.Equal(dtos.Count, db.SessionEvents.Count(e => e.SessionId == sessionId));
         var projection = await db.AgentSessions.SingleAsync(s => s.Id == sessionId);
         Assert.Equal(runtime, projection.Runtime);
-        Assert.Equal(runtime + "/" + AgentModelSelector.DefaultModelId, projection.Model);
+        Assert.Equal(ExplicitSelector(runtime), projection.Model);
         Assert.Equal(sessionId, projection.Id);
         Assert.False(string.IsNullOrWhiteSpace(projection.ProviderSessionId));
     }
@@ -221,7 +221,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
             ["parentSessionId"] = e.ParentSessionId,
             ["agentName"] = e.Payload.TryGetValue("agentName", out var n) ? n : "agent",
             ["role"] = e.Payload.TryGetValue("role", out var r) ? r : "reviewer",
-            ["model"] = e.Payload.TryGetValue("model", out var m) ? m : runtime + "/" + AgentModelSelector.DefaultModelId,
+            ["model"] = e.Payload.TryGetValue("model", out var m) ? m : ExplicitSelector(runtime),
         };
         if (!payload.ContainsKey("providerSessionId") || payload["providerSessionId"] is null)
         {
@@ -243,6 +243,14 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
 
     private static NodeEventDto ToDto(NodeEventMessage m) => new(
         m.EventId, m.NodeId, m.ProjectId, m.RequestId, m.SessionId, m.Sequence, m.Type, m.OccurredAt, m.PayloadJson);
+
+    private static string ExplicitSelector(string runtime) => runtime switch
+    {
+        "claude-code" => "claude-code/fable-5-1",
+        "antigravity" => "antigravity/gemini-3-pro",
+        "muse" => "muse/muse-spark-1.3",
+        _ => "codex/gpt-5.6-sol",
+    };
 
     private static async Task<List<NormalizedAgentEvent>> CollectUntilAsync(
         IAsyncEnumerable<NormalizedAgentEvent> watch,

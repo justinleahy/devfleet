@@ -76,6 +76,13 @@ internal static class RequestsEndpoints
         {
             return TypedResults.NotFound(ProjectNotFound(projectId));
         }
+        catch (RequestNotFoundException ex)
+        {
+            return TypedResults.NotFound(Problem(
+                StatusCodes.Status404NotFound,
+                "Request not found",
+                $"No request with id '{ex.Id.Value}' is registered."));
+        }
         catch (ArgumentException ex)
         {
             return TypedResults.BadRequest(Problem(

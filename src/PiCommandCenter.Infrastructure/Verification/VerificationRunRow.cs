@@ -24,4 +24,12 @@ public sealed class VerificationRunRow
     public string? OutputArtifactPath { get; set; }
 
     public bool Mandatory { get; init; }
+
+    public string Fingerprint { get; init; } = string.Empty;
+
+    public string PolicyRevision { get; init; } = string.Empty;
+
+    public string RunKind { get; init; } = string.Empty;
+
+    public Guid AttemptId { get; init; }
 }

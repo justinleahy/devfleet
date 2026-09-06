@@ -40,6 +40,14 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
     public DbSet<PiCommandCenter.Infrastructure.Verification.VerificationRunRow> VerificationRuns => Set<PiCommandCenter.Infrastructure.Verification.VerificationRunRow>();
 
     public DbSet<PiCommandCenter.Infrastructure.Completion.RequestResultRow> RequestResults => Set<PiCommandCenter.Infrastructure.Completion.RequestResultRow>();
+    public DbSet<PiCommandCenter.Infrastructure.Completion.PendingTerminalizationRow> PendingTerminalizations => Set<PiCommandCenter.Infrastructure.Completion.PendingTerminalizationRow>();
+    public DbSet<PiCommandCenter.Infrastructure.Recovery.RecoveryOperationRow> RecoveryOperations => Set<PiCommandCenter.Infrastructure.Recovery.RecoveryOperationRow>();
+    public DbSet<PiCommandCenter.Infrastructure.Recovery.RecoveryHoldRow> RecoveryHolds => Set<PiCommandCenter.Infrastructure.Recovery.RecoveryHoldRow>();
+    public DbSet<PiCommandCenter.Infrastructure.Recovery.RecoveryTargetRow> RecoveryTargets => Set<PiCommandCenter.Infrastructure.Recovery.RecoveryTargetRow>();
+    public DbSet<PiCommandCenter.Infrastructure.Recovery.RecoveryReservationTargetRow> RecoveryReservationTargets => Set<PiCommandCenter.Infrastructure.Recovery.RecoveryReservationTargetRow>();
+    public DbSet<PiCommandCenter.Infrastructure.Recovery.RecoveryIdempotencyRow> RecoveryIdempotencyKeys => Set<PiCommandCenter.Infrastructure.Recovery.RecoveryIdempotencyRow>();
+    public DbSet<PiCommandCenter.Infrastructure.Recovery.RecoveryAuditFactRow> RecoveryAuditFacts => Set<PiCommandCenter.Infrastructure.Recovery.RecoveryAuditFactRow>();
+
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
@@ -74,6 +82,10 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
             project.Property(p => p.DefaultBranch)
                 .IsRequired()
                 .HasMaxLength(128);
+            project.Property(p => p.TrustedVerificationProfileId)
+                .HasMaxLength(Project.MaxTrustedVerificationProfileIdLength);
+            project.Property(p => p.TrustedVerificationProfileRevision)
+                .HasMaxLength(Project.MaxTrustedVerificationProfileRevisionLength);
 
             project.Property(p => p.CreatedAt).HasConversion(
                 timestamp => timestamp.UtcTicks,
@@ -209,6 +221,20 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
                 .IsConcurrencyToken()
                 .HasColumnType("INTEGER");
 
+            request.Property(r => r.OriginalRequestId)
+                .HasConversion(
+                    id => id.HasValue ? id.Value.Value : (Guid?)null,
+                    value => value.HasValue ? new WorkRequestId(value.Value) : null)
+                .HasColumnType("TEXT");
+
+            request.HasOne<WorkRequest>()
+                .WithMany()
+                .HasForeignKey(r => r.OriginalRequestId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            request.HasIndex(r => r.OriginalRequestId)
+                .HasDatabaseName("IX_WorkRequests_OriginalRequestId");
+
             request.HasOne<Project>()
                 .WithMany()
                 .HasForeignKey(r => r.ProjectId)
@@ -289,6 +315,17 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
                 .HasMaxLength(128);
             assignment.Property(a => a.BindingValidationRevisionSnapshot)
                 .HasColumnType("INTEGER");
+            assignment.Property(a => a.VerificationPolicyRevision)
+                .HasMaxLength(ExecutionAssignment.MaxVerificationPolicyRevisionLength);
+            assignment.Property(a => a.BaselineVersion)
+                .HasMaxLength(ExecutionAssignment.MaxBaselineVersionLength);
+            assignment.Property(a => a.TrustedVerificationProfileId)
+                .HasMaxLength(ExecutionAssignment.MaxTrustedVerificationProfileIdLength);
+            assignment.Property(a => a.TrustedVerificationProfileRevision)
+                .HasMaxLength(ExecutionAssignment.MaxTrustedVerificationProfileRevisionLength);
+            assignment.Property(a => a.MandatoryCommandIdsJson)
+                .HasMaxLength(ExecutionAssignment.MaxMandatoryCommandIdsJsonLength);
+            assignment.Ignore(a => a.HasCapturedVerificationPolicy);
             assignment.Property(a => a.State)
                 .HasConversion<string>()
                 .HasMaxLength(32)

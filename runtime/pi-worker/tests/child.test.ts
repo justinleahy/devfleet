@@ -39,7 +39,7 @@ const EXPECTED_CHILD_TOOLS = [
   "release_reservation",
   "request_reservation_handoff",
   "accept_reservation_handoff",
-  "run_verification_command",
+  "run_project_checks",
   "mail_send",
   "mail_reply",
   "mail_inbox",
@@ -186,7 +186,7 @@ describe("child-node protocol mapping", () => {
       return { ok: true };
     }).map((tool) => [tool.name, tool]));
 
-    await byName["run_verification_command"]!.execute({ profileId: "required", commandId: "tests" });
+    await byName["run_project_checks"]!.execute({});
     await byName["mail_reply"]!.execute({
       requestId: "request-1",
       threadId: "thread-1",
@@ -203,12 +203,14 @@ describe("child-node protocol mapping", () => {
     });
 
     assert.deepEqual(seen.map(({ type }) => type), [
-      "verification.request",
+      "verification.intermediate.request",
       "agent.message.send",
       "agent.inbox.read",
       "agent.message.acknowledge",
       "child.result.submit",
     ]);
+    assert.equal("profileId" in seen[0]!.payload, false);
+    assert.equal("commandId" in seen[0]!.payload, false);
     assert.equal(seen[1]!.payload["inReplyToMessageId"], "message-1");
   });
 });

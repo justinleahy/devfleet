@@ -12,7 +12,7 @@ Before implementation, update `SPEC.md`, `README.md`, `docs/architecture.md`, `d
 
 | Question | Decision |
 |---|---|
-| Selector | Reserve `cursor`; use `cursor/default` or `cursor/<SDK-model-id>` |
+| Selector | Reserve `cursor`; use `cursor/<SDK-model-id>` (never a model id of `default`) |
 | Runtime | Dedicated `CursorRuntimeAdapter`, not the Pi adapter |
 | Cursor integration | Official `@cursor/sdk`, local agent runtime |
 | Root orchestration | Keep Pi as the mandatory root; Cursor is initially a child runtime |
@@ -130,7 +130,6 @@ Add `cursor` to `AgentModelSelector` as a reserved external provider prefix. Wit
 Expected selector behavior:
 
 ```text
-cursor/default       -> omit Agent.create().model; Cursor chooses its configured default
 cursor/composer-2.5  -> model: { id: "composer-2.5" }
 ```
 
@@ -148,17 +147,17 @@ A possible read/write route after the adapter passes its safety gates:
 Pi:
   RoleRoutes:
     architect:
-      - Model: cursor/default
-      - Model: codex/default
+      - Model: cursor/composer-2.5
+      - Model: codex/gpt-5.6-sol
     implementer:
       - Model: cursor/composer-2.5
-      - Model: codex/default
+      - Model: codex/gpt-5.6-sol
     reviewer:
-      - Model: cursor/default
-      - Model: antigravity/default
+      - Model: cursor/composer-2.5
+      - Model: antigravity/gemini-3-pro
     verifier:
-      - Model: cursor/default
-      - Model: codex/default
+      - Model: cursor/composer-2.5
+      - Model: codex/gpt-5.6-sol
 ```
 
 Do not add Cursor to default routes until the operator has enabled the adapter and discovery/readiness positively verifies the installed SDK and authenticated account.
@@ -364,7 +363,7 @@ Exit condition: install, login, discovery, one real read-only session, one reser
 ### Quota-free tests
 
 - `cursor` is reserved and never falls through to Pi.
-- `cursor/default` omits the SDK model; concrete ids pass through unchanged.
+- A model id of `default` is rejected; concrete ids pass through unchanged as the SDK `model.id`.
 - Invalid or duplicate model selectors fail closed.
 - Model discovery validates, deduplicates, sorts, times out, and rejects malformed/oversized output.
 - Missing auth maps to fixed blocked/input-required state without raw diagnostics.

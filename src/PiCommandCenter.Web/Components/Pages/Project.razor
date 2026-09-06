@@ -16,6 +16,8 @@
 @using PiCommandCenter.Application.Live
 @using PiCommandCenter.Web.Components.Live
 @using PiCommandCenter.Contracts.NodeTransport
+@using PiCommandCenter.Application.VerificationPolicy
+@using PiCommandCenter.Web.Components.Recovery
 @implements IAsyncDisposable
 @inject IProjectCatalog Catalog
 @inject IWorkspaceBindingCatalog Bindings
@@ -27,6 +29,7 @@
 @inject IToastService ToastService
 @inject IProjectionNotifier Notifier
 @inject INodeWorkspaceDirectoryGateway Directories
+@inject IProjectVerificationPolicyService VerificationPolicy
 
 <PageTitle>@(_project?.DisplayName ?? "Project") &middot; DevFleet</PageTitle>
 
@@ -63,6 +66,11 @@ else
                     </FluentBadge>
                 </div>
                 <div class="head-actions">
+                    <FluentAnchor Href="#project-recovery"
+                                  Appearance="@(_recovery is null ? Appearance.Outline : Appearance.Accent)"
+                                  Class="action">
+                        Recover project
+                    </FluentAnchor>
                     <FluentButton Appearance="Appearance.Stealth"
                                   OnClick="ReloadAsync"
                                   Disabled="@_submitting"
@@ -82,6 +90,24 @@ else
                               Title="Could not load requests"
                               AllowDismiss="false">
                 @_loadError
+            </FluentMessageBar>
+        }
+
+        @if (_recovery is { } recovery)
+        {
+            <FluentMessageBar Intent="MessageIntent.Warning"
+                              Title="@recovery.Title"
+                              AllowDismiss="false">
+                @recovery.Detail
+                <span class="recovery-actions">
+                    <a class="recovery-link" href="#project-recovery">Open project recovery</a>
+                    @if (recovery.RequestId is { } stuckRequestId)
+                    {
+                        <a class="recovery-link" href="@($"/requests/{stuckRequestId}")">
+                            Open @recovery.RequestTitle
+                        </a>
+                    }
+                </span>
             </FluentMessageBar>
         }
 
@@ -259,6 +285,15 @@ else
                             </p>
 
                         }
+                        @if (_nodeError is null && _nodes.Count > 0)
+                        {
+                            <div role="note">
+                                <FluentMessageBar Intent="MessageIntent.Warning" AllowDismiss="false">
+                                    <text>Designation consents to local Git changes made only when the workspace needs preparation. This directory is not a Git repository. DevFleet will initialize it and commit its existing non-ignored contents when the first request starts. Existing files are preserved.</text>
+                                </FluentMessageBar>
+                            </div>
+                        }
+
 
                         <FluentStack HorizontalGap="8" VerticalGap="8" Wrap="true">
                             @if (_nodeError is null && _nodes.Count > 0)
@@ -313,6 +348,93 @@ else
                         </dl>
                     </section>
                 </div>
+            </section>
+        </FluentCard>
+
+        <FluentCard>
+            <section class="panel" aria-labelledby="verification-policy-heading">
+                <h2 id="verification-policy-heading">Verification policy</h2>
+                <p class="panel-lead">
+                    Automatic baseline checks always run. Project checks are optional trusted
+                    commands from the designated node.
+                </p>
+
+                <dl class="facts">
+                    <dt>Automatic baseline</dt>
+                    <dd>
+                        <FluentBadge Appearance="Appearance.Accent">Always enabled</FluentBadge>
+                        <span class="node-seen">devfleet-baseline · version 1</span>
+                    </dd>
+                    <dt>Readiness</dt>
+                    <dd>@VerificationReadinessLabel()</dd>
+                </dl>
+
+                @if (_verificationWarning is not null)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Warning"
+                                      Title="Project checks not selected"
+                                      AllowDismiss="false">
+                        @_verificationWarning
+                    </FluentMessageBar>
+                }
+
+                @if (_verificationError is not null)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Error"
+                                      Title="Verification policy action failed"
+                                      AllowDismiss="false">
+                        @_verificationError
+                    </FluentMessageBar>
+                }
+
+                @if (string.IsNullOrWhiteSpace(project.TrustedVerificationProfileId))
+                {
+                    <p class="panel-lead">
+                        Baseline repository checks will run. No project test suite is configured.
+                    </p>
+                }
+
+                <div class="form-grid">
+                    <FluentSelect TOption="VerificationProfileChoice"
+                                  Label="Project checks"
+                                  Items="@_verificationChoices"
+                                  OptionText="@(choice => choice.Label)"
+                                  OptionValue="@(choice => choice.Id)"
+                                  @bind-Value="_selectedVerificationProfileId"
+                                  Disabled="@(_verificationBusy || _loading)"
+                                  Class="field" />
+                </div>
+
+                @if (_verificationCatalog is { Profiles.Count: > 0 } catalog)
+                {
+                    <ul class="facts">
+                        @foreach (var profile in catalog.Profiles)
+                        {
+                            <li class="node-seen">
+                                <span class="node-name">@profile.DisplayLabel</span>
+                                @foreach (var command in profile.Commands)
+                                {
+                                    <span>
+                                        @command.DisplayLabel
+                                        (@command.WorkingDirectoryLabel,
+                                        @(command.Mandatory ? "mandatory" : "optional"),
+                                        @command.TimeoutSeconds s)
+                                    </span>
+                                }
+                            </li>
+                        }
+                    </ul>
+                }
+
+                <FluentStack HorizontalGap="8" VerticalGap="8" Wrap="true">
+                    <FluentButton Appearance="Appearance.Accent"
+                                  OnClick="SaveVerificationPolicyAsync"
+                                  Loading="@_verificationBusy"
+                                  Disabled="@(_verificationBusy || _loading || project.Binding is null)"
+                                  Class="action">
+                        Save project checks
+                    </FluentButton>
+                </FluentStack>
             </section>
         </FluentCard>
 
@@ -579,6 +701,11 @@ else
                 </ul>
             }
         </section>
+
+        @* The durable recovery surface itself. It renders its own labeled section and the
+           #project-recovery anchor every entry point on this page and elsewhere links to;
+           LiveView already reloads this page when recovery commits a durable change. *@
+        <ProjectRecoveryPanel ProjectId="@ProjectId" />
     </div>
 }
 
@@ -642,6 +769,7 @@ else
                         <span>Listing folders on the node</span>
                     </div>
                 }
+
                 else if (_pickerEntries.Count > 0)
                 {
                     <ul class="folder-list">
@@ -722,6 +850,7 @@ else
     private int _trackedSessions;
     private IReadOnlyList<ReservationLeaseDto> _leases = Array.Empty<ReservationLeaseDto>();
     private string? _reservationError;
+    private RecoveryCallout? _recovery;
 
     private string? _bindingNodeId;
     private string? _bindingPath = string.Empty;
@@ -730,6 +859,16 @@ else
     private string? _bindingLock;
     private bool _bindingBusy;
     private bool _bindingSeeded;
+
+    private VerificationPolicyCatalogMessage? _verificationCatalog;
+    private IReadOnlyList<VerificationProfileChoice> _verificationChoices =
+        [new VerificationProfileChoice(string.Empty, "None")];
+    private string? _selectedVerificationProfileId = string.Empty;
+    private string? _verificationError;
+    private string? _verificationWarning;
+    private bool _verificationBusy;
+
+    private sealed record VerificationProfileChoice(string Id, string Label);
 
     /// <summary>
     /// Folder picker state. The listing is node-local: the control plane holds only what the
@@ -816,6 +955,7 @@ else
         _busy = true;
         _loadError = null;
         _nodeError = null;
+        _recovery = null;
         if (showSpinner)
         {
             _loading = true;
@@ -841,8 +981,10 @@ else
             await LoadSessionsAsync(requests);
             await LoadNodesAsync(_project.Binding);
             ComputeBindingLock(_project.Binding, requests);
+            ComputeRecoveryEntry(requests);
             SeedBindingForm(_project.Binding);
             await LoadReservationsAsync();
+            await LoadVerificationPolicyAsync(_project);
         }
         catch (ProjectNotFoundException)
         {
@@ -1081,6 +1223,106 @@ else
         state is ExecutionAssignmentState.Completed
             or ExecutionAssignmentState.Failed
             or ExecutionAssignmentState.Cancelled;
+
+    /// <summary>
+    /// One contextual entry into the recovery panel, derived only from persisted facts already
+    /// rendered on this page.
+    /// </summary>
+    private readonly record struct RecoveryCallout(
+        string Title,
+        string Detail,
+        Guid? RequestId,
+        string? RequestTitle);
+
+    /// <summary>
+    /// Picks the retained execution fact that Recover project answers. Only a nonterminal
+    /// assignment qualifies, so an idle project with an offline node keeps its ordinary
+    /// scheduling explanation instead of being told to recover, and uncertain ownership
+    /// outranks a quiescing stop, an unreachable owner, or a blocked request.
+    /// </summary>
+    private void ComputeRecoveryEntry(IReadOnlyList<WorkRequestDto> requests)
+    {
+        _recovery = null;
+
+        foreach (var request in requests)
+        {
+            if (request.Assignment is not { } assignment || IsAssignmentTerminal(assignment.State))
+            {
+                continue;
+            }
+
+            if (RetainedCallout(request, assignment) is not { } callout)
+            {
+                continue;
+            }
+
+            if (assignment.State == ExecutionAssignmentState.RecoveryRequired)
+            {
+                _recovery = callout;
+                return;
+            }
+
+            _recovery ??= callout;
+        }
+    }
+
+    private RecoveryCallout? RetainedCallout(WorkRequestDto request, ExecutionAssignmentProjectionDto assignment)
+    {
+        if (assignment.State == ExecutionAssignmentState.RecoveryRequired)
+        {
+            return new RecoveryCallout(
+                "This project needs recovery",
+                $"\u201c{request.Title}\u201d holds a RecoveryRequired assignment. Ownership is "
+                    + "uncertain, so capacity and the workspace designation stay held and no second "
+                    + "writer is permitted until recovery resolves it.",
+                request.Id,
+                request.Title);
+        }
+
+        if (assignment.State == ExecutionAssignmentState.Cancelling)
+        {
+            return new RecoveryCallout(
+                "Cancellation has not released ownership",
+                $"\u201c{request.Title}\u201d is Cancelling. The assigned node has not proved "
+                    + "quiescence, so the writer slot and its reservations are still held.",
+                request.Id,
+                request.Title);
+        }
+
+        if (assignment.State == ExecutionAssignmentState.Finalizing)
+        {
+            return new RecoveryCallout(
+                "Finalization has not released ownership",
+                $"\u201c{request.Title}\u201d is Finalizing. Completion was accepted, but this "
+                    + "project's capacity stays held until the assigned node quiesces.",
+                request.Id,
+                request.Title);
+        }
+
+        if (_nodeError is not null || _node is null || _node.Status != NodeStatus.Online)
+        {
+            return new RecoveryCallout(
+                "The designated node is not connected",
+                $"\u201c{request.Title}\u201d holds a {assignment.State} assignment, and the "
+                    + "designated node is not connected. Silence is not proof that its work stopped, "
+                    + "so ownership stays with that node.",
+                request.Id,
+                request.Title);
+        }
+
+        if ((WorkRequestStatus)request.Status == WorkRequestStatus.Blocked)
+        {
+            return new RecoveryCallout(
+                "A blocked request is holding execution",
+                $"\u201c{request.Title}\u201d is blocked in {request.BlockedPhaseName} while its "
+                    + "assignment holds capacity. Answer the request itself first; recover the "
+                    + "project only if its execution cannot continue.",
+                request.Id,
+                request.Title);
+        }
+
+        return null;
+    }
 
     /// <summary>
     /// Operator label for a server-issued scheduling code. The server owns precedence, detail,
@@ -1435,6 +1677,132 @@ else
         {
             _submitting = false;
         }
+    }
+
+    private async Task LoadVerificationPolicyAsync(ProjectDto project)
+    {
+        _verificationError = null;
+        _verificationWarning = null;
+        _verificationCatalog = null;
+        _verificationChoices = [new VerificationProfileChoice(string.Empty, "None")];
+        _selectedVerificationProfileId = project.TrustedVerificationProfileId ?? string.Empty;
+        if (project.Binding is null || _node is null || _node.Status != NodeStatus.Online)
+        {
+            return;
+        }
+
+        try
+        {
+            var catalog = await VerificationPolicy.GetCatalogAsync(
+                new ProjectId(project.Id),
+                CancellationToken.None);
+            _verificationCatalog = catalog;
+            var choices = new List<VerificationProfileChoice>
+            {
+                new(string.Empty, "None"),
+            };
+            foreach (var profile in catalog.Profiles)
+            {
+                choices.Add(new VerificationProfileChoice(profile.Id, profile.DisplayLabel));
+            }
+
+            _verificationChoices = choices;
+            if (string.IsNullOrWhiteSpace(project.TrustedVerificationProfileId)
+                && catalog.Profiles.Count > 0)
+            {
+                _verificationWarning = "Node advertises trusted profiles but none is selected";
+            }
+        }
+        catch (Exception ex)
+        {
+            _verificationError = ex.Message;
+        }
+    }
+
+    private async Task SaveVerificationPolicyAsync()
+    {
+        if (_project is null || _verificationBusy)
+        {
+            return;
+        }
+
+        _verificationBusy = true;
+        _verificationError = null;
+        try
+        {
+            string? profileId = string.IsNullOrWhiteSpace(_selectedVerificationProfileId)
+                ? null
+                : _selectedVerificationProfileId.Trim();
+            string? revision = null;
+            if (profileId is not null)
+            {
+                revision = _verificationCatalog?.Profiles
+                    .FirstOrDefault(profile =>
+                        string.Equals(profile.Id, profileId, StringComparison.Ordinal))
+                    ?.Revision;
+            }
+
+            _project = await VerificationPolicy.SelectAsync(
+                new ProjectId(ProjectId),
+                profileId,
+                revision,
+                CancellationToken.None);
+            _selectedVerificationProfileId = _project.TrustedVerificationProfileId ?? string.Empty;
+            await LoadVerificationPolicyAsync(_project);
+            ToastService.ShowSuccess(
+                profileId is null
+                    ? "Project checks cleared. Baseline repository checks will run."
+                    : "Project checks saved.");
+        }
+        catch (Exception ex)
+        {
+            _verificationError = ex.Message;
+        }
+        finally
+        {
+            _verificationBusy = false;
+        }
+    }
+
+    private string VerificationReadinessLabel()
+    {
+        if (_project?.Binding is null)
+        {
+            return "No designated node";
+        }
+
+        if (_node is null || _node.Status != NodeStatus.Online)
+        {
+            return "Node offline";
+        }
+
+        var selectedId = _project.TrustedVerificationProfileId;
+        var selectedRevision = _project.TrustedVerificationProfileRevision;
+        if (string.IsNullOrWhiteSpace(selectedId))
+        {
+            return _verificationCatalog is { BaselineAvailable: true } or null
+                ? "Ready"
+                : "Baseline unavailable";
+        }
+
+        if (_verificationCatalog is null)
+        {
+            return _verificationError is null ? "Ready" : "Catalog unavailable";
+        }
+
+        var advertised = _verificationCatalog.Profiles.FirstOrDefault(profile =>
+            string.Equals(profile.Id, selectedId, StringComparison.Ordinal));
+        if (advertised is null)
+        {
+            return "Selected profile unavailable";
+        }
+
+        if (!string.Equals(advertised.Revision, selectedRevision, StringComparison.Ordinal))
+        {
+            return "Policy revision stale";
+        }
+
+        return "Ready";
     }
 
     private static TEnum Parse<TEnum>(string? name, TEnum fallback)

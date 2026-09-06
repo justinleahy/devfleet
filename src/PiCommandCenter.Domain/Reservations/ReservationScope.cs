@@ -10,6 +10,9 @@ public readonly record struct ReservationScope
 {
     public const int MaxPathLength = 1024;
 
+    /// <summary>Named shared resource that excludes every source file/directory lease on the same Project.</summary>
+    public const string ProjectBuildResource = "project-build";
+
     private ReservationScope(ReservationScopeKind kind, string path)
     {
         Kind = kind;
@@ -112,10 +115,17 @@ public readonly record struct ReservationScope
     /// <summary>
     /// Deterministic PoC conflict rule: same resource name conflicts; equal files conflict;
     /// a file conflicts with any containing directory prefix; directories conflict when
-    /// either prefix contains the other. A resource never conflicts with a path scope.
+    /// either prefix contains the other. <see cref="ProjectBuildResource"/> additionally
+    /// conflicts with every file and directory scope. Other resources never conflict with
+    /// a path scope.
     /// </summary>
     public static bool ConflictsWith(ReservationScope existing, ReservationScope requested)
     {
+        if (IsProjectBuildSourceConflict(existing, requested))
+        {
+            return true;
+        }
+
         if (existing.Kind == ReservationScopeKind.Resource
             || requested.Kind == ReservationScopeKind.Resource)
         {
@@ -178,4 +188,18 @@ public readonly record struct ReservationScope
         _ = kind;
         return value;
     }
+
+    /// <summary>
+    /// True when one scope is <see cref="ProjectBuildResource"/> and the other is a file or directory.
+    /// </summary>
+    public static bool IsProjectBuildSourceConflict(ReservationScope existing, ReservationScope requested) =>
+        (IsProjectBuild(existing) && IsSourceScope(requested))
+        || (IsProjectBuild(requested) && IsSourceScope(existing));
+
+    private static bool IsProjectBuild(ReservationScope scope) =>
+        scope.Kind == ReservationScopeKind.Resource
+        && string.Equals(scope.Path, ProjectBuildResource, StringComparison.Ordinal);
+
+    private static bool IsSourceScope(ReservationScope scope) =>
+        scope.Kind is ReservationScopeKind.File or ReservationScopeKind.Directory;
 }

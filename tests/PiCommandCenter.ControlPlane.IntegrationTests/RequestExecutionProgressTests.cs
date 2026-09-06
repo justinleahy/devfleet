@@ -1,16 +1,21 @@
 using PiCommandCenter.Application.Requests;
+using PiCommandCenter.Application.Reservations;
 using PiCommandCenter.Application.Sessions;
+using PiCommandCenter.Application.Verification;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Sessions;
+using PiCommandCenter.Domain.Verification;
 using PiCommandCenter.Web.Components.Requests;
 
 namespace PiCommandCenter.ControlPlane.IntegrationTests;
 
 /// <summary>
-/// Covers the reducer behind the request page's "Ongoing progress" section: it must read a live
-/// request's durable facts (including Pi's nested payload shape), freeze a terminal request's
-/// duration at the last durable timestamp, keep only the newest few facts in newest-first order,
-/// and never surface model-authored response or thinking text.
+/// Covers the read helpers behind the request page: the "Ongoing progress" reducer, which must
+/// read a live request's durable facts (including Pi's nested payload shape), freeze a terminal
+/// request's duration at the last durable timestamp, keep only the newest few facts in
+/// newest-first order, and never surface model-authored response or thinking text; the
+/// verification view, which must keep baseline, project, and intermediate runs apart and treat a
+/// superseded fingerprint as history; and the attention scanner's verification rule.
 /// </summary>
 public class RequestExecutionProgressTests
 {
@@ -205,6 +210,265 @@ public class RequestExecutionProgressTests
         }
     }
 
+    [Fact]
+    public void Every_verification_event_is_narrated_and_none_of_them_moves_the_phase()
+    {
+        var request = Request(WorkRequestStatus.Executing, updatedAt: Queued.AddMinutes(2));
+        var events = new[]
+        {
+            Event(1, "request.phase_changed", Queued.AddSeconds(1), """{"phase":"Implementing"}"""),
+            Event(
+                2,
+                "verification.rejected",
+                Queued.AddSeconds(2),
+                """{"data":{"summary":"An active source mutation blocks verification.","errorCode":"active_source_mutation"}}"""),
+            Event(
+                3,
+                "verification.intermediate",
+                Queued.AddSeconds(3),
+                """{"summary":"Project checks passed.","decision":"Passed"}"""),
+            Event(4, "verification.cancelled", Queued.AddSeconds(4), """{"summary":"Verification was cancelled."}"""),
+        };
+
+        var progress = RequestExecutionProgressReader.Read(
+            request,
+            Array.Empty<AgentSessionDto>(),
+            events,
+            Queued.AddSeconds(10));
+
+        // A rejected precondition and an intermediate check are narrated, but the phase stays the
+        // one the control plane last recorded.
+        Assert.Equal("Implementing", progress.Phase);
+        Assert.Equal(
+            new[]
+            {
+                "Verification cancelled \u2014 Verification was cancelled.",
+                "Intermediate project checks ran \u2014 Project checks passed.",
+                "Verification did not start; the phase is unchanged \u2014 An active source mutation blocks verification.",
+                "Phase changed to Implementing",
+            },
+            progress.Facts.Select(fact => fact.Label).ToArray());
+    }
+
+    [Fact]
+    public void Run_kinds_separate_and_a_superseded_green_attempt_reads_as_history()
+    {
+        var runs = new[]
+        {
+            Run("repository-integrity", VerificationRunStatus.Passed, mandatory: true, fingerprint: "sha256:old"),
+            Run("dotnet-test", VerificationRunStatus.Passed, mandatory: true, fingerprint: "sha256:old", kind: VerificationRunKind.ProjectCheck),
+            Run("dotnet-test", VerificationRunStatus.Failed, mandatory: true, kind: VerificationRunKind.Intermediate, startedAt: Queued.AddMinutes(2)),
+            Run("repository-integrity", VerificationRunStatus.Running, mandatory: true, startedAt: Queued.AddMinutes(3)),
+        };
+
+        var view = RequestVerificationViewReader.Read(runs, Array.Empty<AgentSessionDto>());
+
+        Assert.Equal("sha256:new", view.Fingerprint);
+        Assert.Equal(["repository-integrity"], view.Baseline.Select(row => row.Run.CommandId));
+        Assert.Empty(view.ProjectChecks);
+        // The old attempt was all green; it is history, so it produces no success sentence.
+        Assert.Null(view.BaselineSuccess);
+        Assert.Null(view.ProjectChecksSuccess);
+        Assert.Equal(2, view.History.Count);
+        Assert.DoesNotContain(view.History, row => row.IsCurrent);
+        // The intermediate failure is neither a current row nor history of the final policy.
+        var intermediate = Assert.Single(view.Intermediate);
+        Assert.Equal(VerificationRunKind.Intermediate, intermediate.Run.RunKind);
+        Assert.False(intermediate.IsBlocking);
+        Assert.False(view.HasBlockingFailure);
+        Assert.Equal("repository-integrity", view.Running?.Run.CommandId);
+    }
+
+    [Fact]
+    public void Success_copy_names_the_baseline_and_the_passed_project_commands()
+    {
+        var runs = new[]
+        {
+            Run("repository-integrity", VerificationRunStatus.Passed, mandatory: true),
+            Run("whitespace", VerificationRunStatus.Failed, mandatory: false),
+            Run("dotnet-test", VerificationRunStatus.Passed, mandatory: true, kind: VerificationRunKind.ProjectCheck),
+            Run("runtime-test", VerificationRunStatus.Passed, mandatory: true, kind: VerificationRunKind.ProjectCheck),
+        };
+
+        var view = RequestVerificationViewReader.Read(runs, Array.Empty<AgentSessionDto>());
+
+        Assert.Equal("Baseline checks passed.", view.BaselineSuccess);
+        Assert.Equal("Project checks passed: dotnet-test, runtime-test.", view.ProjectChecksSuccess);
+        // The optional whitespace failure warns; it never blocks and never reads as failed.
+        Assert.Equal(1, view.WarningCount);
+        Assert.False(view.HasBlockingFailure);
+        Assert.True(view.Baseline.Single(row => row.Run.CommandId == "whitespace").IsWarning);
+        Assert.False(view.Baseline.Single(row => row.Run.CommandId == "whitespace").IsBlocking);
+    }
+
+    [Fact]
+    public void A_mandatory_final_failure_is_the_only_verification_run_that_needs_attention()
+    {
+        var request = Request(WorkRequestStatus.Blocked, updatedAt: Queued.AddMinutes(5));
+        var runs = new[]
+        {
+            Run("whitespace", VerificationRunStatus.Failed, mandatory: false),
+            Run("dotnet-test", VerificationRunStatus.Failed, mandatory: true, kind: VerificationRunKind.Intermediate),
+            Run("legacy-check", VerificationRunStatus.TimedOut, mandatory: true, fingerprint: "sha256:old", kind: VerificationRunKind.ProjectCheck),
+            Run("repository-integrity", VerificationRunStatus.TimedOut, mandatory: true),
+        };
+
+        var signals = new List<AttentionSignal>();
+        AttentionScanner.Scan(
+            signals,
+            request,
+            "Fleet",
+            Array.Empty<AgentSessionDto>(),
+            Array.Empty<ReservationLeaseDto>(),
+            runs,
+            RequestInsights.Empty,
+            Queued.AddMinutes(6));
+
+        var signal = Assert.Single(signals);
+        Assert.Equal(AttentionKind.VerificationFailed, signal.Kind);
+        Assert.Equal(AttentionSeverity.Error, signal.Severity);
+        Assert.Equal("Verification repository-integrity timed out", signal.Title);
+        Assert.Contains("Mandatory baseline command", signal.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_newer_admitted_start_makes_old_green_rows_history_and_nonblocking()
+    {
+        var request = Request(WorkRequestStatus.Verifying, updatedAt: Queued.AddMinutes(5));
+        var runs = new[]
+        {
+            Run("repository-integrity", VerificationRunStatus.Passed, mandatory: true, fingerprint: "sha256:old"),
+            Run("dotnet-test", VerificationRunStatus.Passed, mandatory: true, fingerprint: "sha256:old", kind: VerificationRunKind.ProjectCheck),
+            Run("legacy-check", VerificationRunStatus.Failed, mandatory: true, fingerprint: "sha256:old", kind: VerificationRunKind.ProjectCheck),
+        };
+        var events = new[]
+        {
+            Event(
+                8,
+                "verification.started",
+                Queued.AddMinutes(4),
+                """{"fingerprint":"sha256:new","policyRevision":"policy-1"}"""),
+        };
+
+        var view = RequestVerificationViewReader.Read(runs, Array.Empty<AgentSessionDto>(), events);
+
+        Assert.Equal("sha256:new", view.Fingerprint);
+        Assert.Equal("policy-1", view.PolicyRevision);
+        Assert.True(view.IsAdmittedInProgress);
+        Assert.True(view.Admitted!.IsOpen);
+        Assert.Equal(Queued.AddMinutes(4), view.Admitted.StartedAt);
+        Assert.Empty(view.Baseline);
+        Assert.Empty(view.ProjectChecks);
+        Assert.Equal(3, view.History.Count);
+        Assert.DoesNotContain(view.History, row => row.IsCurrent);
+        Assert.Null(view.BaselineSuccess);
+        Assert.Null(view.ProjectChecksSuccess);
+        Assert.False(view.HasBlockingFailure);
+        Assert.Null(view.Running);
+
+        var signals = new List<AttentionSignal>();
+        AttentionScanner.Scan(
+            signals,
+            request,
+            "Fleet",
+            Array.Empty<AgentSessionDto>(),
+            Array.Empty<ReservationLeaseDto>(),
+            runs,
+            RequestInsights.Empty,
+            Queued.AddMinutes(6),
+            events);
+
+        Assert.Empty(signals);
+    }
+
+    [Fact]
+    public void Command_progress_shows_current_command_and_clears_on_matching_terminal()
+    {
+        var started = Queued.AddMinutes(4);
+        var commandAt = started.AddSeconds(2);
+        var completed = started.AddSeconds(20);
+        var open = new[]
+        {
+            Event(
+                8,
+                "verification.started",
+                started,
+                """{"fingerprint":"sha256:new","policyRevision":"policy-1"}"""),
+            Event(
+                9,
+                "verification.command.started",
+                commandAt,
+                """{"fingerprint":"sha256:new","policyRevision":"policy-1","commandId":"repository-integrity","runKind":"Baseline","mandatory":true,"timeoutSeconds":900,"startedAt":"2026-09-06T12:04:02+00:00","eventTime":"2026-09-06T12:04:02+00:00"}"""),
+        };
+
+        var view = RequestVerificationViewReader.Read(
+            Array.Empty<VerificationRunDto>(),
+            Array.Empty<AgentSessionDto>(),
+            open);
+
+        Assert.True(view.IsAdmittedInProgress);
+        Assert.NotNull(view.Admitted!.Command);
+        var command = view.Admitted.Command;
+        Assert.Equal("repository-integrity", command.CommandId);
+        Assert.Equal(900, command.TimeoutSeconds);
+        Assert.True(command.Mandatory);
+        Assert.Equal("Baseline", command.RunKind);
+
+        var closed = open.Concat(
+        [
+            Event(
+                10,
+                "verification.completed",
+                completed,
+                """{"fingerprint":"sha256:new","policyRevision":"policy-1"}"""),
+        ]).ToArray();
+
+        var after = RequestVerificationViewReader.Read(
+            Array.Empty<VerificationRunDto>(),
+            Array.Empty<AgentSessionDto>(),
+            closed);
+
+        Assert.False(after.IsAdmittedInProgress);
+        Assert.Null(after.Admitted!.Command);
+    }
+
+
+    [Fact]
+    public void Assigned_project_check_copy_ignores_a_later_live_Project_selection()
+    {
+        var assignment = new ExecutionAssignmentProjectionDto(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "/repos/devfleet",
+            "main",
+            BindingValidationRevisionSnapshot: 1,
+            ExecutionAssignmentState.Running,
+            Queued,
+            Queued.AddMinutes(5),
+            LastRenewedAt: null,
+            LastReconciledAt: null,
+            TerminalAt: null,
+            VerificationPolicyRevision: "policy-snap",
+            BaselineVersion: "baseline-1",
+            TrustedVerificationProfileId: "ci",
+            TrustedVerificationProfileRevision: "rev-assigned",
+            MandatoryCommandIdsJson: "[\"dotnet-test\"]");
+
+        var copy = RequestVerificationPolicyCopy.ProjectChecksMeta(
+            assignment,
+            liveProfileId: "nightly",
+            liveProfileRevision: "rev-live",
+            currentProjectChecks: Array.Empty<VerificationRow>(),
+            isAssigned: true,
+            isTerminal: false);
+
+        Assert.Equal("ci \u00b7 revision rev-assigned \u00b7 assigned snapshot", copy);
+        Assert.DoesNotContain("nightly", copy, StringComparison.Ordinal);
+        Assert.DoesNotContain("current Project selection", copy, StringComparison.Ordinal);
+    }
+
     private static WorkRequestDto Request(WorkRequestStatus status, DateTimeOffset updatedAt) =>
         new(
             Guid.NewGuid(),
@@ -242,7 +506,7 @@ public class RequestExecutionProgressTests
             "AgentOne",
             "implementer",
             "pi",
-            "pi/default",
+            "codex/gpt-5.6-sol",
             "prov-1",
             liveness,
             activity,
@@ -261,4 +525,28 @@ public class RequestExecutionProgressTests
         DateTimeOffset occurredAt,
         string payloadJson) =>
         new($"evt-{sequence}", "sess-root", sequence, type, occurredAt, payloadJson);
+
+    private static VerificationRunDto Run(
+        string commandId,
+        VerificationRunStatus status,
+        bool mandatory,
+        string fingerprint = "sha256:new",
+        VerificationRunKind kind = VerificationRunKind.Baseline,
+        DateTimeOffset? startedAt = null) =>
+        new(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            kind == VerificationRunKind.Baseline ? "devfleet-baseline" : "default",
+            commandId,
+            status,
+            status == VerificationRunStatus.Passed ? 0 : 1,
+            startedAt ?? Queued.AddMinutes(1),
+            status == VerificationRunStatus.Running ? null : (startedAt ?? Queued.AddMinutes(1)).AddSeconds(3),
+            OutputSummary: null,
+            OutputArtifactPath: null,
+            mandatory,
+            fingerprint,
+            PolicyRevision: "policy-1",
+            kind,
+            AttemptId: Guid.NewGuid());
 }

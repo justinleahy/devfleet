@@ -32,6 +32,10 @@ namespace PiCommandCenter.ControlPlane.IntegrationTests;
 public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPlaneFixture>, IDisposable
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+    private const string Fingerprint = "fingerprint-current";
+    private const string PolicyRevision = "policy-1";
+    private const string BaselineCommandId = "repository-integrity";
+    private const string ProjectCommandId = "dotnet-test";
 
     private readonly ControlPlaneFixture _fixture;
     private readonly HubConnection _connection;
@@ -48,21 +52,21 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
     public void Dispose() => _connection.DisposeAsync().AsTask().GetAwaiter().GetResult();
 
     [Fact]
-    public async Task RecordVerification_then_EvaluateCompletion_preserves_complete_missing_list()
+    public async Task Baseline_run_mapping_cannot_skip_a_selected_project_check()
     {
         await RegisterNodeAsync();
-        var (projectId, requestId, claimToken, rootSessionId) = await SeedRequestAsync(advanceToVerifying: false);
+        var (projectId, requestId, claimToken, rootSessionId) = await SeedRequestAsync(
+            advanceToVerifying: false,
+            mandatoryCommandIds: [BaselineCommandId, ProjectCommandId]);
 
-        var fail = await _connection.InvokeAsync<VerificationRunResultMessage>(
-            "RecordVerification",
-            Run(projectId, requestId, claimToken, rootSessionId, VerificationRunStatus.Failed, exitCode: 1, mandatory: true));
-        Assert.Equal((int)VerificationRunStatus.Failed, fail.Status);
-        Assert.NotEqual(Guid.Empty, fail.Id);
-
-        var pass = await _connection.InvokeAsync<VerificationRunResultMessage>(
+        var recorded = await _connection.InvokeAsync<VerificationRunResultMessage>(
             "RecordVerification",
             Run(projectId, requestId, claimToken, rootSessionId, VerificationRunStatus.Passed, exitCode: 0, mandatory: true));
-        Assert.Equal((int)VerificationRunStatus.Passed, pass.Status);
+        Assert.Equal((int)VerificationRunStatus.Passed, recorded.Status);
+        Assert.Equal(Fingerprint, recorded.Fingerprint);
+        Assert.Equal(PolicyRevision, recorded.PolicyRevision);
+        Assert.Equal((int)VerificationRunKind.Baseline, recorded.RunKind);
+        Assert.NotEqual(Guid.Empty, recorded.AttemptId);
 
         var decision = await _connection.InvokeAsync<CompletionGateDecisionMessage>(
             "BeginTerminalization",
@@ -73,7 +77,13 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
                 claimToken,
                 rootSessionId,
                 TerminalizationIntent.Complete,
-                new CompletionEvidenceMessage("", null, [], ""),
+                new CompletionEvidenceMessage(
+                    "",
+                    null,
+                    [],
+                    "",
+                    VerificationFingerprint: Fingerprint,
+                    VerificationPolicyRevision: PolicyRevision),
                 Reason: null));
 
         Assert.False(decision.Accepted);
@@ -83,14 +93,16 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
         Assert.Contains(CompletionRequirements.PlanEvent, decision.MissingRequirements);
         Assert.Contains(CompletionRequirements.ImplementationChild, decision.MissingRequirements);
         Assert.Contains(CompletionRequirements.IndependentReviewer, decision.MissingRequirements);
-        Assert.Contains(CompletionRequirements.MandatoryVerification, decision.MissingRequirements);
+        Assert.Contains(
+            CompletionRequirements.VerificationNotRun(ProjectCommandId),
+            decision.MissingRequirements);
         Assert.Equal(
             decision.MissingRequirements.Distinct(StringComparer.Ordinal).Count(),
             decision.MissingRequirements.Count);
     }
 
     [Fact]
-    public async Task RecordVerification_rejects_missing_correlation_and_oversized_output()
+    public async Task RecordVerification_rejects_invalid_correlation_bounds_and_run_metadata()
     {
         await RegisterNodeAsync();
         var (projectId, requestId, claimToken, sessionId) = await SeedRequestAsync(advanceToVerifying: false);
@@ -105,6 +117,88 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
             {
                 OutputSummary = new string('x', NodeTransportLimits.MaxVerificationOutputBytes + 1),
             }));
+
+        await Assert.ThrowsAnyAsync<HubException>(() => _connection.InvokeAsync<VerificationRunResultMessage>(
+            "RecordVerification",
+            Run(projectId, requestId, claimToken, sessionId, VerificationRunStatus.Passed, 0, true) with
+            {
+                Fingerprint = "",
+            }));
+
+        await Assert.ThrowsAnyAsync<HubException>(() => _connection.InvokeAsync<VerificationRunResultMessage>(
+            "RecordVerification",
+            Run(projectId, requestId, claimToken, sessionId, VerificationRunStatus.Passed, 0, true) with
+            {
+                Fingerprint = new string(
+                    'x',
+                    NodeTransportLimits.MaxVerificationFingerprintLength + 1),
+            }));
+
+        await Assert.ThrowsAnyAsync<HubException>(() => _connection.InvokeAsync<VerificationRunResultMessage>(
+            "RecordVerification",
+            Run(projectId, requestId, claimToken, sessionId, VerificationRunStatus.Passed, 0, true) with
+            {
+                PolicyRevision = new string(
+                    'x',
+                    NodeTransportLimits.MaxVerificationPolicyRevisionLength + 1),
+            }));
+
+        await Assert.ThrowsAnyAsync<HubException>(() => _connection.InvokeAsync<VerificationRunResultMessage>(
+            "RecordVerification",
+            Run(projectId, requestId, claimToken, sessionId, VerificationRunStatus.Passed, 0, true) with
+            {
+                RunKind = int.MaxValue,
+            }));
+
+        await Assert.ThrowsAnyAsync<HubException>(() => _connection.InvokeAsync<VerificationRunResultMessage>(
+            "RecordVerification",
+            Run(projectId, requestId, claimToken, sessionId, VerificationRunStatus.Passed, 0, true) with
+            {
+                AttemptId = Guid.Empty,
+            }));
+    }
+
+    [Fact]
+    public async Task ListVerificationRuns_requires_assignment_and_omits_artifacts()
+    {
+        await RegisterNodeAsync();
+        var (projectId, requestId, claimToken, sessionId) = await SeedRequestAsync(advanceToVerifying: false);
+        var recorded = await _connection.InvokeAsync<VerificationRunResultMessage>(
+            "RecordVerification",
+            Run(projectId, requestId, claimToken, sessionId, VerificationRunStatus.Passed, 0, true) with
+            {
+                OutputArtifactPath = "/secret/out.log",
+                RunKind = (int)VerificationRunKind.Intermediate,
+                RunKindName = nameof(VerificationRunKind.Intermediate),
+            });
+
+        var listed = await _connection.InvokeAsync<VerificationRunReplayListMessage>(
+            "ListVerificationRuns",
+            new ListVerificationRunsMessage(
+                Guid.NewGuid(),
+                projectId,
+                requestId,
+                claimToken,
+                sessionId));
+
+        Assert.Equal(NodeTransportLimits.MaxVerificationReplayRuns, listed.Limit);
+        var replay = Assert.Single(listed.Runs);
+        Assert.Equal(recorded.Id, replay.Id);
+        Assert.Equal(recorded.Fingerprint, replay.Fingerprint);
+        Assert.Equal((int)VerificationRunKind.Intermediate, replay.RunKind);
+        Assert.Equal(sessionId, listed.SessionId);
+        Assert.DoesNotContain(
+            "OutputArtifactPath",
+            typeof(VerificationRunReplayMessage).GetProperties().Select(p => p.Name));
+
+        await Assert.ThrowsAnyAsync<HubException>(() => _connection.InvokeAsync<VerificationRunReplayListMessage>(
+            "ListVerificationRuns",
+            new ListVerificationRunsMessage(
+                Guid.NewGuid(),
+                projectId,
+                requestId,
+                "wrong-token",
+                sessionId)));
     }
 
     [Fact]
@@ -126,7 +220,9 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
             "Shipped the change.",
             ["src/a.cs"],
             [],
-            "all green");
+            "all green",
+            VerificationFingerprint: Fingerprint,
+            VerificationPolicyRevision: PolicyRevision);
 
         var begin = await _connection.InvokeAsync<CompletionGateDecisionMessage>(
             "BeginTerminalization",
@@ -212,7 +308,9 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
                     [],
                     "all green",
                     "pi/request-checkpoint",
-                    "abc123checkpoint"),
+                    "abc123checkpoint",
+                    Fingerprint,
+                    PolicyRevision),
                 Reason: null));
         Assert.True(begin.Accepted);
         Assert.Null(begin.Result);
@@ -232,7 +330,9 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
                     [],
                     "all green",
                     "pi/request-checkpoint",
-                    "abc123checkpoint"),
+                    "abc123checkpoint",
+                    Fingerprint,
+                    PolicyRevision),
                 Reason: null,
                 Proof: new AssignmentQuiescenceProofMessage(
                     AdmissionClosed: true,
@@ -260,7 +360,9 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
                     [],
                     "all green",
                     "pi/request-checkpoint",
-                    "abc123checkpoint"),
+                    "abc123checkpoint",
+                    Fingerprint,
+                    PolicyRevision),
                 Reason: null,
                 Proof: new AssignmentQuiescenceProofMessage(
                     AdmissionClosed: true,
@@ -349,15 +451,16 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
         string sessionId,
         VerificationRunStatus status,
         int? exitCode,
-        bool mandatory) => new(
+        bool mandatory,
+        VerificationRunKind runKind = VerificationRunKind.Baseline) => new(
         Guid.NewGuid(),
         projectId,
         requestId,
         claimToken,
         sessionId,
         Guid.Empty,
-        "default",
-        "dotnet-test",
+        "devfleet-baseline",
+        BaselineCommandId,
         (int)status,
         status.ToString(),
         exitCode,
@@ -365,10 +468,16 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
         DateTimeOffset.UtcNow,
         status == VerificationRunStatus.Passed ? "ok" : "fail",
         null,
-        mandatory);
+        mandatory,
+        Fingerprint,
+        PolicyRevision,
+        (int)runKind,
+        runKind.ToString(),
+        Guid.NewGuid());
 
     private async Task<(Guid ProjectId, Guid RequestId, string ClaimToken, string RootSessionId)> SeedRequestAsync(
-        bool advanceToVerifying)
+        bool advanceToVerifying,
+        IReadOnlyList<string>? mandatoryCommandIds = null)
     {
         using var scope = _fixture.Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
@@ -412,6 +521,13 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
             claimToken,
             now,
             TimeSpan.FromMinutes(5));
+        var selectedProjectChecks = mandatoryCommandIds?.Contains(ProjectCommandId) == true;
+        assignment.CaptureVerificationPolicy(
+            PolicyRevision,
+            baselineVersion: "1",
+            trustedVerificationProfileId: selectedProjectChecks ? "default" : null,
+            trustedVerificationProfileRevision: selectedProjectChecks ? "profile-1" : null,
+            JsonSerializer.Serialize(mandatoryCommandIds ?? [BaselineCommandId]));
         var rootSessionId = "root-" + request.Id.Value.ToString("N")[..8];
 
         db.Projects.Add(project);
@@ -494,7 +610,7 @@ public sealed class NodeHubVerificationCompletionTests : IClassFixture<ControlPl
             AgentName = role + "-" + id,
             Role = role,
             Runtime = "pi",
-            Model = "codex/default",
+            Model = "codex/gpt-5.6-sol",
             Liveness = nameof(AgentLiveness.Exited),
             Activity = nameof(AgentActivity.Idle),
             Attention = "None",

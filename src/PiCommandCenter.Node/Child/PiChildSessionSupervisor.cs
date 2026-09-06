@@ -10,8 +10,6 @@ using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Mail;
 using PiCommandCenter.Node.Runtime;
 using PiCommandCenter.Application.Completion;
-using PiCommandCenter.Application.Verification;
-using PiCommandCenter.Domain.Verification;
 using PiCommandCenter.Node.Repository;
 using PiCommandCenter.Node.Security;
 
@@ -58,7 +56,7 @@ public sealed class PiChildSessionSupervisor
     private readonly IAgentIdentityRegistry _identities;
     private readonly INodeEventSpool _spool;
     private readonly INodeAssignmentCredentialSource _assignmentCredentials;
-    private readonly IVerificationCommandRunner _verification;
+    private readonly IRequestVerificationCoordinator _verification;
     private readonly IRepositoryInspector _repository;
     private readonly IRuntimeCrashRecovery _crashRecovery;
     private readonly INodeCompletionGateway _completion;
@@ -82,7 +80,6 @@ public sealed class PiChildSessionSupervisor
 
     /// <summary>Requested-but-unaccepted lease handoffs, keyed by lease id.</summary>
     private readonly ConcurrentDictionary<Guid, (string FromSessionId, string ToSessionId)> _pendingHandoffs = new();
-    private readonly ConcurrentDictionary<string, string> _verificationSummaries = new(StringComparer.Ordinal);
 
     public PiChildSessionSupervisor(
         IOptions<PiWorkerOptions> workerOptions,
@@ -98,7 +95,7 @@ public sealed class PiChildSessionSupervisor
         Lazy<IAgentRuntimeRegistry> runtimes,
         Lazy<IRootSessionSupervisor> rootSessions,
         Lazy<INodeAssignmentTerminalizationOrchestrator> assignmentTerminalization,
-        IVerificationCommandRunner verification,
+        IRequestVerificationCoordinator verification,
         IRepositoryInspector repository,
         IRuntimeCrashRecovery crashRecovery,
         INodeCompletionGateway completion,
@@ -153,6 +150,28 @@ public sealed class PiChildSessionSupervisor
     public IReadOnlyList<string> ActiveSessionIds
         => [.. _childrenBySession.Values.Where(child => !child.IsTerminal).Select(child => child.SessionId)];
 
+    /// <summary>Non-terminal child session ids owned by one assignment request.</summary>
+    public IReadOnlyList<string> ListLiveChildSessionIds(Guid requestId)
+    {
+        foreach (var pair in _childrenByRequest)
+        {
+            if (!Guid.TryParse(pair.Key, out var id) || id != requestId)
+            {
+                continue;
+            }
+
+            return
+            [
+                .. pair.Value.Values
+                    .Where(child => !child.IsTerminal)
+                    .Select(child => child.SessionId),
+            ];
+        }
+
+        return [];
+    }
+
+
     public async Task<PiToolResponse> HandleAsync(
         PiOrchestrationContext context,
         string requestType,
@@ -162,7 +181,12 @@ public sealed class PiChildSessionSupervisor
         Quiescence.NodeActivityLease? activity = null;
         try
         {
-            if (requestType is not ("request.complete" or "submit_completion")
+            if (requestType is not (
+                    "request.complete"
+                    or "submit_completion"
+                    or "verification.request"
+                    or "request_verification"
+                    or "verification.intermediate.request")
                 && Guid.TryParse(context.RequestId, out var requestId))
             {
                 activity = _admission.TryEnterOperation(
@@ -192,6 +216,7 @@ public sealed class PiChildSessionSupervisor
                 "reservation.handoff.accept" or "accept_reservation_handoff" => await AcceptHandoffAsync(context, payload, cancellationToken),
                 "project.diff.inspect" or "inspect_project_diff" => await InspectDiffAsync(context, cancellationToken),
                 "verification.request" or "request_verification" => await RequestVerificationAsync(context, payload, cancellationToken),
+                "verification.intermediate.request" => await RequestIntermediateVerificationAsync(context, payload, cancellationToken),
                 "request.complete" or "submit_completion" => await CompleteRequestAsync(context, payload, cancellationToken),
                 "child.result.submit" or "submit_child_result" => PiToolResponse.Success(
                     payload is { } result ? JsonSerializer.Deserialize<object>(result.GetRawText()) : new { }),
@@ -309,104 +334,71 @@ public sealed class PiChildSessionSupervisor
         });
     }
 
-    private async Task<PiToolResponse> RequestVerificationAsync(
+    private Task<PiToolResponse> RequestVerificationAsync(
         PiOrchestrationContext context,
         JsonElement? payload,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(context.RepositoryRoot)
-            || !Guid.TryParse(context.RequestId, out var requestId)
+        ReportIgnoredVerificationSelectors(context, payload);
+        return RunVerificationAsync(
+            context,
+            intermediate: context.ParentSessionId is not null,
+            cancellationToken);
+    }
+
+    private Task<PiToolResponse> RequestIntermediateVerificationAsync(
+        PiOrchestrationContext context,
+        JsonElement? payload,
+        CancellationToken cancellationToken)
+    {
+        if (context.ParentSessionId is null)
+        {
+            return Task.FromResult(PiToolResponse.Failure(
+                "intermediate_not_from_child",
+                "Only a child session may request intermediate verification."));
+        }
+
+        ReportIgnoredVerificationSelectors(context, payload);
+        return RunVerificationAsync(context, intermediate: true, cancellationToken);
+    }
+
+    private async Task<PiToolResponse> RunVerificationAsync(
+        PiOrchestrationContext context,
+        bool intermediate,
+        CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(context.RequestId, out var requestId)
             || !Guid.TryParse(context.ProjectId, out var projectId))
         {
-            return PiToolResponse.Failure("repository_root_unknown", "The session has no repository bound.");
+            return PiToolResponse.Failure(
+                "request_identity_unknown",
+                "The session is not bound to a request.");
         }
 
-        var profileId = payload.GetStringProperty("profileId");
-        if (string.IsNullOrWhiteSpace(profileId))
+        if (intermediate)
         {
-            return PiToolResponse.Failure("profile_required", "A configured verification profile id is required.");
-        }
-
-        var commandId = payload.GetStringProperty("commandId");
-        await context.EmitAsync(
-            "verification.started",
-            new Dictionary<string, object?> { ["profileId"] = profileId, ["commandId"] = commandId },
-            cancellationToken).ConfigureAwait(false);
-
-        VerificationProfileRunResult run;
-        try
-        {
-            run = await _verification.RunAsync(
-                new VerificationRunContext(projectId, requestId, context.SessionId, context.RepositoryRoot),
-                profileId,
-                commandId,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (VerificationRejectedException ex)
-        {
-            await context.EmitAsync(
-                "verification.failed",
-                new Dictionary<string, object?> { ["profileId"] = profileId, ["reason"] = ex.Message },
-                cancellationToken).ConfigureAwait(false);
-            return PiToolResponse.Failure(ex.Code, ex.Message);
-        }
-
-        var now = _timeProvider.GetUtcNow();
-        foreach (var command in run.Commands)
-        {
-            var status = command.TimedOut
-                ? VerificationRunStatus.TimedOut
-                : command.Cancelled
-                    ? VerificationRunStatus.Cancelled
-                    : command.ExitCode == 0
-                        ? VerificationRunStatus.Passed
-                        : VerificationRunStatus.Failed;
-            await _completion.RecordVerificationRunAsync(
-                context.SessionId,
-                new VerificationRunDto(
-                    Guid.Empty,
-                    requestId,
-                    run.ProfileId,
-                    command.CommandId,
-                    status,
-                    command.ExitCode,
-                    now - command.Duration,
-                    now,
-                    Truncate(command.StandardOutput + command.StandardError),
-                    command.ArtifactPath,
-                    command.Mandatory),
-                cancellationToken).ConfigureAwait(false);
-        }
-
-        var summary = run.Succeeded
-            ? $"Profile '{run.ProfileId}' passed {run.Commands.Count} command(s)."
-            : $"Profile '{run.ProfileId}' failed.";
-        _verificationSummaries[context.RequestId] = summary;
-
-        if (run.Succeeded)
-        {
-            await context.EmitAsync(
-                "verification.completed",
-                new Dictionary<string, object?>
-                {
-                    ["profileId"] = run.ProfileId,
-                    ["succeeded"] = true,
-                    ["summary"] = summary,
-                },
-                cancellationToken).ConfigureAwait(false);
-            return PiToolResponse.Success(new Dictionary<string, object?>
+            var leases = await _reservations
+                .ListAsync(projectId, includeReleased: false, cancellationToken)
+                .ConfigureAwait(false);
+            if (leases.Any(lease =>
+                    string.Equals(lease.OwnerSessionId, context.SessionId, StringComparison.Ordinal)
+                    && !string.Equals(lease.State, "Released", StringComparison.OrdinalIgnoreCase)
+                    && lease.Scopes.Any(IsSourceScope)))
             {
-                ["profileId"] = run.ProfileId,
-                ["succeeded"] = true,
-                ["summary"] = summary,
-            });
+                return PiToolResponse.Failure(
+                    "source_reservation_active",
+                    "Release this child's file or directory reservations before requesting project checks.");
+            }
         }
 
-        await context.EmitAsync(
-            "verification.failed",
-            new Dictionary<string, object?> { ["profileId"] = run.ProfileId, ["reason"] = summary },
-            cancellationToken).ConfigureAwait(false);
-        return PiToolResponse.Failure("verification_failed", summary);
+        var verificationContext = await CreateVerificationContextAsync(
+            context, projectId, requestId, cancellationToken).ConfigureAwait(false);
+        var decision = intermediate
+            ? await _verification.VerifyIntermediateAsync(verificationContext, cancellationToken)
+                .ConfigureAwait(false)
+            : await _verification.VerifyFinalAsync(verificationContext, cancellationToken)
+                .ConfigureAwait(false);
+        return ToVerificationResponse(decision);
     }
 
     private async Task<PiToolResponse> CompleteRequestAsync(
@@ -417,7 +409,9 @@ public sealed class PiChildSessionSupervisor
         if (!Guid.TryParse(context.RequestId, out var requestId)
             || !Guid.TryParse(context.ProjectId, out var projectId))
         {
-            return PiToolResponse.Failure("request_identity_unknown", "The session is not bound to a request.");
+            return PiToolResponse.Failure(
+                "request_identity_unknown",
+                "The session is not bound to a request.");
         }
 
         using var terminalization = _admission.TryEnterTerminalization(
@@ -431,13 +425,10 @@ public sealed class PiChildSessionSupervisor
         var summary = payload.GetStringProperty("summaryMarkdown")
             ?? payload.GetStringProperty("summary")
             ?? string.Empty;
-        var verificationSummary = payload.GetStringProperty("verificationSummary")
-            ?? (_verificationSummaries.TryGetValue(context.RequestId, out var recorded) ? recorded : string.Empty);
         var findings = ParseFindings(payload);
         IReadOnlyList<string> changedFiles = payload.GetStringListProperty("changedFiles") ?? [];
 
         if (string.IsNullOrEmpty(context.RepositoryRoot) is false
-            && Guid.TryParse(context.RequestId, out _)
             && _workspace.TryGetBaseline(requestId, out var baseline))
         {
             var leases = await _reservations.ListAsync(projectId, includeReleased: true, cancellationToken)
@@ -447,7 +438,7 @@ public sealed class PiChildSessionSupervisor
                 .ConfigureAwait(false);
             if (changedFiles.Count == 0)
             {
-                changedFiles = [.. inspection.ChangedFiles.Select(f => f.Path)];
+                changedFiles = [.. inspection.ChangedFiles.Select(file => file.Path)];
             }
         }
 
@@ -488,13 +479,68 @@ public sealed class PiChildSessionSupervisor
                 cancellationToken).ConfigureAwait(false);
         }
 
+        var verificationContext = await CreateVerificationContextAsync(
+            context, projectId, requestId, cancellationToken).ConfigureAwait(false);
+        var verificationDecision = await _verification
+            .VerifyFinalAsync(verificationContext, cancellationToken)
+            .ConfigureAwait(false);
+        if (!verificationDecision.IsGreen)
+        {
+            return ToVerificationResponse(verificationDecision);
+        }
+
+        var sealedAdmission = false;
+        try
+        {
+            if (!_admission.TrySealAdmission(requestId))
+            {
+                return AdmissionClosed();
+            }
+
+            sealedAdmission = true;
+            if (!await _admission.WaitUntilDrainedAsync(
+                    requestId, QuiescenceProofTimeout, cancellationToken).ConfigureAwait(false))
+            {
+                return PiToolResponse.Failure(
+                    "quiescence_uncertain",
+                    "Preexisting request activity did not drain before fingerprint capture.");
+            }
+
+            string currentFingerprint;
+            try
+            {
+                currentFingerprint = await _verification
+                    .CaptureFingerprintAsync(verificationContext, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (VerificationRejectedException ex)
+            {
+                return PiToolResponse.Failure(ex.Code, ex.Message);
+            }
+
+            if (!string.Equals(
+                    currentFingerprint,
+                    verificationDecision.Fingerprint,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    verificationDecision.PolicyRevision,
+                    verificationContext.Policy?.Revision,
+                    StringComparison.Ordinal))
+            {
+                return PiToolResponse.Failure(
+                    "verification_stale",
+                    "The repository changed after verification; run final verification again.");
+            }
+
         var evidence = new CompletionEvidence(
             summary,
             changedFiles,
             findings,
-            verificationSummary,
+            verificationDecision.Summary,
             requestBranch,
-            checkpointCommitId);
+            checkpointCommitId,
+            verificationDecision.Fingerprint,
+            verificationDecision.PolicyRevision);
         var decision = await BeginTerminalizationAsync(
             projectId, requestId, context.SessionId,
             TerminalizationIntent.Complete, evidence, reason: null, cancellationToken)
@@ -502,7 +548,6 @@ public sealed class PiChildSessionSupervisor
 
         if (!decision.Accepted)
         {
-            // Rejected before the state move: admission stays open and nothing drains.
             await context.EmitAsync(
                 "request.completion_rejected",
                 new Dictionary<string, object?>
@@ -516,10 +561,8 @@ public sealed class PiChildSessionSupervisor
                 ["missingRequirements"] = decision.MissingRequirements,
             });
         }
-
-        // The authority accepted Begin: admission closes irreversibly and every admitted
-        // child, operation, and process must drain before the confirmation is attested.
         _admission.CloseAdmission(requestId);
+        sealedAdmission = false;
         terminalization.Dispose();
         var outcome = await _admission.ProveQuiescenceAsync(
             requestId,
@@ -530,8 +573,6 @@ public sealed class PiChildSessionSupervisor
 
         if (outcome is not Quiescence.QuiescenceOutcome.Proven proven)
         {
-            // Uncertainty is never confirmed: ownership stays with the authority, local
-            // admission state is retained, and no terminal event is emitted.
             var uncertain = (Quiescence.QuiescenceOutcome.Uncertain)outcome;
             _logger.LogWarning(
                 "Quiescence for request {RequestId} could not be proven ({Reason}); "
@@ -551,8 +592,6 @@ public sealed class PiChildSessionSupervisor
 
         if (!decision.Accepted)
         {
-            // The authority rejected the exact proof; admission state is retained so the
-            // terminalization can be retried, and no terminal event is emitted.
             await context.EmitAsync(
                 "request.completion_rejected",
                 new Dictionary<string, object?>
@@ -578,6 +617,14 @@ public sealed class PiChildSessionSupervisor
             ["missingRequirements"] = Array.Empty<string>(),
             ["result"] = decision.Result,
         });
+        }
+        finally
+        {
+            if (sealedAdmission)
+            {
+                _admission.UnsealAdmission(requestId);
+            }
+        }
     }
 
     public Task<RootTerminalizationOutcome> CancelAsync(
@@ -798,6 +845,101 @@ public sealed class PiChildSessionSupervisor
             proof.RepositoryInspected,
             proof.ObservedAt);
 
+    private async Task<RequestVerificationContext> CreateVerificationContextAsync(
+        PiOrchestrationContext context,
+        Guid projectId,
+        Guid requestId,
+        CancellationToken cancellationToken)
+    {
+        _workspace.TryGetBaseline(requestId, out var baseline);
+        var persisted = await _completion.ListVerificationRunsAsync(
+            context.SessionId,
+            projectId,
+            requestId,
+            cancellationToken).ConfigureAwait(false);
+        return new RequestVerificationContext(
+            projectId,
+            requestId,
+            context.WorkspaceBindingId,
+            context.BindingValidationRevision,
+            context.SessionId,
+            context.RepositoryRoot ?? string.Empty,
+            baseline?.BaseCommit ?? string.Empty,
+            baseline?.Branch ?? string.Empty,
+            CreateVerificationPolicy(context),
+            persisted.Count > 0 ? persisted : context.ExistingVerificationRuns ?? [],
+            context.EmitAsync,
+            (run, token) => _completion.RecordVerificationRunAsync(context.SessionId, run, token));
+    }
+
+    private static bool IsSourceScope(ReservationScopeSpec scope) =>
+        !string.Equals(scope.Kind, "resource", StringComparison.OrdinalIgnoreCase);
+
+    private static string TruncateLeaseError(string message) =>
+        message.Length <= 256 ? message : message[..256];
+
+    private static RequestVerificationPolicy? CreateVerificationPolicy(
+        PiOrchestrationContext context)
+    {
+        var hasSnapshot = context.VerificationPolicyRevision is not null
+            || context.BaselineVersion is not null
+            || context.TrustedVerificationProfileId is not null
+            || context.TrustedVerificationProfileRevision is not null
+            || context.MandatoryVerificationCommandIds is not null;
+        if (!hasSnapshot)
+        {
+            return null;
+        }
+
+        return new RequestVerificationPolicy(
+            context.VerificationPolicyRevision ?? string.Empty,
+            context.BaselineVersion ?? string.Empty,
+            context.TrustedVerificationProfileId,
+            context.TrustedVerificationProfileRevision,
+            context.MandatoryVerificationCommandIds ?? []);
+    }
+
+    private void ReportIgnoredVerificationSelectors(
+        PiOrchestrationContext context,
+        JsonElement? payload)
+    {
+        if (payload is not JsonElement element
+            || element.ValueKind != JsonValueKind.Object
+            || !element.TryGetProperty("profileId", out _)
+                && !element.TryGetProperty("commandId", out _))
+        {
+            return;
+        }
+
+        _logger.LogWarning(
+            "Legacy verification profileId/commandId selectors from session {SessionId} "
+            + "were ignored; verification policy is node-owned.",
+            context.SessionId);
+    }
+
+    private static PiToolResponse ToVerificationResponse(
+        RequestVerificationDecision decision)
+    {
+        if (decision.IsGreen)
+        {
+            return PiToolResponse.Success(new Dictionary<string, object?>
+            {
+                ["decision"] = decision.Kind.ToString(),
+                ["fingerprint"] = decision.Fingerprint,
+                ["policyRevision"] = decision.PolicyRevision,
+                ["summary"] = decision.Summary,
+            });
+        }
+
+        var errorCode = decision.ErrorCode ?? (decision.Kind switch
+        {
+            RequestVerificationDecisionKind.Failed => "verification_failed",
+            RequestVerificationDecisionKind.Cancelled => "verification_cancelled",
+            _ => "verification_rejected",
+        });
+        return PiToolResponse.Failure(errorCode, decision.Summary);
+    }
+
     private static IReadOnlyList<ReviewFinding> ParseFindings(JsonElement? payload)
     {
         if (payload is not JsonElement root
@@ -831,8 +973,6 @@ public sealed class PiChildSessionSupervisor
         return findings;
     }
 
-    private static string? Truncate(string text)
-        => text.Length <= 2048 ? text : text[..2048];
 
     // ---- Spawn ----
 
@@ -2099,7 +2239,14 @@ public sealed class PiChildSessionSupervisor
 
         if (childSessionId is not null)
         {
-            return _childrenBySession.TryGetValue(childSessionId, out var bySession) ? [bySession] : [];
+            if (!_childrenBySession.TryGetValue(childSessionId, out var bySession)
+                || !IsOwnedByCaller(context, bySession)
+                || !children.ContainsKey(bySession.AgentName))
+            {
+                return [];
+            }
+
+            return [bySession];
         }
 
         return [.. children.Values];
@@ -2110,6 +2257,11 @@ public sealed class PiChildSessionSupervisor
         var selected = SelectChildren(context, payload);
         return selected.Count == 1 ? selected[0] : null;
     }
+
+    private static bool IsOwnedByCaller(PiOrchestrationContext context, ChildAgent child)
+        => string.Equals(child.RequestId, context.RequestId, StringComparison.Ordinal)
+            && string.Equals(child.ProjectId, context.ProjectId, StringComparison.Ordinal)
+            && string.Equals(child.ParentSessionId, context.SessionId, StringComparison.Ordinal);
 
     private static Dictionary<string, object?> ToStatusView(ChildAgent child) => new()
     {

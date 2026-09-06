@@ -56,7 +56,7 @@ public sealed class MuseCodeRuntimeAdapterTests
         var adapter = CreateAdapter(factory);
 
         await Assert.ThrowsAsync<NotSupportedException>(() =>
-            adapter.StartAsync(MakeRequest(model: "codex/default"), CancellationToken.None));
+            adapter.StartAsync(MakeRequest(model: "codex/gpt-5.6-sol"), CancellationToken.None));
         await Assert.ThrowsAsync<NotSupportedException>(() =>
             adapter.StartAsync(MakeRequest(model: "antigravity/gemini-3-pro"), CancellationToken.None));
 
@@ -64,17 +64,17 @@ public sealed class MuseCodeRuntimeAdapterTests
     }
 
     [Fact]
-    public void Model_argument_is_the_selector_suffix_or_omitted_for_default()
+    public void Model_argument_is_always_the_native_selector_suffix()
     {
-        Assert.Null(MuseCodeRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("muse/default")));
         Assert.Equal(
-            "llama-4-maverick",
-            MuseCodeRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("muse/llama-4-maverick")));
+            "muse-spark-1.3",
+            MuseCodeRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("muse/muse-spark-1.3")));
         Assert.Equal(
             "vendor/nested-id",
             MuseCodeRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("muse/vendor/nested-id")));
+        Assert.Throws<ArgumentException>(() => AgentModelSelector.Parse("muse/default"));
         Assert.Throws<NotSupportedException>(() =>
-            MuseCodeRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("claude-code/default")));
+            MuseCodeRuntimeAdapter.ResolveModelArgument(AgentModelSelector.Parse("claude-code/fable-5-1")));
     }
 
     [Fact]
@@ -120,7 +120,7 @@ public sealed class MuseCodeRuntimeAdapterTests
         AssertCommandId(sessionStart);
         Assert.Equal(Workspace, sessionStart.GetProperty("workspaceRoot").GetString());
         Assert.Equal("denyUnmatched", sessionStart.GetProperty("approvalMode").GetString());
-        Assert.False(sessionStart.TryGetProperty("modelId", out _));
+        Assert.Equal("muse-spark-1.3", sessionStart.GetProperty("modelId").GetString());
 
         var turnStart = host.Received[3].GetProperty("params");
         AssertCommandId(turnStart);
@@ -597,7 +597,7 @@ public sealed class MuseCodeRuntimeAdapterTests
     }
 
     private static AgentStartRequest MakeRequest(
-        string model = "muse/default",
+        string model = "muse/muse-spark-1.3",
         string? sessionId = null,
         string prompt = "Review the change",
         AgentRuntimeAuthorizationContext? authorization = null)

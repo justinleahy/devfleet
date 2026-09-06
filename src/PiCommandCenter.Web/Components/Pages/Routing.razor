@@ -166,13 +166,25 @@
         <div class="roles-grid">
         @foreach (var role in _roles)
         {
+            @* The heading, field labels and action names all read the display
+               label; the stored role id is only ever sent back on save. *@
             var headingId = $"role-{Slug(role.Role)}";
+            var roleLabel = RoleLabel(role.Role);
             <FluentCard Class="role-card">
                 <section class="panel" aria-labelledby="@headingId">
                     <div class="role-head">
-                        <h2 id="@headingId">@role.Role</h2>
+                        <h2 id="@headingId">@roleLabel</h2>
                         <span class="node-seen">@CandidateSummary(role)</span>
                     </div>
+
+                    @if (IsVerifierRole(role.Role))
+                    {
+                        <p class="panel-lead">
+                            Chooses the model used for independent agent verification.
+                            Deterministic checks run automatically under the Project's
+                            verification policy.
+                        </p>
+                    }
 
                     @if (role.Candidates.Count == 0)
                     {
@@ -187,7 +199,7 @@
                             {
                                 var position = index;
                                 var candidate = role.Candidates[position];
-                                var label = $"Model for {role.Role}, choice {position + 1}";
+                                var label = $"Model for {roleLabel}, choice {position + 1}";
                                 var invalid = SelectorError(candidate);
                                 @* Keyed on the editor instance so moving a row moves its
                                    controls instead of re-labelling the ones already there. *@
@@ -216,7 +228,7 @@
                                             <FluentTextField @bind-Value="candidate.Selector"
                                                              @bind-Value:after="MarkEdited"
                                                              Label="@label"
-                                                             Placeholder="codex/default"
+                                                             Placeholder="@FallbackSelector"
                                                              Disabled="@Busy"
                                                              Class="field" />
                                         }
@@ -234,19 +246,19 @@
                                         <FluentButton Appearance="Appearance.Stealth"
                                                       OnClick="@(() => MoveUp(role, position))"
                                                       Disabled="@(Busy || position == 0)"
-                                                      aria-label="@($"Move {Describe(candidate)} earlier for {role.Role}")">
+                                                      aria-label="@($"Move {Describe(candidate)} earlier for {roleLabel}")">
                                             Up
                                         </FluentButton>
                                         <FluentButton Appearance="Appearance.Stealth"
                                                       OnClick="@(() => MoveDown(role, position))"
                                                       Disabled="@(Busy || position == role.Candidates.Count - 1)"
-                                                      aria-label="@($"Move {Describe(candidate)} later for {role.Role}")">
+                                                      aria-label="@($"Move {Describe(candidate)} later for {roleLabel}")">
                                             Down
                                         </FluentButton>
                                         <FluentButton Appearance="Appearance.Stealth"
                                                       OnClick="@(() => Remove(role, position))"
                                                       Disabled="@(Busy || role.Candidates.Count == 1)"
-                                                      aria-label="@($"Remove {Describe(candidate)} from {role.Role}")">
+                                                      aria-label="@($"Remove {Describe(candidate)} from {roleLabel}")">
                                             Remove
                                         </FluentButton>
                                     </div>
@@ -259,7 +271,7 @@
                         <FluentButton Appearance="Appearance.Outline"
                                       OnClick="@(() => Add(role))"
                                       Disabled="@Busy"
-                                      aria-label="@($"Add a candidate to {role.Role}")">
+                                      aria-label="@($"Add a candidate to {roleLabel}")">
                             Add candidate
                         </FluentButton>
                     </div>
@@ -305,7 +317,14 @@
 </div>
 
 @code {
-    private const string FallbackSelector = $"{AgentModelSelector.Codex}/{AgentModelSelector.DefaultModelId}";
+    /// <summary>Offered when the node reported no catalog: a concrete, canonical selector.</summary>
+    private const string FallbackSelector = $"{AgentModelSelector.Codex}/gpt-5.6-sol";
+
+    /// <summary>
+    /// Stored id of the role that runs independent agent verification. The id stays as the node
+    /// reports it on the wire; only what the operator reads is renamed.
+    /// </summary>
+    private const string VerifierRole = "verifier";
 
     private readonly Dictionary<string, RuntimeModelCatalogMessage> _catalogs =
         new(StringComparer.OrdinalIgnoreCase);
@@ -618,11 +637,6 @@
                 : $"{model.DisplayName} \u00b7 {model.Provider}";
         }
 
-        if (selector.IsProviderDefault)
-        {
-            return $"{selector.Provider} on its own default model.";
-        }
-
         var catalog = Catalog(selector.Provider);
         if (catalog is null)
         {
@@ -663,6 +677,17 @@
         var available = _catalogs.Values.Count(catalog => catalog.Error is null);
         return $"{_selectors.Count} models across {available} provider(s)";
     }
+
+    private static bool IsVerifierRole(string role) =>
+        string.Equals(role, VerifierRole, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// What the operator reads for a role. Only the verifier is renamed, because "verifier" reads
+    /// like the deterministic project checks it has nothing to do with; every other role keeps the
+    /// id the node reported.
+    /// </summary>
+    private static string RoleLabel(string role) =>
+        IsVerifierRole(role) ? "Verification agent" : role;
 
     private static string CandidateSummary(RoleEditor role) => role.Candidates.Count switch
     {

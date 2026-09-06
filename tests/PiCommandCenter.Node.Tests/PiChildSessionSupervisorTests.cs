@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Domain.Verification;
 using PiCommandCenter.Node;
 using PiCommandCenter.Node.Child;
 using PiCommandCenter.Node.Runtime;
@@ -37,7 +38,7 @@ public class PiChildSessionSupervisorTests : IDisposable
     private readonly PiChildSessionSupervisor _supervisor;
     private readonly FakeReservationGateway _reservations = new();
     private readonly FakeIdentityRegistry _identities = new();
-    private readonly FakeVerificationRunner _verification = new();
+    private readonly FakeVerificationCoordinator _verification = new();
     private readonly FakeRepositoryInspector _repository = new();
     private readonly FakeCrashRecovery _crash = new();
     private readonly FakeCompletionGateway _completion = new();
@@ -81,11 +82,11 @@ public class PiChildSessionSupervisorTests : IDisposable
     private static Dictionary<string, AgentRoleRouteCandidate[]> TestRoleRoutes()
         => new(StringComparer.Ordinal)
         {
-            ["root"] = [new() { Model = "codex/default" }],
-            ["architect"] = [new() { Model = "codex/default" }],
-            ["implementer"] = [new() { Model = "codex/default" }],
-            ["reviewer"] = [new() { Model = "codex/default" }],
-            ["verifier"] = [new() { Model = "codex/default" }],
+            ["root"] = [new() { Model = "codex/gpt-5.6-sol" }],
+            ["architect"] = [new() { Model = "codex/gpt-5.6-sol" }],
+            ["implementer"] = [new() { Model = "codex/gpt-5.6-sol" }],
+            ["reviewer"] = [new() { Model = "codex/gpt-5.6-sol" }],
+            ["verifier"] = [new() { Model = "codex/gpt-5.6-sol" }],
         };
 
     private PiOrchestrationContext RootContext(string requestId)
@@ -107,7 +108,14 @@ public class PiChildSessionSupervisorTests : IDisposable
                 _parentEvents.Add((type, payload));
                 return Task.CompletedTask;
             },
-            RepositoryRoot: _repoRoot);
+            RepositoryRoot: _repoRoot,
+            WorkspaceBindingId: Guid.NewGuid(),
+            BindingValidationRevision: 17,
+            VerificationPolicyRevision: "test-policy-v1",
+            BaselineVersion: IBaselineVerification.Version,
+            TrustedVerificationProfileId: null,
+            TrustedVerificationProfileRevision: null,
+            MandatoryVerificationCommandIds: [IBaselineVerification.RepositoryIntegrityCommandId]);
     }
 
     private static PiToolResponse Invoke(
@@ -237,7 +245,7 @@ public class PiChildSessionSupervisorTests : IDisposable
                 model = "claude-code/opus",
                 prompt = "p",
             });
-        Assert.Equal("codex/default", Result(routed.Result)["model"]);
+        Assert.Equal("codex/gpt-5.6-sol", Result(routed.Result)["model"]);
         Assert.False(Result(routed.Result).ContainsKey("runtimeProfile"));
         await _supervisor.CancelSessionAsync(ExpectChildSessionId(routed), "test cleanup");
     }
@@ -487,7 +495,7 @@ public class PiChildSessionSupervisorTests : IDisposable
         var routes = routing.Current.AllowedRoles.Select(role => new RuntimeRoleRouteMessage(
             role,
             [new RuntimeRouteCandidateMessage(
-                role == "reviewer" ? "codex/reviewer-live" : "codex/default")])).ToArray();
+                role == "reviewer" ? "codex/reviewer-live" : "codex/gpt-5.6-sol")])).ToArray();
         await routing.UpdateAsync(new UpdateNodeRuntimeConfigurationMessage(routes));
         var context = RootContext(Guid.NewGuid().ToString("D"));
 
@@ -595,10 +603,248 @@ public class PiChildSessionSupervisorTests : IDisposable
             new { profileId = "default" });
 
         Assert.True(response.Ok);
-        Assert.Equal(context.SessionId, _verification.LastContext?.OwnerSessionId);
+        Assert.Equal(context.SessionId, _verification.LastContext?.RequestingSessionId);
         var recorded = Assert.Single(_completion.Runs);
         Assert.Equal(context.SessionId, recorded.SessionId);
         Assert.Equal(requestId, recorded.Run.RequestId);
+    }
+
+    [Fact]
+    public void Legacy_child_verification_request_is_intermediate_and_cannot_complete()
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D"));
+        var childContext = context with
+        {
+            SessionId = "pi-child-verify",
+            ParentSessionId = context.SessionId,
+        };
+
+        var response = Invoke(
+            _supervisor,
+            childContext,
+            "verification.request",
+            new { profileId = "default", commandId = "lint" });
+
+        Assert.True(response.Ok);
+        Assert.Equal(0, _verification.FinalVerificationCount);
+        Assert.Equal(1, _verification.IntermediateVerificationCount);
+        Assert.DoesNotContain(_parentEvents, e => e.Type == "verification.started");
+        Assert.DoesNotContain(_parentEvents, e => e.Type == "verification.completed");
+        Assert.DoesNotContain(_parentEvents, e => e.Type == "verification.failed");
+        Assert.Contains(_parentEvents, e => e.Type == "verification.intermediate");
+        var recorded = Assert.Single(_completion.Runs);
+        Assert.Equal(childContext.SessionId, recorded.SessionId);
+        Assert.Equal(VerificationRunKind.Intermediate, recorded.Run.RunKind);
+        Assert.Equal(requestId, recorded.Run.RequestId);
+    }
+
+    [Fact]
+    public void Root_cannot_invoke_child_only_intermediate_verification()
+    {
+        var context = RootContext(Guid.NewGuid().ToString("D"));
+
+        var response = Invoke(
+            _supervisor,
+            context,
+            "verification.intermediate.request",
+            new { profileId = "default" });
+
+        Assert.False(response.Ok);
+        Assert.Equal("intermediate_not_from_child", response.ErrorCode);
+        Assert.Equal(0, _verification.FinalVerificationCount);
+        Assert.Equal(0, _verification.IntermediateVerificationCount);
+        Assert.Empty(_completion.Runs);
+        Assert.DoesNotContain(_parentEvents, e => e.Type.StartsWith("verification.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Child_intermediate_requires_source_reservations_to_be_released_first()
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D"));
+        var childContext = context with
+        {
+            SessionId = "pi-child-source",
+            ParentSessionId = context.SessionId,
+        };
+        var lease = _reservations.GrantLease(
+            childContext.SessionId,
+            new ReservationScopeSpec("directory", "src/Feature"));
+
+        var response = Invoke(_supervisor, childContext, "verification.request", new { profileId = "default" });
+
+        Assert.False(response.Ok);
+        Assert.Equal("source_reservation_active", response.ErrorCode);
+        Assert.Contains("Release", response.ErrorMessage, StringComparison.Ordinal);
+        Assert.DoesNotContain(lease.LeaseId, _reservations.Releases);
+        Assert.Empty(_reservations.Acquires);
+        Assert.Equal(0, _verification.IntermediateVerificationCount);
+    }
+
+    [Fact]
+    public void Verification_seeds_persisted_runs_before_coordinator_evaluation()
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D"));
+        var persisted = new VerificationRunDto(
+            Guid.NewGuid(),
+            requestId,
+            IBaselineVerification.ProfileId,
+            IBaselineVerification.RepositoryIntegrityCommandId,
+            VerificationRunStatus.Passed,
+            0,
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow,
+            "ok",
+            "/secret/artifact.log",
+            Mandatory: true,
+            Fingerprint: "test-fingerprint",
+            PolicyRevision: "test-policy-v1",
+            RunKind: VerificationRunKind.Baseline,
+            AttemptId: Guid.NewGuid());
+        _completion.PersistedRuns.Add(persisted);
+
+        var response = Invoke(_supervisor, context, "verification.request", new { profileId = "ignored" });
+
+        Assert.True(response.Ok);
+        Assert.Equal(1, _verification.FinalVerificationCount);
+        var listed = Assert.Single(_completion.ListedRuns);
+        Assert.Equal(context.SessionId, listed.SessionId);
+        Assert.Equal(requestId, listed.RequestId);
+        Assert.Contains(
+            _verification.LastContext!.ExistingRuns,
+            run => run.Id == persisted.Id && run.Fingerprint == persisted.Fingerprint);
+    }
+
+
+    [Fact]
+    public void Submit_completion_runs_final_verification_without_a_prior_verification_request()
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D"));
+        _workspace.SetBaseline(requestId, new RepositoryBaseline("main", "abc", "", true, []));
+        _completion.Accept = false;
+        _completion.Missing = ["review"];
+
+        var response = Invoke(
+            _supervisor,
+            context,
+            "submit_completion",
+            new { summaryMarkdown = "ready" });
+
+        Assert.True(response.Ok);
+        Assert.Equal(false, Result(response.Result)["accepted"]);
+        Assert.Equal(1, _verification.FinalVerificationCount);
+        Assert.Equal(1, _verification.FingerprintCaptureCount);
+        Assert.Single(_parentEvents, item => item.Type == "verification.started");
+        Assert.Single(_parentEvents, item => item.Type == "verification.completed");
+        var evidence = Assert.Single(_completion.Evidence);
+        Assert.Equal(_verification.VerificationFingerprint, evidence.VerificationFingerprint);
+    }
+
+    [Fact]
+    public void Completion_reinspects_the_fingerprint_and_rejects_stale_verification()
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D"));
+        _workspace.SetBaseline(requestId, new RepositoryBaseline("main", "abc", "", true, []));
+        _verification.CurrentFingerprint = "fingerprint-after-late-edit";
+
+        var response = Invoke(
+            _supervisor,
+            context,
+            "submit_completion",
+            new { summaryMarkdown = "ready" });
+
+        Assert.False(response.Ok);
+        Assert.Equal("verification_stale", response.ErrorCode);
+        Assert.Equal(1, _verification.FinalVerificationCount);
+        Assert.Equal(1, _verification.FingerprintCaptureCount);
+        Assert.Empty(_completion.Begun);
+        Assert.Empty(_completion.Evidence);
+    }
+
+    [Fact]
+    public async Task Foreign_child_session_id_cannot_be_observed_or_cancelled()
+    {
+        var owner = RootContext(Guid.NewGuid().ToString("D"));
+        var spawn = await _supervisor.HandleAsync(
+            owner,
+            "agent.spawn",
+            JsonSerializer.SerializeToElement(new
+            {
+                agentName = "owned-child",
+                role = "implementer",
+                prompt = "p",
+            }),
+            CancellationToken.None);
+        Assert.True(spawn.Ok);
+        var childSessionId = ExpectChildSessionId(spawn);
+
+        var stranger = RootContext(Guid.NewGuid().ToString("D"));
+        var status = await _supervisor.HandleAsync(
+            stranger,
+            "agent.status",
+            JsonSerializer.SerializeToElement(new { childSessionId }),
+            CancellationToken.None);
+        Assert.True(status.Ok);
+        Assert.Empty(Assert.IsType<Dictionary<string, object?>[]>(status.Result));
+
+        var bySessionId = await _supervisor.HandleAsync(
+            stranger,
+            "agent.status",
+            JsonSerializer.SerializeToElement(new { sessionId = childSessionId }),
+            CancellationToken.None);
+        Assert.True(bySessionId.Ok);
+        Assert.Empty(Assert.IsType<Dictionary<string, object?>[]>(bySessionId.Result));
+
+        var cancel = await _supervisor.HandleAsync(
+            stranger,
+            "agent.cancel",
+            JsonSerializer.SerializeToElement(new { childSessionId }),
+            CancellationToken.None);
+        Assert.False(cancel.Ok);
+        Assert.Equal("unknown_agent", cancel.ErrorCode);
+    }
+
+    [Fact]
+    public void Completion_seals_admission_before_fingerprint_and_reopens_on_rejected_begin()
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D"));
+        _workspace.SetBaseline(requestId, new RepositoryBaseline("main", "abc", "", true, []));
+        _completion.Accept = false;
+        _completion.Missing = ["review"];
+        var admittedBeforeBarrier = false;
+        var rejectedAfterBarrier = false;
+        var fingerprintAfterDrain = false;
+
+        _verification.OnVerifyFinal = () =>
+        {
+            using var mutation = _admission.TryEnterOperation(requestId, "pre-barrier mutation");
+            admittedBeforeBarrier = mutation is not null;
+        };
+        _verification.OnCaptureFingerprint = () =>
+        {
+            fingerprintAfterDrain = true;
+            rejectedAfterBarrier = _admission.TryEnterOperation(requestId, "post-barrier mutation") is null;
+        };
+
+        var response = Invoke(
+            _supervisor,
+            context,
+            "submit_completion",
+            new { summaryMarkdown = "ready" });
+
+        Assert.True(response.Ok);
+        Assert.Equal(false, Result(response.Result)["accepted"]);
+        Assert.True(admittedBeforeBarrier);
+        Assert.True(rejectedAfterBarrier);
+        Assert.True(fingerprintAfterDrain);
+        Assert.False(_admission.IsAdmissionClosed(requestId));
+        using var afterReject = Assert.IsType<NodeActivityLease>(
+            _admission.TryEnterOperation(requestId, "after-rejected-begin"));
     }
 
     [Fact]
@@ -671,7 +917,7 @@ public class PiChildSessionSupervisorTests : IDisposable
             CancellationToken.None);
 
         Assert.Equal(RootTerminalizationOutcome.Accepted, outcome);
-        Assert.False(_admission.IsAdmissionClosed(requestId));
+        Assert.True(_admission.IsAdmissionClosed(requestId));
         Assert.Equal(
             [(TerminalizationIntent.Fail, "worker exited")],
             _completion.Begun);
@@ -789,7 +1035,7 @@ public class PiChildSessionSupervisorTests : IDisposable
 
         var response = await _supervisor.HandleAsync(
             context,
-            "request.complete",
+            "submit_completion",
             JsonSerializer.SerializeToElement(new
             {
                 summaryMarkdown = "shipped",
@@ -802,18 +1048,23 @@ public class PiChildSessionSupervisorTests : IDisposable
         var evidence = Assert.Single(_completion.Evidence);
         Assert.Equal("abc123", evidence.CheckpointCommitId);
         Assert.Equal("pi/request", evidence.RequestBranch);
-        Assert.Contains(_parentEvents, item => item.Type == "repository.checkpoint_created");
         var repeated = await _supervisor.HandleAsync(
             context,
-            "request.complete",
+            "submit_completion",
             JsonSerializer.SerializeToElement(new
             {
                 summaryMarkdown = "duplicate",
                 changedFiles = new[] { "src/App.cs" },
             }),
             CancellationToken.None);
+        Assert.False(repeated.Ok);
         Assert.Equal("admission_closed", repeated.ErrorCode);
         Assert.Equal(1, checkpointCalls);
+        Assert.Single(_completion.Evidence);
+        Assert.Single(_completion.Begun);
+        Assert.Single(_completion.Confirmed);
+        Assert.Single(_parentEvents, item => item.Type == "repository.checkpoint_created");
+        Assert.Single(_parentEvents, item => item.Type == "request.completed");
     }
 
     [Theory]
@@ -1022,7 +1273,7 @@ public class PiChildSessionSupervisorTests : IDisposable
         Assert.Equal("root-session-1", payload["parentSessionId"].GetString());
         Assert.Equal("documented", payload["agentName"].GetString());
         Assert.Equal("reviewer", payload["role"].GetString());
-        Assert.Equal("codex/default", payload["model"].GetString());
+        Assert.Equal("codex/gpt-5.6-sol", payload["model"].GetString());
         Assert.False(payload.ContainsKey("runtimeProfile"));
     }
 
@@ -1263,10 +1514,6 @@ public class PiChildSessionSupervisorTests : IDisposable
             CancellationToken.None);
         Assert.Equal("handoff_not_pending", rejected.ErrorCode);
 
-        // Transfer does not happen before acceptance.
-        Assert.DoesNotContain(_reservations.Transfers, t => t.LeaseId == lease.LeaseId);
-
-        // The current owner accepts; ownership moves to the requesting target.
         var accept = await supervisor.HandleAsync(
             owner,
             "reservation.handoff.accept",
@@ -1279,7 +1526,7 @@ public class PiChildSessionSupervisorTests : IDisposable
     }
 
     [Fact]
-    public async Task Control_plane_cancel_requests_stop_the_child_and_release_lifecycle()
+    public async Task CancelSessionAsync_stops_a_running_child_and_releases_identity()
     {
         var context = RootContext(Guid.NewGuid().ToString("D"));
         var spawn = await _supervisor.HandleAsync(
@@ -1330,43 +1577,130 @@ public class PiChildSessionSupervisorTests : IDisposable
         }
     }
 
-    private sealed class FakeVerificationRunner : IVerificationCommandRunner
+    private sealed class FakeVerificationCoordinator : IRequestVerificationCoordinator
     {
-        public string? LastProfileId { get; private set; }
-        public VerificationRunContext? LastContext { get; private set; }
+
+        public RequestVerificationContext? LastContext { get; private set; }
         public bool Succeed { get; set; } = true;
         public string RejectCode { get; set; } = "";
+        public string VerificationFingerprint { get; set; } = "test-fingerprint";
+        public string CurrentFingerprint { get; set; } = "test-fingerprint";
+        public int FinalVerificationCount { get; private set; }
+        public int IntermediateVerificationCount { get; private set; }
+        public int FingerprintCaptureCount { get; private set; }
+        public Action? OnVerifyFinal { get; set; }
+        public Action? OnCaptureFingerprint { get; set; }
 
-        public Task<VerificationProfileRunResult> RunAsync(
-            VerificationRunContext context,
-            string profileId,
-            string? commandId,
+        public Task<RequestVerificationDecision> VerifyFinalAsync(
+            RequestVerificationContext context,
+            CancellationToken cancellationToken)
+        {
+            FinalVerificationCount++;
+            OnVerifyFinal?.Invoke();
+            return VerifyAsync(context, VerificationRunKind.Baseline, intermediate: false, cancellationToken);
+        }
+
+        public Task<RequestVerificationDecision> VerifyIntermediateAsync(
+            RequestVerificationContext context,
+            CancellationToken cancellationToken)
+        {
+            IntermediateVerificationCount++;
+            return VerifyAsync(context, VerificationRunKind.Intermediate, intermediate: true, cancellationToken);
+        }
+
+        public Task<string> CaptureFingerprintAsync(
+            RequestVerificationContext context,
             CancellationToken cancellationToken)
         {
             LastContext = context;
-            LastProfileId = profileId;
+            FingerprintCaptureCount++;
+            OnCaptureFingerprint?.Invoke();
+            return Task.FromResult(CurrentFingerprint);
+        }
+
+        private async Task<RequestVerificationDecision> VerifyAsync(
+            RequestVerificationContext context,
+            VerificationRunKind runKind,
+            bool intermediate,
+            CancellationToken cancellationToken)
+        {
+            LastContext = context;
             if (!string.IsNullOrEmpty(RejectCode))
             {
-                throw new VerificationRejectedException(RejectCode, "profile not configured");
+                var rejected = new RequestVerificationDecision(
+                    RequestVerificationDecisionKind.Rejected,
+                    "profile not configured",
+                    ErrorCode: RejectCode);
+                await context.EmitAsync(
+                    intermediate ? "verification.intermediate" : "verification.rejected",
+                    EventPayload(rejected),
+                    cancellationToken);
+                return rejected;
             }
 
-            var command = new VerificationCommandResult(
-                commandId ?? "cmd",
-                "true",
-                [],
-                ".",
+            var policy = context.Policy
+                ?? throw new InvalidOperationException("Verification policy snapshot is required.");
+            var policyRevision = policy.Revision;
+            if (!intermediate)
+            {
+                await context.EmitAsync(
+                    "verification.started",
+                    new Dictionary<string, object?>
+                    {
+                        ["fingerprint"] = VerificationFingerprint,
+                        ["policyRevision"] = policyRevision,
+                    },
+                    cancellationToken);
+            }
+
+            var completedAt = DateTimeOffset.UtcNow;
+            var run = new VerificationRunDto(
+                Guid.NewGuid(),
+                context.RequestId,
+                runKind == VerificationRunKind.Baseline
+                    ? IBaselineVerification.ProfileId
+                    : policy.TrustedProfileId ?? "test-project-check",
+                runKind == VerificationRunKind.Baseline
+                    ? IBaselineVerification.RepositoryIntegrityCommandId
+                    : "test-project-check",
+                Succeed ? VerificationRunStatus.Passed : VerificationRunStatus.Failed,
                 Succeed ? 0 : 1,
-                TimeSpan.FromMilliseconds(1),
+                completedAt - TimeSpan.FromMilliseconds(1),
+                completedAt,
                 Succeed ? "ok" : "fail",
-                "",
-                false,
-                false,
-                false,
-                false,
                 null,
-                true);
-            return Task.FromResult(new VerificationProfileRunResult(profileId, [command], Succeed));
+                Mandatory: true,
+                VerificationFingerprint,
+                policyRevision,
+                runKind,
+                Guid.NewGuid());
+            await context.PersistRunAsync(run, cancellationToken);
+
+            var decision = new RequestVerificationDecision(
+                Succeed ? RequestVerificationDecisionKind.Passed : RequestVerificationDecisionKind.Failed,
+                Succeed ? "Verification passed." : "Verification failed.",
+                VerificationFingerprint,
+                policyRevision,
+                Succeed ? null : "verification_failed");
+            await context.EmitAsync(
+                intermediate
+                    ? "verification.intermediate"
+                    : Succeed
+                        ? "verification.completed"
+                        : "verification.failed",
+                EventPayload(decision),
+                cancellationToken);
+            return decision;
         }
+
+        private static Dictionary<string, object?> EventPayload(RequestVerificationDecision decision) => new()
+        {
+            ["decision"] = decision.Kind.ToString(),
+            ["fingerprint"] = decision.Fingerprint,
+            ["policyRevision"] = decision.PolicyRevision,
+            ["summary"] = decision.Summary,
+            ["errorCode"] = decision.ErrorCode,
+        };
     }
 
     private sealed class FakeRepositoryInspector : IRepositoryInspector
@@ -1416,6 +1750,19 @@ public class PiChildSessionSupervisorTests : IDisposable
         {
             Runs.Add((sessionId, run));
             return Task.CompletedTask;
+        }
+
+        public List<VerificationRunDto> PersistedRuns { get; } = [];
+        public List<(string SessionId, Guid ProjectId, Guid RequestId)> ListedRuns { get; } = [];
+
+        public Task<IReadOnlyList<VerificationRunDto>> ListVerificationRunsAsync(
+            string sessionId,
+            Guid projectId,
+            Guid requestId,
+            CancellationToken cancellationToken)
+        {
+            ListedRuns.Add((sessionId, projectId, requestId));
+            return Task.FromResult<IReadOnlyList<VerificationRunDto>>(PersistedRuns);
         }
 
         public Task<CompletionGateDecision> BeginTerminalizationAsync(

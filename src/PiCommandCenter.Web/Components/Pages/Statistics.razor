@@ -21,7 +21,8 @@
             <p class="page-lead">
                 Persisted totals for every agent session the fleet has recorded. Token counters are
                 the figures each runtime itself reported when a turn finished; a counter no runtime
-                reported reads <em>Unavailable</em> rather than zero.
+                reported reads <em>Unavailable</em> rather than zero. Grouped provider totals are
+                observed session telemetry, not subscription credits or remaining quota.
             </p>
         </div>
         <div class="page-head-actions">
@@ -128,6 +129,65 @@
                                     <dt>Estimated cost (USD)</dt>
                                     @{ var runtimeCost = Money(runtime.EstimatedCostUsd); }
                                     <dd class="@Absent(runtimeCost)">@(runtimeCost ?? Unavailable)</dd>
+                                </div>
+                            </dl>
+                        </li>
+                    }
+                </ul>
+            }
+        </section>
+
+        <section aria-labelledby="provider-heading">
+            <h2 id="provider-heading">By model provider</h2>
+
+            @if (stats.TrackedAgents == 0)
+            {
+                <FluentCard>
+                    <div class="state-empty">
+                        <h3>No agent session recorded yet</h3>
+                        <p>
+                            Nothing has run, so no model provider has reported a token counter or an
+                            estimated cost. Queue a request and dispatch it to a node; the totals
+                            here fill in as each turn finishes.
+                        </p>
+                        <FluentAnchor Href="/" Appearance="Appearance.Outline">Back to fleet</FluentAnchor>
+                    </div>
+                </FluentCard>
+            }
+            else if (stats.Providers.Count == 0)
+            {
+                <p class="panel-empty">
+                    No session carries a canonical model provider, so the totals above cannot be
+                    split up.
+                </p>
+            }
+            else
+            {
+                <p class="cost-note">
+                    These are observed session totals attributed by canonical model provider
+                    (including Qwen Token Plan ids). They are not Alibaba Credits, remaining
+                    Token Plan quota, or any other subscription remaining-quota figure.
+                </p>
+                <ul class="runtime-list">
+                    @foreach (var provider in stats.Providers)
+                    {
+                        <li class="runtime-row">
+                            <div class="runtime-head">
+                                <span class="runtime-name">@provider.Provider</span>
+                                <span class="runtime-counts">@ProviderCounts(provider)</span>
+                            </div>
+                            <dl class="runtime-metrics">
+                                @foreach (var counter in Counters(provider.Tokens))
+                                {
+                                    <div class="runtime-metric">
+                                        <dt>@counter.Label</dt>
+                                        <dd class="@Absent(counter.Value)">@(counter.Value ?? Unavailable)</dd>
+                                    </div>
+                                }
+                                <div class="runtime-metric">
+                                    <dt>Estimated cost (USD)</dt>
+                                    @{ var providerCost = Money(provider.EstimatedCostUsd); }
+                                    <dd class="@Absent(providerCost)">@(providerCost ?? Unavailable)</dd>
                                 </div>
                             </dl>
                         </li>
@@ -270,4 +330,8 @@
     private static string RuntimeCounts(RuntimeStatisticsDto runtime) =>
         $"{runtime.TrackedAgents} tracked \u00b7 {runtime.ActiveAgents} active \u00b7 "
             + $"{runtime.AgentsWithReportedTokens} reporting tokens";
+
+    private static string ProviderCounts(ProviderStatisticsDto provider) =>
+        $"{provider.TrackedAgents} tracked \u00b7 {provider.ActiveAgents} active \u00b7 "
+            + $"{provider.AgentsWithReportedTokens} reporting tokens";
 }

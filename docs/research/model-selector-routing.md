@@ -55,11 +55,11 @@ This note separates **verified facts** (owned by those sources) from **DevFleet 
 
 Labeled so they are not confused with vendor contracts.
 
-1. **Canonical selector** is one required string `<runtime>/<model>`: trim, max 256, **split on the first `/` only**, both parts required. Prefixes: `codex`, `claude-code`, `antigravity`, `muse`. Examples: `codex/gpt-6-astra`, `claude-code/fable-5-1`, `antigravity/gemini-…`.
+1. **Canonical selector** is one required string `<runtime>/<model>`: trim, max 256, **split on the first `/` only**, both parts required. Prefixes: `codex`, `claude-code`, `antigravity`, `muse`. Examples: `codex/gpt-5.6-sol`, `claude-code/fable-5-1`, `antigravity/gemini-3-pro`, `muse/muse-spark-1.3`.
 2. **Registry** routes by **selector prefix** to a **trusted in-tree adapter** only (no user-chosen executable). Security remains prefix → trusted adapter.
-3. **`default` as the model part** means **that runtime’s provider default**. Claude Code and Antigravity omit their model override. Pi resolves `codex/default` to the first authenticated model returned for `openai-codex` before session creation, so it never falls through to a different authenticated provider.
+3. **Superseded:** `default` as the model part was previously interpreted as **that runtime's provider default** (Claude Code and Antigravity omitting their model override; Pi resolving `codex/default` to the first authenticated `openai-codex` model). The explicit-model rollout removed `/default` as a valid selector: routes now require an explicit provider-native model id. Shared concrete built-ins: `codex/gpt-5.6-sol`, `claude-code/fable-5-1`, `antigravity/gemini-3-pro`, `muse/muse-spark-1.3`.
 4. **`codex/<id>` → Pi `openai-codex/<id>`** when talking to Pi (`provider=openai-codex`, `id` remainder). Do not use Pi `openai/` (API-key provider).
-5. **`claude-code/<suffix>`** passes `suffix` unchanged as `claude --model <suffix>` (`fable`, `opus`, full ids, or Claude’s `default` alias).
+5. **`claude-code/<suffix>`** passes an explicit provider-native `suffix` unchanged as `claude --model <suffix>` (e.g. `fable-5-1`, `opus`, or a full model id). Claude's `default` alias is not a model and is not accepted as a selector suffix.
 6. **`antigravity/<slug>`** passes `slug` as `agy --model <slug>` after listing via `agy models` when cataloging.
 7. **Claude child writes** are **lease-derived** (node reservation / PreToolUse + deny Bash), not Claude’s unrestricted `acceptEdits`/`bypassPermissions`.
 8. **Antigravity** is **OS-level read-only** for DevFleet children (do not enable write/shell grants / `--dangerously-skip-permissions`), even though upstream auto-allows workspace writes.
@@ -73,11 +73,15 @@ Labeled so they are not confused with vendor contracts.
 | Selector | Adapter | Upstream model argument | Notes |
 |---|---|---|---|
 | `codex/<id>` | Pi worker | Pi provider `openai-codex`, model id `<id>` | Decision: map suffix to `openai-codex/<id>`. Fact: provider id is `openai-codex`. |
-| `codex/default` | Pi worker | first authenticated `openai-codex` catalog model | Decision: provider-confined default; never use Pi's unrestricted any-provider fallback. |
+| `codex/default` | Pi worker | *(superseded)* first authenticated `openai-codex` catalog model | **Superseded:** no longer a valid selector; use an explicit id such as `codex/gpt-5.6-sol`. Historical decision was provider-confined default. |
 | `claude-code/<suffix>` | Claude CLI | `--model <suffix>` | Fact: `--model` alias or full name. |
-| `claude-code/default` | Claude CLI | omit `--model` **or** `--model default` | Decision: treat as provider default. Fact: Claude alias `default` clears override. |
+| `claude-code/default` | Claude CLI | *(superseded)* omit `--model` or `--model default` | **Superseded:** no longer a valid selector; use an explicit id such as `claude-code/fable-5-1`. Historical: Claude alias `default` clears the override, it is not a model. |
 | `antigravity/<slug>` | `agy` | `--model <slug>` | Fact: `agy models` + `--model`. |
-| `antigravity/default` | `agy` | omit `--model` | Decision: provider default. |
+| `antigravity/default` | `agy` | *(superseded)* omit `--model` | **Superseded:** no longer a valid selector; use an explicit slug such as `antigravity/gemini-3-pro`. |
+| `codex/gpt-5.6-sol` | Pi worker | Pi provider `openai-codex`, model id `gpt-5.6-sol` | Shared concrete built-in. |
+| `claude-code/fable-5-1` | Claude CLI | `--model fable-5-1` | Shared concrete built-in. |
+| `antigravity/gemini-3-pro` | `agy` | `--model gemini-3-pro` | Shared concrete built-in. |
+| `muse/muse-spark-1.3` | Muse adapter | explicit model `muse-spark-1.3` | Shared concrete built-in. |
 
 ---
 

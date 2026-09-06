@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using PiCommandCenter.Contracts.NodeTransport;
 
 namespace PiCommandCenter.Node.Verification;
 
@@ -68,6 +69,12 @@ public sealed class VerificationOptionsValidator : IValidateOptions<Verification
         {
             failures.Add($"Profile '{profileId}' has a command with an empty id.");
             return;
+        }
+
+        if (VerificationBaselineIds.IsReservedCommandId(command.Id))
+        {
+            failures.Add(
+                $"Profile '{profileId}' command id '{command.Id}' is reserved by the built-in baseline.");
         }
 
         if (!seenCommandIds.Add(command.Id))

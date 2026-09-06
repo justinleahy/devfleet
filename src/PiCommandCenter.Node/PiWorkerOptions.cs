@@ -32,11 +32,8 @@ public sealed class PiWorkerOptions
     /// </summary>
     public string AgentDataDirectory { get; set; } = "~/.local/share/pi-command-center/pi-agent";
 
-    /// <summary>
-    /// Canonical <c>runtime/model</c> selector for the root agent; <c>codex/default</c> lets the
-    /// provider choose its default model.
-    /// </summary>
-    public string Model { get; set; } = DefaultCodex;
+    /// <summary>Canonical <c>runtime/model</c> selector for the root agent.</summary>
+    public string Model { get; set; } = BuiltInCodex;
 
     /// <summary>
     /// Optional system prompt sent to the worker in <c>session.start</c>; empty sends none.
@@ -68,37 +65,37 @@ public sealed class PiWorkerOptions
     public Dictionary<string, AgentRoleRouteCandidate[]> RoleRoutes { get; set; } =
         new(StringComparer.Ordinal)
         {
-            ["root"] = [Candidate(DefaultCodex)],
+            ["root"] = [Candidate(BuiltInCodex)],
             ["architect"] =
             [
-                Candidate(DefaultClaude),
-                Candidate(DefaultAntigravity),
-                Candidate(DefaultMuse),
-                Candidate(DefaultCodex),
+                Candidate(BuiltInClaudeCode),
+                Candidate(BuiltInAntigravity),
+                Candidate(BuiltInMuse),
+                Candidate(BuiltInCodex),
             ],
             ["implementer"] =
             [
-                Candidate(DefaultCodex),
-                Candidate(DefaultClaude),
+                Candidate(BuiltInCodex),
+                Candidate(BuiltInClaudeCode),
             ],
             ["reviewer"] =
             [
-                Candidate(DefaultAntigravity),
-                Candidate(DefaultClaude),
-                Candidate(DefaultMuse),
-                Candidate(DefaultCodex),
+                Candidate(BuiltInAntigravity),
+                Candidate(BuiltInClaudeCode),
+                Candidate(BuiltInMuse),
+                Candidate(BuiltInCodex),
             ],
             ["verifier"] =
             [
-                Candidate(DefaultCodex),
-                Candidate(DefaultClaude),
+                Candidate(BuiltInCodex),
+                Candidate(BuiltInClaudeCode),
             ],
         };
 
-    private const string DefaultCodex = AgentModelSelector.Codex + "/" + AgentModelSelector.DefaultModelId;
-    private const string DefaultClaude = AgentModelSelector.ClaudeCode + "/" + AgentModelSelector.DefaultModelId;
-    private const string DefaultAntigravity = AgentModelSelector.Antigravity + "/" + AgentModelSelector.DefaultModelId;
-    private const string DefaultMuse = AgentModelSelector.Muse + "/" + AgentModelSelector.DefaultModelId;
+    private const string BuiltInCodex = AgentModelSelector.Codex + "/gpt-5.6-sol";
+    private const string BuiltInClaudeCode = AgentModelSelector.ClaudeCode + "/fable-5-1";
+    private const string BuiltInAntigravity = AgentModelSelector.Antigravity + "/gemini-3-pro";
+    private const string BuiltInMuse = AgentModelSelector.Muse + "/muse-spark-1.3";
 
     private static AgentRoleRouteCandidate Candidate(string model) => new() { Model = model };
 }

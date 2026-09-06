@@ -7,6 +7,9 @@ namespace PiCommandCenter.Domain.Projects;
 public sealed class Project
 {
     private const int MaxLimit = 512;
+    public const int MaxTrustedVerificationProfileIdLength = 128;
+    public const int MaxTrustedVerificationProfileRevisionLength = 128;
+
 
     private Project(
         ProjectId id,
@@ -20,6 +23,8 @@ public sealed class Project
         bool createRequestBranch,
         bool createRequestCommit,
         bool autoMerge,
+        string? trustedVerificationProfileId,
+        string? trustedVerificationProfileRevision,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt,
         long version)
@@ -35,6 +40,8 @@ public sealed class Project
         CreateRequestBranch = createRequestBranch;
         CreateRequestCommit = createRequestCommit;
         AutoMerge = autoMerge;
+        TrustedVerificationProfileId = trustedVerificationProfileId;
+        TrustedVerificationProfileRevision = trustedVerificationProfileRevision;
         CreatedAt = createdAt;
         UpdatedAt = updatedAt;
         Version = version;
@@ -63,6 +70,12 @@ public sealed class Project
     public bool CreateRequestCommit { get; private set; }
 
     public bool AutoMerge { get; private set; }
+
+    /// <summary>Selected trusted project-check profile id, or null for baseline only.</summary>
+    public string? TrustedVerificationProfileId { get; private set; }
+
+    /// <summary>Node-reported revision of the selected trusted profile, or null for baseline only.</summary>
+    public string? TrustedVerificationProfileRevision { get; private set; }
 
     public DateTimeOffset CreatedAt { get; }
 
@@ -106,6 +119,8 @@ public sealed class Project
             createRequestBranch,
             createRequestCommit,
             autoMerge,
+            trustedVerificationProfileId: null,
+            trustedVerificationProfileRevision: null,
             createdAt,
             createdAt,
             version: 1);
@@ -128,7 +143,9 @@ public sealed class Project
         bool autoMerge,
         DateTimeOffset createdAt,
         DateTimeOffset updatedAt,
-        long version)
+        long version,
+        string? trustedVerificationProfileId = null,
+        string? trustedVerificationProfileRevision = null)
     {
         var (display, branch, writeLimit, readLimit, childLimit) = Normalize(
             displayName,
@@ -136,6 +153,9 @@ public sealed class Project
             maxActiveWriteRequests,
             maxReadOnlyRequests,
             maxChildAgentsPerRequest);
+        var (profileId, profileRevision) = NormalizeOptionalPair(
+            trustedVerificationProfileId,
+            trustedVerificationProfileRevision);
 
         return new Project(
             id,
@@ -149,6 +169,8 @@ public sealed class Project
             createRequestBranch,
             createRequestCommit,
             autoMerge,
+            profileId,
+            profileRevision,
             createdAt,
             updatedAt,
             version);
@@ -184,6 +206,30 @@ public sealed class Project
         CreateRequestBranch = createRequestBranch;
         CreateRequestCommit = createRequestCommit;
         AutoMerge = autoMerge;
+        UpdatedAt = updatedAt;
+        Version++;
+    }
+
+    /// <summary>
+    /// Selects one trusted project-check profile. Both id and revision are required together.
+    /// </summary>
+    public void SelectTrustedVerificationProfile(
+        string profileId,
+        string profileRevision,
+        DateTimeOffset updatedAt)
+    {
+        var (id, revision) = NormalizeSelection(profileId, profileRevision);
+        TrustedVerificationProfileId = id;
+        TrustedVerificationProfileRevision = revision;
+        UpdatedAt = updatedAt;
+        Version++;
+    }
+
+    /// <summary>Clears the trusted profile so only baseline verification applies.</summary>
+    public void ClearTrustedVerificationProfile(DateTimeOffset updatedAt)
+    {
+        TrustedVerificationProfileId = null;
+        TrustedVerificationProfileRevision = null;
         UpdatedAt = updatedAt;
         Version++;
     }
@@ -225,5 +271,58 @@ public sealed class Project
         }
 
         return Math.Min(value, MaxLimit);
+    }
+
+    private static (string Id, string Revision) NormalizeSelection(string profileId, string profileRevision)
+    {
+        if (string.IsNullOrWhiteSpace(profileId))
+        {
+            throw new ArgumentException("Trusted verification profile id must not be empty.", nameof(profileId));
+        }
+
+        if (string.IsNullOrWhiteSpace(profileRevision))
+        {
+            throw new ArgumentException(
+                "Trusted verification profile revision must not be empty.",
+                nameof(profileRevision));
+        }
+
+        var id = profileId.Trim();
+        var revision = profileRevision.Trim();
+        EnsureBounded(id, MaxTrustedVerificationProfileIdLength, nameof(profileId), "Trusted verification profile id");
+        EnsureBounded(
+            revision,
+            MaxTrustedVerificationProfileRevisionLength,
+            nameof(profileRevision),
+            "Trusted verification profile revision");
+        return (id, revision);
+    }
+
+    private static (string? Id, string? Revision) NormalizeOptionalPair(
+        string? profileId,
+        string? profileRevision)
+    {
+        var hasId = !string.IsNullOrWhiteSpace(profileId);
+        var hasRevision = !string.IsNullOrWhiteSpace(profileRevision);
+        if (hasId != hasRevision)
+        {
+            throw new ArgumentException(
+                "Trusted verification profile id and revision must both be present or both be absent.");
+        }
+
+        if (!hasId)
+        {
+            return (null, null);
+        }
+
+        return NormalizeSelection(profileId!, profileRevision!);
+    }
+
+    private static void EnsureBounded(string value, int maxLength, string paramName, string label)
+    {
+        if (value.Length > maxLength)
+        {
+            throw new ArgumentException($"{label} must not exceed {maxLength} characters.", paramName);
+        }
     }
 }

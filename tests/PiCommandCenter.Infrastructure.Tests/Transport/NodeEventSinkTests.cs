@@ -191,6 +191,95 @@ public class NodeEventSinkTests : IDisposable
     }
 
     [Fact]
+    public async Task Admitted_verification_failed_blocks_the_request_in_verifying()
+    {
+        await using var db = CreateContext();
+        var nodeId = TestNodes.NewNodeId();
+        TestNodes.SeedNode(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
+        var request = TestNodes.SeedRequest(db, project, _clock);
+        request.Start(_clock.GetUtcNow());
+        await TestNodes.SaveAsync(db);
+
+        var sink = new NodeEventSink(_clock, db, _notifier);
+        var failed = Evt(
+            request.Id.Value,
+            project.Id.Value,
+            nodeId.Value,
+            "verification.failed",
+            """{"fingerprint":"fp-1","policyRevision":"policy-1","decision":"Failed","summary":"dotnet-test failed"}""");
+        await sink.AppendAsync(new EventBatch([failed]));
+
+        var loaded = await db.WorkRequests.FindAsync(request.Id);
+        Assert.Equal(WorkRequestStatus.Blocked, loaded!.Status);
+        Assert.Equal(WorkRequestStatus.Verifying, loaded.BlockedPhase);
+
+        await sink.AppendAsync(new EventBatch([failed]));
+        var replayed = await db.WorkRequests.FindAsync(request.Id);
+        Assert.Equal(WorkRequestStatus.Blocked, replayed!.Status);
+        Assert.Equal(WorkRequestStatus.Verifying, replayed.BlockedPhase);
+        Assert.Equal(1, db.SessionEvents.Count());
+    }
+
+    [Fact]
+    public async Task Unavailable_captured_policy_blocks_without_a_repository_fingerprint()
+    {
+        await using var db = CreateContext();
+        var nodeId = TestNodes.NewNodeId();
+        TestNodes.SeedNode(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
+        var request = TestNodes.SeedRequest(db, project, _clock);
+        request.Start(_clock.GetUtcNow());
+        await TestNodes.SaveAsync(db);
+
+        var sink = new NodeEventSink(_clock, db, _notifier);
+        var failed = Evt(
+            request.Id.Value,
+            project.Id.Value,
+            nodeId.Value,
+            "verification.failed",
+            """{"fingerprint":null,"policyRevision":"policy-1","decision":"Failed","errorCode":"verification_policy_unavailable","summary":"profile unavailable"}""");
+
+        await sink.AppendAsync(new EventBatch([failed]));
+
+        var loaded = await db.WorkRequests.FindAsync(request.Id);
+        Assert.Equal(WorkRequestStatus.Blocked, loaded!.Status);
+        Assert.Equal(WorkRequestStatus.Verifying, loaded.BlockedPhase);
+    }
+
+    [Theory]
+    [InlineData("verification.rejected")]
+    [InlineData("verification.intermediate")]
+    [InlineData("verification.completed")]
+    [InlineData("verification.cancelled")]
+    public async Task Non_admitted_verification_events_do_not_block_the_request(string type)
+    {
+        await using var db = CreateContext();
+        var nodeId = TestNodes.NewNodeId();
+        TestNodes.SeedNode(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
+        var request = TestNodes.SeedRequest(db, project, _clock);
+        request.Start(_clock.GetUtcNow());
+        await TestNodes.SaveAsync(db);
+
+        var sink = new NodeEventSink(_clock, db, _notifier);
+        await sink.AppendAsync(new EventBatch(
+        [
+            Evt(
+                request.Id.Value,
+                project.Id.Value,
+                nodeId.Value,
+                type,
+                """{"fingerprint":"fp-1","policyRevision":"policy-1","decision":"Rejected","summary":"not admitted"}"""),
+        ]));
+
+        var loaded = await db.WorkRequests.FindAsync(request.Id);
+        Assert.Equal(WorkRequestStatus.Starting, loaded!.Status);
+        Assert.Null(loaded.BlockedPhase);
+    }
+
+
+    [Fact]
     public async Task Terminal_completion_tail_is_persisted_without_changing_the_session_projection()
     {
         await using var db = CreateContext();

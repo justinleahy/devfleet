@@ -21,7 +21,23 @@ public sealed class VerificationRunRowConfiguration : IEntityTypeConfiguration<V
         builder.Property(r => r.OutputSummary).HasMaxLength(16384);
         builder.Property(r => r.OutputArtifactPath).HasMaxLength(1024);
         builder.Property(r => r.Mandatory).HasColumnType("INTEGER");
+        builder.Property(r => r.Fingerprint).IsRequired().HasMaxLength(256);
+        builder.Property(r => r.PolicyRevision).IsRequired().HasMaxLength(128);
+        builder.Property(r => r.RunKind).IsRequired().HasMaxLength(32);
+        builder.Property(r => r.AttemptId).HasColumnType("TEXT");
 
         builder.HasIndex(r => r.RequestId).HasDatabaseName("IX_VerificationRuns_RequestId");
+        builder.HasIndex(r => new
+            {
+                r.RequestId,
+                r.Fingerprint,
+                r.PolicyRevision,
+                r.ProfileId,
+                r.CommandId,
+                r.RunKind,
+            })
+            .IsUnique()
+            .HasFilter("\"RunKind\" <> 'Intermediate'")
+            .HasDatabaseName("IX_VerificationRuns_FinalIdentity");
     }
 }

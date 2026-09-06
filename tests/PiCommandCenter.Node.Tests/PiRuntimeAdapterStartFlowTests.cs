@@ -65,12 +65,12 @@ public sealed class PiRuntimeAdapterStartFlowTests
     }
 
     [Fact]
-    public async Task Codex_default_selector_is_sent_provider_qualified_so_the_worker_stays_on_openai_codex()
+    public async Task Codex_selector_is_sent_provider_qualified_so_the_worker_stays_on_openai_codex()
     {
         var result = await StartRootAsync(
-            MakeRequest(AgentRuntimeMode.Child, "review", "pi-root-1", "codex/default"));
+            MakeRequest(AgentRuntimeMode.Child, "review", "pi-root-1", "codex/gpt-5.6-sol"));
 
-        Assert.Equal("openai-codex/default", result.StartPayload?.GetProperty("model").GetString());
+        Assert.Equal("openai-codex/gpt-5.6-sol", result.StartPayload?.GetProperty("model").GetString());
     }
 
     [Fact]
@@ -134,7 +134,7 @@ public sealed class PiRuntimeAdapterStartFlowTests
         AgentRuntimeMode mode,
         string prompt,
         string? parentSessionId = null,
-        string model = "codex/default",
+        string model = "codex/gpt-5.6-sol",
         bool createRequestCommit = false)
         => new(
             (mode is AgentRuntimeMode.Root

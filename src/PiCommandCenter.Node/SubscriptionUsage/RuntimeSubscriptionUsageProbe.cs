@@ -472,6 +472,9 @@ public sealed class RuntimeSubscriptionUsageProbe : IRuntimeSubscriptionUsagePro
         "zai",
         "xai-oauth",
         "opencode-go",
+        "qwen-token-plan",
+        "qwen-token-plan-individual",
+        "qwen-token-plan-cn",
     ];
 
     /// <summary>

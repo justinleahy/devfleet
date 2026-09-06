@@ -17,7 +17,9 @@ public sealed record CompletionEvidenceMessage(
     IReadOnlyList<ReviewFindingMessage> ReviewFindings,
     string VerificationSummary,
     string? RequestBranch = null,
-    string? CheckpointCommitId = null);
+    string? CheckpointCommitId = null,
+    string? VerificationFingerprint = null,
+    string? VerificationPolicyRevision = null);
 
 /// <summary>Persisted request result returned after an accepted completion gate.</summary>
 public sealed record RequestResultMessage(

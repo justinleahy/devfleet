@@ -62,6 +62,10 @@ public sealed class RequestQueue(
         CancellationToken cancellationToken = default)
     {
         await EnsureProjectExistsAsync(projectId, cancellationToken);
+        var originalRequestId = await ResolveOriginalRequestIdAsync(
+            projectId,
+            command.OriginalRequestId,
+            cancellationToken);
 
         var request = WorkRequest.Enqueue(
             projectId,
@@ -70,7 +74,8 @@ public sealed class RequestQueue(
             command.RiskLevel,
             command.Title,
             command.Prompt,
-            clock.GetUtcNow());
+            clock.GetUtcNow(),
+            originalRequestId);
 
         db.WorkRequests.Add(request);
         try
@@ -99,6 +104,35 @@ public sealed class RequestQueue(
         }
     }
 
+    private async Task<WorkRequestId?> ResolveOriginalRequestIdAsync(
+        ProjectId projectId,
+        Guid? originalRequestId,
+        CancellationToken cancellationToken)
+    {
+        if (originalRequestId is not Guid originalGuid)
+        {
+            return null;
+        }
+
+        var originalId = new WorkRequestId(originalGuid);
+        var original = await db.WorkRequests
+            .AsNoTracking()
+            .SingleOrDefaultAsync(request => request.Id == originalId, cancellationToken);
+        if (original is null)
+        {
+            throw new RequestNotFoundException(originalId);
+        }
+
+        if (original.ProjectId != projectId)
+        {
+            throw new ArgumentException(
+                "Original request must belong to the same project.",
+                nameof(originalRequestId));
+        }
+
+        return originalId;
+    }
+
     private static WorkRequestDto ToDto(WorkRequest request, EligibilityDecision decision) => new(
         request.Id.Value,
         request.ProjectId.Value,
@@ -120,5 +154,6 @@ public sealed class RequestQueue(
         request.Status == WorkRequestStatus.Queued && decision.Assignment is null
             ? decision.Status
             : null,
-        decision.Assignment);
+        decision.Assignment,
+        request.OriginalRequestId?.Value);
 }

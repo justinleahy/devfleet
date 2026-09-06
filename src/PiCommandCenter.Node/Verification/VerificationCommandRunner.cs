@@ -9,7 +9,8 @@ namespace PiCommandCenter.Node.Verification;
 /// <c>project-build</c> lease, no active source mutation, argument-list process,
 /// bounded capture, always-release.
 /// </summary>
-public sealed class VerificationCommandRunner : IVerificationCommandRunner
+public sealed class VerificationCommandRunner
+    : IVerificationCommandRunner, IAdmittedVerificationCommandRunner
 {
     private readonly IOptions<VerificationOptions> _options;
     private readonly INodeReservationGateway _reservations;
@@ -67,25 +68,28 @@ public sealed class VerificationCommandRunner : IVerificationCommandRunner
 
         await RejectActiveSourceMutationAsync(context.ProjectId, cancellationToken).ConfigureAwait(false);
 
-        var acquire = await _reservations.AcquireAsync(
-            context.ProjectId,
-            context.RequestId,
-            context.OwnerSessionId,
-            [new ReservationScopeSpec("resource", VerificationOptions.ProjectBuildResource)],
-            "verification",
-            cancellationToken).ConfigureAwait(false);
-
-        if (!acquire.Ok || acquire.Lease is null)
-        {
-            throw new VerificationRejectedException(
-                acquire.Error?.Code ?? "build_lease_denied",
-                acquire.Error?.Message ?? "Failed to acquire project-build.");
-        }
-
-        var lease = acquire.Lease;
+        ReservationLeaseInfo? lease = null;
         NodeActivityLease? processActivity = null;
         try
         {
+            // Once acquisition reaches the reservation authority, cancellation cannot safely
+            // abandon the response: the lease id is required for guaranteed cleanup.
+            var acquire = await _reservations.AcquireAsync(
+                context.ProjectId,
+                context.RequestId,
+                context.OwnerSessionId,
+                [new ReservationScopeSpec("resource", VerificationOptions.ProjectBuildResource)],
+                "verification",
+                CancellationToken.None).ConfigureAwait(false);
+
+            if (!acquire.Ok || acquire.Lease is null)
+            {
+                throw new VerificationRejectedException(
+                    acquire.Error?.Code ?? "build_lease_denied",
+                    acquire.Error?.Message ?? "Failed to acquire project-build.");
+            }
+
+            lease = acquire.Lease;
             await RejectActiveSourceMutationAsync(context.ProjectId, cancellationToken).ConfigureAwait(false);
             processActivity = _admission.TrackProcess(
                 context.RequestId,
@@ -105,20 +109,68 @@ public sealed class VerificationCommandRunner : IVerificationCommandRunner
         }
         finally
         {
-            try
+            if (lease is not null)
             {
-                await _reservations.ReleaseAsync(
-                    lease.LeaseId,
-                    context.ProjectId,
-                    context.OwnerSessionId,
-                    CancellationToken.None).ConfigureAwait(false);
+                try
+                {
+                    await _reservations.ReleaseAsync(
+                        lease.LeaseId,
+                        context.ProjectId,
+                        context.OwnerSessionId,
+                        CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // lease release is best-effort after the run; never hide the command result
+                }
             }
-            catch (Exception)
-            {
-                // lease release is best-effort after the run; never hide the command result
-            }
+
             processActivity?.Dispose();
         }
+    }
+
+    async Task<VerificationProfileRunResult> IAdmittedVerificationCommandRunner.RunAdmittedAsync(
+        VerificationRunContext context,
+        string profileId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentException.ThrowIfNullOrWhiteSpace(profileId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(context.RepositoryRoot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(context.OwnerSessionId);
+
+        var options = _options.Value;
+        if (!TryGetProfile(options, profileId, out var profile))
+        {
+            throw new VerificationRejectedException(
+                "unknown_profile",
+                $"Verification profile '{profileId}' is not in trusted node configuration.");
+        }
+
+        if (profile.Commands.Count == 0)
+        {
+            throw new VerificationRejectedException(
+                "unknown_command",
+                $"Verification profile '{profileId}' has no commands.");
+        }
+
+        using var processActivity = _admission.TrackProcess(
+            context.RequestId,
+            $"verification:{profile.Id}");
+        var results = new List<VerificationCommandResult>(profile.Commands.Count);
+        foreach (var command in profile.Commands)
+        {
+            results.Add(await RunCommandAsync(context, command, options.MaxOutputBytes, cancellationToken)
+                .ConfigureAwait(false));
+        }
+
+        var succeeded = results.All(result =>
+            !result.Mandatory
+            || (!result.TimedOut
+                && !result.Cancelled
+                && !result.Crashed
+                && result.ExitCode == 0));
+        return new VerificationProfileRunResult(profile.Id, results, succeeded);
     }
 
     private static bool TryGetProfile(
@@ -180,6 +232,13 @@ public sealed class VerificationCommandRunner : IVerificationCommandRunner
         int maxOutputBytes,
         CancellationToken cancellationToken)
     {
+        if (context.OnCommandStarting is not null)
+        {
+            await context.OnCommandStarting(
+                new VerificationCommandStarting(command.Id, command.Mandatory, command.TimeoutSeconds),
+                cancellationToken).ConfigureAwait(false);
+        }
+
         var workingDirectory = ResolveWorkingDirectory(context.RepositoryRoot, command.WorkingDirectory);
         var timeout = TimeSpan.FromSeconds(command.TimeoutSeconds);
         var run = await BoundedProcessRunner.RunAsync(
@@ -190,7 +249,6 @@ public sealed class VerificationCommandRunner : IVerificationCommandRunner
             timeout,
             cancellationToken,
             sandboxRepositoryRoot: context.RepositoryRoot).ConfigureAwait(false);
-
         return new VerificationCommandResult(
             command.Id,
             command.Executable,

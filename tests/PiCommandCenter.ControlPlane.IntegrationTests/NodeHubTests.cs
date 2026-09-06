@@ -129,7 +129,7 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
             [
                 new RuntimeRouteReadinessMessage(
                     "developer",
-                    "codex/default",
+                    "codex/gpt-5.6-sol",
                     RuntimeReadinessStatuses.Unknown,
                     RuntimeReadinessEvidenceSources.UnsupportedNativeObservation,
                     observedAt,
@@ -149,7 +149,7 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
         Assert.Equal(routingRevision, heartbeaten.ExecutionStatus.RoutingRevision);
         var route = Assert.Single(heartbeaten.ExecutionStatus.Routes);
         Assert.Equal("developer", route.Role);
-        Assert.Equal("codex/default", route.CanonicalModel);
+        Assert.Equal("codex/gpt-5.6-sol", route.CanonicalModel);
         Assert.Equal(RuntimeReadinessStatuses.Unknown, route.Readiness);
         Assert.Equal(RuntimeReadinessEvidenceSources.UnsupportedNativeObservation, route.EvidenceSource);
         Assert.Equal(observedAt, route.ObservedAt);
@@ -165,6 +165,58 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
         Assert.Equal(routingRevision, persisted.ExecutionStatus.RoutingRevision);
         var persistedRoute = Assert.Single(persisted.ExecutionStatus.Routes);
         Assert.Equal(route, persistedRoute);
+    }
+
+    [Fact]
+    public async Task Heartbeat_round_trips_selected_verification_profile_readiness()
+    {
+        await RegisterNodeAsync();
+        var observedAt = new DateTimeOffset(2026, 9, 5, 16, 0, 0, TimeSpan.Zero);
+        var policy = new VerificationPolicyCatalogMessage(
+            observedAt,
+            BaselineAvailable: true,
+            BaselineVersion: VerificationBaselineIds.Version,
+            [
+                new VerificationPolicyProfileMessage(
+                    "trusted-lint",
+                    "rev-7",
+                    "Trusted lint",
+                    [
+                        new VerificationPolicyCommandMessage(
+                            "dotnet-test",
+                            "Dotnet test",
+                            "repo-root",
+                            Mandatory: true,
+                            TimeoutSeconds: 30),
+                    ]),
+            ]);
+        var executionStatus = new NodeExecutionStatusMessage(
+            observedAt,
+            AvailableRequestSlots: 1,
+            ActiveAssignmentIds: [],
+            RoutingRevision: "routing-revision-policy",
+            Routes: [],
+            VerificationPolicy: policy);
+
+        var heartbeaten = await _connection.InvokeAsync<NodeDto>(
+            "Heartbeat",
+            new NodeHeartbeatMessage(_nodeId, ["session-a"], ExecutionStatus: executionStatus));
+
+        Assert.NotNull(heartbeaten.ExecutionStatus);
+        Assert.Equivalent(policy, heartbeaten.ExecutionStatus.VerificationPolicy, strict: true);
+        var advertised = Assert.Single(heartbeaten.ExecutionStatus.VerificationPolicy!.Profiles);
+        Assert.Equal("trusted-lint", advertised.Id);
+        Assert.Equal("rev-7", advertised.Revision);
+        var command = Assert.Single(advertised.Commands);
+        Assert.Equal("dotnet-test", command.Id);
+        Assert.Equal("Dotnet test", command.DisplayLabel);
+        Assert.Equal("repo-root", command.WorkingDirectoryLabel);
+        Assert.True(command.Mandatory);
+        Assert.Equal(30, command.TimeoutSeconds);
+
+        var persisted = await GetNodeAsync(_nodeId);
+        Assert.NotNull(persisted);
+        Assert.Equivalent(policy, persisted.ExecutionStatus!.VerificationPolicy, strict: true);
     }
 
     [Fact]
@@ -302,7 +354,7 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
                     [
                         new RuntimeRouteReadinessMessage(
                             "implementer",
-                            "codex/default",
+                            "codex/gpt-5.6-sol",
                             RuntimeReadinessStatuses.Ready,
                             "runtime-adapter",
                             now,
@@ -684,7 +736,7 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
                 AgentName = sessionId,
                 Role = "root",
                 Runtime = "pi",
-                Model = "codex/default",
+                Model = "codex/gpt-5.6-sol",
                 Liveness = nameof(AgentLiveness.Online),
                 Activity = nameof(AgentActivity.Idle),
                 Attention = "None",

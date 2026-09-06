@@ -8,6 +8,8 @@ using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Node.Child;
 using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.SystemResources;
+using PiCommandCenter.Node.Recovery;
+
 
 namespace PiCommandCenter.Node;
 
@@ -25,6 +27,13 @@ public interface INodeHubOps : IAsyncDisposable
 
     /// <summary>Raised when the Control Plane cancels a durable assignment owned by this node.</summary>
     event Func<CancelAssignmentCommand, Task>? CancelAssignmentReceived;
+
+    /// <summary>
+    /// Raised when the Control Plane commands this node to recover one assignment.
+    /// Recovery always stops; it never resumes interrupted execution.
+    /// </summary>
+    event Func<RecoverAssignmentCommandMessage, Task>? RecoverAssignmentReceived;
+
 
     HubConnectionState State { get; }
 
@@ -50,6 +59,14 @@ public interface INodeHubOps : IAsyncDisposable
 
     Task<NodeEventAcknowledgementMessage> PublishEventsAsync(
         IReadOnlyList<NodeEventMessage> events,
+        CancellationToken cancellationToken);
+
+    Task ReportRecoveryProgressAsync(
+        AssignmentRecoveryProgressMessage message,
+        CancellationToken cancellationToken);
+
+    Task ReportRecoveryProofAsync(
+        AssignmentRecoveryProofMessage message,
         CancellationToken cancellationToken);
 }
 
@@ -104,6 +121,8 @@ public sealed class NodeWorker
     private readonly INodeSystemResourceMonitor _resourceMonitor;
     private readonly IRuntimeReadinessProvider _readinessProvider;
     private readonly NodeAssignmentCredentialSource _assignmentCredentials;
+    private readonly IAssignmentRecoveryRunner _recoveryRunner;
+    private readonly HashSet<Guid> _recoveryStoppedRequests = [];
     private readonly ILogger<NodeWorker> _logger;
     private readonly object _assignmentsLock = new();
     private readonly SemaphoreSlim _dispatchGate = new(1, 1);
@@ -129,6 +148,7 @@ public sealed class NodeWorker
         IRootSessionTerminalizer rootTerminalizer,
         NodeAssignmentCredentialSource assignmentCredentials,
         IRootSessionSupervisor rootSessions,
+        IAssignmentRecoveryRunner recoveryRunner,
         ILogger<NodeWorker> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -142,6 +162,7 @@ public sealed class NodeWorker
         ArgumentNullException.ThrowIfNull(sessionCanceller);
         ArgumentNullException.ThrowIfNull(rootTerminalizer);
         ArgumentNullException.ThrowIfNull(rootSessions);
+        ArgumentNullException.ThrowIfNull(recoveryRunner);
         ArgumentNullException.ThrowIfNull(logger);
         _options = options.Value;
         _transport = transport;
@@ -154,11 +175,13 @@ public sealed class NodeWorker
         _sessionCanceller = sessionCanceller;
         _rootTerminalizer = rootTerminalizer;
         _rootSessions = rootSessions;
+        _recoveryRunner = recoveryRunner;
         _logger = logger;
 
         _transport.Connected += HandleConnectedAsync;
         _transport.CancelSessionReceived += OnCancelSessionReceivedAsync;
         _transport.CancelAssignmentReceived += OnCancelAssignmentReceivedAsync;
+        _transport.RecoverAssignmentReceived += OnRecoverAssignmentReceivedAsync;
     }
 
     private async Task OnCancelSessionReceivedAsync(CancelSessionCommand command)
@@ -257,6 +280,72 @@ public sealed class NodeWorker
         }
     }
 
+    private async Task OnRecoverAssignmentReceivedAsync(RecoverAssignmentCommandMessage command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        lock (_assignmentsLock)
+        {
+            _recoveryStoppedRequests.Add(command.RequestId);
+        }
+
+        try
+        {
+            var proof = await _recoveryRunner
+                .RunAsync(command, ReportRecoveryProgressSafeAsync, _cancellationShutdown.Token)
+                .ConfigureAwait(false);
+            await ReportRecoveryProofSafeAsync(proof, _cancellationShutdown.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_cancellationShutdown.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "RecoverAssignment {RecoveryId} attempt {Attempt} for request {RequestId} failed.",
+                command.RecoveryId,
+                command.Attempt,
+                command.RequestId);
+        }
+    }
+
+    private async Task ReportRecoveryProgressSafeAsync(
+        AssignmentRecoveryProgressMessage progress,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _transport.ReportRecoveryProgressAsync(progress, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogDebug(
+                ex,
+                "Recovery progress for {RecoveryId} attempt {Attempt} was not delivered.",
+                progress.RecoveryId,
+                progress.Attempt);
+        }
+    }
+
+    private async Task ReportRecoveryProofSafeAsync(
+        AssignmentRecoveryProofMessage proof,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _transport.ReportRecoveryProofAsync(proof, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogDebug(
+                ex,
+                "Recovery proof for {RecoveryId} attempt {Attempt} was not delivered.",
+                proof.RecoveryId,
+                proof.Attempt);
+        }
+    }
+
+
     public async Task<CompletionGateDecision> BeginTerminalizationAsync(
         Guid requestId,
         TerminalizationIntent intent,
@@ -339,6 +428,7 @@ public sealed class NodeWorker
             _transport.Connected -= HandleConnectedAsync;
             _transport.CancelSessionReceived -= OnCancelSessionReceivedAsync;
             _transport.CancelAssignmentReceived -= OnCancelAssignmentReceivedAsync;
+            _transport.RecoverAssignmentReceived -= OnRecoverAssignmentReceivedAsync;
             _cancellationShutdown.Cancel();
             await AwaitPendingAssignmentCancellationsAsync().ConfigureAwait(false);
             await _transport.StopAsync(CancellationToken.None).ConfigureAwait(false);
@@ -509,7 +599,8 @@ public sealed class NodeWorker
             [
                 .. _activeAssignments.Values
                     .Where(entry => entry.SupervisorState == AssignmentSupervisorState.StartBlocked
-                        && entry.Assignment.State != "Cancelling"),
+                        && entry.Assignment.State != "Cancelling"
+                        && !_recoveryStoppedRequests.Contains(entry.Assignment.RequestId)),
             ];
         }
 
@@ -583,7 +674,7 @@ public sealed class NodeWorker
         }
 
         _nextAssignmentEligibleAt = null;
-        if (ContainsAssignment(assignment.RequestId))
+        if (ContainsAssignment(assignment.RequestId) || IsRecoveryStopped(assignment.RequestId))
         {
             return;
         }
@@ -1042,6 +1133,15 @@ public sealed class NodeWorker
             return _activeAssignments.ContainsKey(requestId);
         }
     }
+
+    private bool IsRecoveryStopped(Guid requestId)
+    {
+        lock (_assignmentsLock)
+        {
+            return _recoveryStoppedRequests.Contains(requestId);
+        }
+    }
+
 
     private bool TrackAssignment(NodeAssignmentJournalEntry entry)
     {

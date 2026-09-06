@@ -5,9 +5,8 @@ using Xunit;
 namespace PiCommandCenter.Node.Tests;
 
 /// <summary>
-/// Proves the trusted git seam performs exactly its two whitelisted operations against a real
-/// repository and refuses everything else (policy: agents never invoke git; only the supervisor
-/// reaches this service, and only with branch creation / checkpoint commit requests).
+/// Proves the supervisor's trusted Git seam exposes only workspace preparation, request-branch
+/// creation, and checkpoint commits while isolating repository hooks and ambient configuration.
 /// </summary>
 public sealed class RestrictedGitServiceTests : IDisposable
 {
@@ -252,6 +251,30 @@ public sealed class RestrictedGitServiceTests : IDisposable
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => _service.PrepareWorkspaceAsync(
             new WorkspacePreparationRequest(Guid.NewGuid(), worktree, "main")));
+    }
+
+    [Fact]
+    public async Task Checkpoint_commit_never_executes_repository_hooks()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var branch = "request/no-hooks";
+        await _service.CreateRequestBranchAsync(
+            new RequestBranchRequest(Guid.NewGuid(), _repo, "main", branch));
+        var hook = Path.Combine(_repo, ".git", "hooks", "pre-commit");
+        await File.WriteAllTextAsync(hook, "#!/bin/sh\nexit 91\n");
+        File.SetUnixFileMode(
+            hook,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        await File.WriteAllTextAsync(Path.Combine(_repo, "safe.txt"), "safe");
+
+        var committed = await _service.CreateCheckpointCommitAsync(
+            new CheckpointCommitRequest(Guid.NewGuid(), _repo, branch, "safe", ["safe.txt"]));
+
+        Assert.Equal(committed.CommitId, await GitAsync("rev-parse", "HEAD"));
     }
 
     private static string CreateRepo()

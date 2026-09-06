@@ -93,6 +93,7 @@ public sealed class ReservationService(
 
         await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
         var conflicts = await FindConflictsAsync(lease.ProjectId.Value, scopes, lease.Id, cancellationToken);
+        AppendSameLeaseProjectBuildConflicts(lease, scopes, conflicts);
         if (conflicts.Count > 0)
         {
             throw new ReservationConflictException(conflicts);
@@ -307,6 +308,10 @@ public sealed class ReservationService(
         }
     }
 
+    /// <summary>
+    /// Conflict detection for acquire and expand. Uses <see cref="ReservationScope.ConflictsWith"/>
+    /// so <c>project-build</c> excludes every source scope on the same Project in both directions.
+    /// </summary>
     private async Task<List<ReservationConflictDto>> FindConflictsAsync(
         Guid projectId,
         IReadOnlyList<ReservationScope> requested,
@@ -352,6 +357,31 @@ public sealed class ReservationService(
         }
 
         return conflicts;
+    }
+
+    private static void AppendSameLeaseProjectBuildConflicts(
+        ReservationLease lease,
+        IReadOnlyList<ReservationScope> requested,
+        List<ReservationConflictDto> conflicts)
+    {
+        foreach (var existing in lease.Scopes)
+        {
+            foreach (var scope in requested)
+            {
+                if (!ReservationScope.IsProjectBuildSourceConflict(existing, scope))
+                {
+                    continue;
+                }
+
+                conflicts.Add(new ReservationConflictDto(
+                    lease.Id,
+                    lease.OwnerSessionId,
+                    (int)existing.Kind,
+                    existing.Kind.ToString(),
+                    existing.Path));
+                return;
+            }
+        }
     }
 
     /// <summary>

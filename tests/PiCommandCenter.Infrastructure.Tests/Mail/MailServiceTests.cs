@@ -52,7 +52,7 @@ public class MailServiceTests : IDisposable
             AgentName = sessionId + "-name",
             Role = "implementer",
             Runtime = "pi",
-            Model = "codex/default",
+            Model = "codex/gpt-5.6-sol",
             Liveness = "Alive",
             Activity = "Working",
             Attention = "None",

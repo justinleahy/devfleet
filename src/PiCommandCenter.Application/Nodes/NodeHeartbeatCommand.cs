@@ -1,3 +1,4 @@
+using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 
 namespace PiCommandCenter.Application.Nodes;
@@ -26,7 +27,8 @@ public sealed record NodeExecutionStatusDto(
     int AvailableRequestSlots,
     IReadOnlyList<Guid> ActiveAssignmentIds,
     string RoutingRevision,
-    IReadOnlyList<RuntimeRouteReadinessDto> Routes);
+    IReadOnlyList<RuntimeRouteReadinessDto> Routes,
+    VerificationPolicyCatalogMessage? VerificationPolicy = null);
 
 public sealed record RuntimeRouteReadinessDto(
     string Role,

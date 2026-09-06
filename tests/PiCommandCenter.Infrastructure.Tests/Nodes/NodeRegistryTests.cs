@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Nodes;
+using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Projects;
@@ -240,10 +241,28 @@ public class NodeRegistryTests : IDisposable
         {
             Routes =
             [
-                new("root", "codex/default", "ready", "native_auth_probe", observedAt, "routing-v1"),
-                new("reviewer", "claude-code/default", "unavailable", "native_auth_probe", observedAt, "routing-v1"),
-                new("verifier", "muse/default", "unknown", "unsupported_native_observation", observedAt, "routing-v1"),
+                new("root", "codex/gpt-5.6-sol", "ready", "native_auth_probe", observedAt, "routing-v1"),
+                new("reviewer", "claude-code/fable-5-1", "unavailable", "native_auth_probe", observedAt, "routing-v1"),
+                new("verifier", "muse/muse-spark-1.3", "unknown", "unsupported_native_observation", observedAt, "routing-v1"),
             ],
+            VerificationPolicy = new VerificationPolicyCatalogMessage(
+                observedAt,
+                BaselineAvailable: true,
+                VerificationBaselineIds.Version,
+                [
+                    new VerificationPolicyProfileMessage(
+                        "dotnet",
+                        "rev-1",
+                        "Dotnet checks",
+                        [
+                            new VerificationPolicyCommandMessage(
+                                "test",
+                                "dotnet test",
+                                "src",
+                                Mandatory: true,
+                                TimeoutSeconds: 120),
+                        ]),
+                ]),
         };
 
         var projected = await registry.HeartbeatAsync(
@@ -337,7 +356,7 @@ public class NodeRegistryTests : IDisposable
             current with { Routes = [route with { Role = " reviewer " }] },
             current with { Routes = [route with { Role = new string('r', 129) }] },
             current with { Routes = [route with { CanonicalModel = "" }] },
-            current with { Routes = [route with { CanonicalModel = " codex/default " }] },
+            current with { Routes = [route with { CanonicalModel = " codex/gpt-5.6-sol " }] },
             current with
             {
                 Routes = [route with { CanonicalModel = $"codex/{new string('m', 123)}" }],
@@ -352,6 +371,63 @@ public class NodeRegistryTests : IDisposable
             },
             current with { Routes = [route with { RoutingRevision = "routing-v2" }] },
             current with { Routes = [route, route with { Readiness = "unknown" }] },
+            current with
+            {
+                VerificationPolicy = new VerificationPolicyCatalogMessage(
+                    observedAt,
+                    BaselineAvailable: false,
+                    VerificationBaselineIds.Version,
+                    []),
+            },
+            current with
+            {
+                VerificationPolicy = new VerificationPolicyCatalogMessage(
+                    observedAt,
+                    BaselineAvailable: true,
+                    VerificationBaselineIds.Version,
+                    [
+                        new VerificationPolicyProfileMessage(
+                            VerificationBaselineIds.ProfileId,
+                            "rev",
+                            "Baseline",
+                            [new VerificationPolicyCommandMessage("x", "x", ".", true, 1)]),
+                    ]),
+            },
+            current with
+            {
+                VerificationPolicy = new VerificationPolicyCatalogMessage(
+                    observedAt,
+                    BaselineAvailable: true,
+                    VerificationBaselineIds.Version,
+                    [
+                        new VerificationPolicyProfileMessage(
+                            "dotnet",
+                            "rev",
+                            "Dotnet",
+                            [
+                                new VerificationPolicyCommandMessage(
+                                    VerificationBaselineIds.WhitespaceCommandId,
+                                    "Whitespace",
+                                    ".",
+                                    true,
+                                    1),
+                            ]),
+                    ]),
+            },
+            current with
+            {
+                VerificationPolicy = new VerificationPolicyCatalogMessage(
+                    observedAt,
+                    BaselineAvailable: true,
+                    VerificationBaselineIds.Version,
+                    [
+                        new VerificationPolicyProfileMessage(
+                            "dotnet",
+                            "rev",
+                            "Dotnet",
+                            [new VerificationPolicyCommandMessage("x", "x", ".", true, 0)]),
+                    ]),
+            },
         };
 
         foreach (var invalid in invalidStatuses)
@@ -618,7 +694,7 @@ public class NodeRegistryTests : IDisposable
             [
                 new RuntimeRouteReadinessDto(
                     "root",
-                    "codex/default",
+                    "codex/gpt-5.6-sol",
                     readiness,
                     "unsupported_native_observation",
                     observedAt,
@@ -638,6 +714,45 @@ public class NodeRegistryTests : IDisposable
         for (var index = 0; index < expected.Routes.Count; index++)
         {
             Assert.Equal(expected.Routes[index], actual.Routes[index]);
+        }
+
+        if (expected.VerificationPolicy is null)
+        {
+            Assert.Null(actual.VerificationPolicy);
+        }
+        else
+        {
+            AssertEqualVerificationPolicy(expected.VerificationPolicy, actual.VerificationPolicy);
+        }
+    }
+
+    private static void AssertEqualVerificationPolicy(
+        VerificationPolicyCatalogMessage expected,
+        VerificationPolicyCatalogMessage? actual)
+    {
+        Assert.NotNull(actual);
+        Assert.Equal(expected.ObservedAt, actual.ObservedAt);
+        Assert.Equal(expected.BaselineAvailable, actual.BaselineAvailable);
+        Assert.Equal(expected.BaselineVersion, actual.BaselineVersion);
+        Assert.Equal(expected.Profiles.Count, actual.Profiles.Count);
+        for (var profileIndex = 0; profileIndex < expected.Profiles.Count; profileIndex++)
+        {
+            var expectedProfile = expected.Profiles[profileIndex];
+            var actualProfile = actual.Profiles[profileIndex];
+            Assert.Equal(expectedProfile.Id, actualProfile.Id);
+            Assert.Equal(expectedProfile.Revision, actualProfile.Revision);
+            Assert.Equal(expectedProfile.DisplayLabel, actualProfile.DisplayLabel);
+            Assert.Equal(expectedProfile.Commands.Count, actualProfile.Commands.Count);
+            for (var commandIndex = 0; commandIndex < expectedProfile.Commands.Count; commandIndex++)
+            {
+                var expectedCommand = expectedProfile.Commands[commandIndex];
+                var actualCommand = actualProfile.Commands[commandIndex];
+                Assert.Equal(expectedCommand.Id, actualCommand.Id);
+                Assert.Equal(expectedCommand.DisplayLabel, actualCommand.DisplayLabel);
+                Assert.Equal(expectedCommand.WorkingDirectoryLabel, actualCommand.WorkingDirectoryLabel);
+                Assert.Equal(expectedCommand.Mandatory, actualCommand.Mandatory);
+                Assert.Equal(expectedCommand.TimeoutSeconds, actualCommand.TimeoutSeconds);
+            }
         }
     }
 

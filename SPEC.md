@@ -308,6 +308,10 @@ The PoC is successful only when all criteria below are demonstrated.
 | Request Thread | Mail-like discussion thread associated with a work request. |
 | Completion Gate | Supervisor validation that determines whether a request may become completed. |
 | Canonical Workspace | The node-local repository path in a validated WorkspaceBinding; an ExecutionAssignment snapshots it for all sessions of that request. |
+| Recovery Hold | Project-scoped pause that blocks `ClaimNext` with `project_recovery_paused` until an operator resumes after `Recovered`. Enqueue still succeeds. |
+| Recovery Operation | Durable stop workflow (`Pending`, `Running`, `NeedsIntervention`, `Recovered`) with captured assignment and reservation targets, attempt number, and evidence. One unresolved operation per Project. |
+| OriginalRequestId | Immutable same-Project FK on a new Work Request linking a retry to its original. It confers no claim token, assignment, session, or lease. |
+| Operator attestation | Administrator `confirm-manual` evidence (`operator-attestation`). Distinct from node-observed `AssignmentRecoveryProofMessage`. Never `force=true`. |
 
 ---
 
@@ -510,7 +514,7 @@ A work request is the primary user-facing work unit.
   "kind": "development",
   "riskLevel": "standard",
   "baseBranch": "main",
-  "continuationOfRequestId": null,
+  "originalRequestId": null,
   "status": "queued",
   "createdAt": "2026-09-04T19:30:00Z"
 }
@@ -575,6 +579,7 @@ One authoritative eligibility evaluator supplies both claim decisions and schedu
 All of these conditions must hold at claim time:
 
 - Project execution is enabled by policy.
+- No Recovery Hold is present (`project_recovery_paused` precedes `project_disabled`).
 - The sole designated WorkspaceBinding exists and its current revision is `Valid`.
 - The calling Node is the binding's Node and the connection is authenticated as that Node.
 - Node liveness, heartbeat, execution-status, and advertised-capacity observations are fresh.
@@ -588,6 +593,7 @@ Queued waiting reasons are deterministic, nullable scheduling projections with t
 
 | Code | Meaning |
 |---|---|
+| `project_recovery_paused` | A Recovery Hold blocks claims. Finish recovery; resume only after the operation is `Recovered`. |
 | `project_policy_disabled` | Project policy forbids assignment. |
 | `workspace_binding_missing` | The Project has no designated WorkspaceBinding. |
 | `workspace_validation_pending` | The current binding revision has not been validated. |
@@ -640,6 +646,8 @@ Completion, failure, and cancellation acceptance do not release ownership. The a
 
 The ExecutionAssignment and immutable placement snapshot persist through terminal and recovery history. A retry that may execute elsewhere is a new linked Work Request, never mutation or reassignment of the original. The initial phase provides no transparent failover.
 
+Project recovery is fail-closed. Diagnosis is read-only. Start captures inventory, sets the hold, and persists the operation before any stop delivery. The Control Plane validates assignment-bound quiescence proof before terminalization. Node, authentication, claim token, attempt, and binding fences must all match. Operator attestation is not node proof. Resume is a separate route and never implied by recheck, confirm-manual, or linked retry. A linked retry is ordinary queue semantics: `POST /api/projects/{projectId}/requests` with immutable `OriginalRequestId`.
+
 ---
 
 ## 13. Default Orchestration Behavior
@@ -657,8 +665,8 @@ The root Pi orchestrator must:
 7. Spawn child sessions through supervisor tools.
 8. Monitor child progress and messages.
 9. Resolve reservation conflicts through task adjustment, messaging, waiting, or handoff.
-10. Request independent review.
-11. Request controlled verification.
+10. Request independent agent review (reviewer or verifier model route).
+11. Request final verification (`request_verification()`), which runs the assignment's captured effective policy; the supervisor selects commands. `submit_completion` is the backstop if the current fingerprint has no green result.
 12. Address blocking findings through the responsible implementer.
 13. Submit completion evidence.
 
@@ -771,8 +779,7 @@ The root submits a plan in this form:
       "dependencies": ["domain-model", "gateway"],
       "requestedWriteScopes": []
     }
-  ],
-  "verificationProfile": "default"
+  ]
 }
 ```
 
@@ -783,7 +790,7 @@ The supervisor validates:
 - Requested paths are repository-relative.
 - Parallel write scopes do not conflict.
 - Maximum child count is not exceeded.
-- Risk policy stages are present.
+- Risk policy stages are present. The plan does not name a verification profile; the supervisor owns the effective policy.
 
 The root may revise a rejected plan.
 
@@ -793,40 +800,40 @@ The root may revise a rejected plan.
 
 Pi requests logical roles. The supervisor resolves each role to an ordered list of canonical model selectors.
 
-A model selector is `<provider>/<model>`. The provider prefix (everything before the first `/`) is lowercase ASCII alphanumeric with interior hyphens; `pi` is rejected because Pi is a runtime, not a provider. The model id after the first `/` is handed to the provider verbatim and may itself contain slashes. The reserved model id `default` asks the provider for its default model. There are no runtime profiles: a selector names a provider and a model, and every other property of the session (write policy, sandboxing, tool surface) is fixed by the adapter that provider resolves to.
+A model selector is `<provider>/<model>`. The provider prefix (everything before the first `/`) is lowercase ASCII alphanumeric with interior hyphens; `pi` is rejected because Pi is a runtime, not a provider. The model id after the first `/` is handed to the provider verbatim and may itself contain slashes. The model id `default` is invalid: `AgentModelSelector.TryParse` rejects it. There is no provider-selected default (`DefaultModelId` / `IsProviderDefault` are gone). Adapters always pass the native model id from the selector. There are no runtime profiles: a selector names a provider and a model, and every other property of the session (write policy, sandboxing, tool surface) is fixed by the adapter that provider resolves to.
 
-The reserved provider prefixes `claude-code`, `antigravity`, and `muse` select their dedicated official-harness adapters. Every other valid provider prefix is served by Pi as the runtime adapter: `codex` aliases the Pi SDK provider `openai-codex` (so `codex/default` and `codex/gpt-5.6-sol` decode to Pi's `openai-codex/default` and `openai-codex/gpt-5.6-sol`), and every other Pi provider prefix passes through identically (for example `zai/glm-4.7` resolves to Pi's `zai/glm-4.7`). Any other syntactically valid provider still goes only to Pi and fails closed unless that provider is authenticated and available to the Pi worker. Pi model discovery returns one catalog per authenticated Pi provider, so every reported selector is runnable.
+The reserved provider prefixes `claude-code`, `antigravity`, and `muse` select their dedicated official-harness adapters. Every other valid provider prefix is served by Pi as the runtime adapter: `codex` aliases the Pi SDK provider `openai-codex` (so `codex/gpt-5.6-sol` decodes to Pi's `openai-codex/gpt-5.6-sol`), and every other Pi provider prefix passes through identically (for example `zai/glm-4.7` resolves to Pi's `zai/glm-4.7`). Any other syntactically valid provider still goes only to Pi and fails closed unless that provider is authenticated and available to the Pi worker. Pi model discovery returns one catalog per authenticated Pi provider, so every reported selector is runnable. Readiness and catalog matching use the same explicit selector.
 
 Example configuration (`Pi:RoleRoutes`):
 
 ```yaml
 Pi:
-  Model: codex/default
+  Model: codex/gpt-5.6-sol
   AllowedChildRoles: [root, architect, implementer, reviewer, verifier]
   RoleRoutes:
     root:
-      - Model: codex/default
+      - Model: codex/gpt-5.6-sol
     architect:
-      - Model: claude-code/default
-      - Model: antigravity/default
-      - Model: muse/default
-      - Model: codex/default
+      - Model: claude-code/fable-5-1
+      - Model: antigravity/gemini-3-pro
+      - Model: muse/muse-spark-1.3
+      - Model: codex/gpt-5.6-sol
     implementer:
-      - Model: codex/default
-      - Model: claude-code/default
+      - Model: codex/gpt-5.6-sol
+      - Model: claude-code/fable-5-1
     reviewer:
-      - Model: antigravity/default
-      - Model: claude-code/default
-      - Model: muse/default
-      - Model: codex/default
+      - Model: antigravity/gemini-3-pro
+      - Model: claude-code/fable-5-1
+      - Model: muse/muse-spark-1.3
+      - Model: codex/gpt-5.6-sol
     verifier:
-      - Model: codex/default
-      - Model: claude-code/default
+      - Model: codex/gpt-5.6-sol
+      - Model: claude-code/fable-5-1
 ```
 
-The node tries candidates in order. A candidate that fails to start, needs a reservation it cannot obtain, or is read-only while the spawn requested write scopes is skipped and the next candidate is tried; when every candidate fails the spawn fails with `runtime_route_exhausted`. Routes are node-owned: a spawn request names only a role and may never override, reorder, or extend the route. The operator edits routes through the control plane's routing page; the node validates every update (allowed roles only, at least one and at most sixteen canonical candidates per role, no duplicates) and persists it owner-only under `Pi:AgentDataDirectory/role-routes.json`.
+The node tries candidates in order. A candidate that fails to start, needs a reservation it cannot obtain, or is read-only while the spawn requested write scopes is skipped and the next candidate is tried; when every candidate fails the spawn fails with `runtime_route_exhausted`. Routes are node-owned: a spawn request names only a role and may never override, reorder, or extend the route. The operator edits routes through the control plane's routing page; the node validates every update (allowed roles only, at least one and at most sixteen canonical candidates per role, no duplicates, no model id `default`) and persists it owner-only under `Pi:AgentDataDirectory/role-routes.json`. Persisted role-route overrides that still contain a deprecated `<provider>/default` selector are discarded and replaced by the configured explicit routes.
 
-`muse/default` is a default candidate only on the read-oriented `architect` and `reviewer` routes, placed after the Claude Code and Antigravity candidates and before the Codex fallback. It is never a default for `implementer` or `verifier`.
+`muse/muse-spark-1.3` is a built-in candidate only on the read-oriented `architect` and `reviewer` routes, placed after the Claude Code and Antigravity candidates and before the Codex fallback. It is never a default for `implementer` or `verifier`.
 
 ### 15.1 Write permissions
 
@@ -834,9 +841,9 @@ There is no per-candidate permission profile. Write capability is derived, never
 
 - The supervisor grants a child write scopes only through reservation leases it acquires on the child's behalf (§17).
 - The runtime adapter's own policy bounds what a lease can enable: Pi and Claude Code children may edit only under an active lease; Antigravity and Muse Code are read-only, and a candidate for either is skipped whenever the spawn requests write scopes. The Muse adapter additionally refuses to start when handed a write authorization rather than silently running read-only.
-- Verification runs under a separate verification profile (§20), which is unrelated to model routing.
+- The `verifier` role id is a model route for independent agent verification. It is not the deterministic executor. Deterministic checks run under the Project's verification policy (§20) and are unrelated to which model the verifier route selects.
 
-Agent-generated content must never be allowed to select an arbitrary executable, credential path, Unix user, or a provider outside the node's routing configuration. Model ids are opaque to the supervisor and never interpreted as paths or commands.
+Agent-generated content must never be allowed to select an arbitrary executable, credential path, Unix user, a verification profile or command, or a provider outside the node's routing configuration. Model ids are opaque to the supervisor and never interpreted as paths or commands.
 
 ---
 
@@ -1120,7 +1127,7 @@ reserved_move
 reserve_files
 expand_reservation
 release_reservation
-run_verification_command
+run_project_checks
 ```
 
 Every mutation tool calls the node, which calls the reservation authority before touching the filesystem.
@@ -1214,7 +1221,8 @@ A failure in any startup step above — preparation included — blocks the requ
 - Agents do not stage or commit.
 - The node tracks file changes and reservation ownership.
 - Review agents may read the entire repository and current diff.
-- Verification commands acquire the `project-build` resource.
+- Final verification acquires the `project-build` resource and is incompatible with active source mutation.
+- Child `run_project_checks()` is an intermediate check of selected project checks only; it never runs the baseline, never changes request phase, and is ignored by the completion gate.
 - Source mutations pause while final verification is running.
 
 ### 19.3 Request completion
@@ -1224,8 +1232,8 @@ The node must:
 1. Confirm no active mutation operation.
 2. Confirm all reservations are released or deliberately retained for recovery.
 3. Capture changed files and diff summary.
-4. Run configured verification.
-5. Optionally stage and create one request-level commit.
+4. Optionally stage and create one request-level commit (checkpoint). HEAD contributes to the verification fingerprint.
+5. Run final verification for the current fingerprint unless a matching green result already exists; `submit_completion` is the backstop if the root never called `request_verification()`.
 6. Never merge into the default branch automatically in the PoC.
 7. Persist the final branch and commit identifiers.
 
@@ -1264,35 +1272,58 @@ The user can inspect, accept as baseline, or cancel the request.
 
 ## 20. Verification Model
 
-Verification runs are typed node operations, not arbitrary root-agent shell access.
+Verification has two distinct forms of assurance. Do not use **verifier route** and **verification profile** interchangeably.
 
-Example project configuration:
+1. **Independent agent verification** — a reviewer or verifier child examines the implementation. The model is chosen by frontend role routing. This is not a command executor.
+2. **Deterministic node verification** — the node supervisor runs built-in baseline checks plus any Project-selected trusted profile. Agents never choose profile id, command id, executable, argv, working directory, environment, or timeout.
+
+The user-facing verification stage presents both. Final verification is parameterless: `request_verification()`. Child project checks are parameterless and intermediate: `run_project_checks()`.
+
+### 20.0 Baseline verification
+
+Empty `Verification:Profiles` is a valid baseline-only installation. The node always advertises built-in profile `devfleet-baseline` version `1`:
+
+- `repository-integrity` (mandatory) — assignment still owns the canonical workspace and binding revision; no active source-mutation reservation; repository inspectable through the trusted Git module; request diff has no unmerged index entries; changed paths remain in the workspace and exclude protected Git metadata. Content identity includes Git-relevant executable mode of opened regular files and excludes timestamps. Capture and each full baseline command (metadata prep, traversal, hashing, and all Git loops) run under one total deadline; a deadline timeout is distinct from caller cancellation and is persisted as a mandatory timeout.
+- `whitespace` (optional) — whitespace errors equivalent to `git diff --check`, honouring a safely parsed, allowlisted repository `core.whitespace` value written into the sanitized Git overlay only; included/filter/other config is never restored. Untracked new files are included. Persisted and displayed as a warning; does not independently fail completion.
+
+### 20.1 Project checks
+
+Optional commands come only from trusted node configuration (`Verification:Profiles`). A Project stores a nullable selected profile id and node-reported revision; new Projects select none. Null means baseline only. Selecting a profile is an administrator action on the Project page. Command definitions never cross the control plane as executables, environment values, or credentials.
+
+Example node-owned configuration (not a control-plane payload):
 
 ```yaml
-verificationProfiles:
-  default:
-    commands:
-      - id: dotnet-test
-        executable: dotnet
-        arguments: ["test", "--no-restore"]
-        workingDirectory: "."
-        timeoutSeconds: 900
-      - id: runtime-test
-        executable: npm
-        arguments: ["test"]
-        workingDirectory: "runtime"
-        timeoutSeconds: 600
+Verification:
+  Profiles:
+    dotnet:
+      commands:
+        - id: dotnet-test
+          executable: dotnet
+          arguments: ["test", "--no-restore"]
+          workingDirectory: "."
+          timeoutSeconds: 900
+          mandatory: true
+        - id: runtime-test
+          executable: npm
+          arguments: ["test"]
+          workingDirectory: "runtime"
+          timeoutSeconds: 600
+          mandatory: true
 ```
 
-### 20.1 Verification rules
+### 20.2 Verification rules
 
-- Executable and arguments come from trusted project configuration.
-- Agent prompts cannot supply arbitrary executable paths.
-- Verification obtains `project-build` resource lease.
-- Final verification is incompatible with active source mutation.
+- The supervisor—not the root—selects and runs the effective policy (baseline plus selected trusted profile, if any).
+- Agent prompts cannot supply executables, argv, profile ids, or command ids. Legacy worker `profileId`/`commandId` fields are ignored for one compatibility release and emit a deprecation diagnostic.
+- Final verification obtains the `project-build` resource lease and is incompatible with active source mutation.
+- Intermediate `run_project_checks` runs only selected project checks. With no project checks it returns `no_project_checks` without launching. Runs persist as `RunKind: Intermediate`, emit `verification.intermediate` only, and never emit `verification.started`/`completed`/`failed`.
+- Resolve policy and acquire admission before emitting `verification.started`. Only that event may advance a request to `Verifying`. `verification.rejected` never changes phase. `verification.command.started` is a bounded progress fact (fingerprint, policy revision, command id, run kind, mandatory flag, start time, event time, timeout seconds) emitted before each baseline or profile command. It never carries executable, argv, environment, or process output and never changes request phase.
 - Standard output and error are captured with size limits.
-- Exit code, duration, and output summary are persisted.
-- A failing mandatory command blocks completion.
+- Exit code, duration, fingerprint, policy revision, run kind, and output summary are persisted.
+- Completion evaluates the assignment policy snapshot: every snapshot mandatory command id must have a `Passed` `Baseline` or `ProjectCheck` row whose fingerprint and policy revision match. Optional rows never decide. Intermediate rows never count. A missing row is `<commandId> verification has not run`; a failed row is `<commandId> verification failed`. Any-mandatory-row gating is prohibited.
+- A pass is reusable only for the exact verification fingerprint and policy revision. A changed fingerprint or policy revision invalidates reuse.
+- `submit_completion` invokes final verification when the current fingerprint lacks a green result. At `Begin`, after `TryEnterTerminalization` but before `CloseAdmission`, the node re-inspects the repository; a differing fingerprint rejects with `verification_stale`, admission stays open, and the request keeps its phase.
+- A selected profile that the designated node can no longer provide makes the Project ineligible with `verification_policy_unavailable` before assignment. Baseline-only Projects remain eligible when the baseline is healthy.
 
 ---
 
@@ -1355,13 +1386,16 @@ Cancelled
 
 | Condition | User-facing status |
 |---|---|
-| Active model stream, tool, child coordination, review, or verification | Active |
+| Active model stream, tool, child coordination, review, or admitted final verification | Active |
 | Healthy session with no current operation and no blocker | Idle |
 | Reservation conflict, input request, approval, failed required verification, or external change | Blocked |
 | Validated quiescence barrier and committed terminal assignment/request state | Completed |
 | Missed heartbeat past threshold | Disconnected |
 | Unexpected terminal failure | Failed |
 | User or parent cancellation | Cancelled |
+
+
+`Verifying` is projected only after an admitted final-verification operation (`verification.started`). Rejected and intermediate checks do not change request phase.
 
 ### 21.6 Precedence
 
@@ -1479,8 +1513,12 @@ reservation.recovery_required
 reservation.force_released
 
 verification.started
+verification.command.started
 verification.completed
 verification.failed
+verification.rejected
+verification.cancelled
+verification.intermediate
 
 repository.changed
 repository.external_change_detected
@@ -1596,9 +1634,12 @@ reservation.release
 reservation.handoff.request
 project.diff.inspect
 verification.request
+verification.intermediate.request
 request.block
 request.complete
 ```
+
+`verification.request` is parameterless final verification; the node ignores legacy `profileId` and `commandId` and records a deprecation diagnostic. `verification.intermediate.request` is the child intermediate check (`run_project_checks`) and must never be treated as final verification.
 
 ### 24.3 Backpressure
 
@@ -1654,7 +1695,7 @@ ls
 reservation tools
 reservation-aware edit/write/move/delete
 mail tools
-verification request tool
+run_project_checks
 ```
 
 ### 25.4 Root system policy
@@ -1670,7 +1711,7 @@ For every development request:
 2. Delegate implementation to managed child agents.
 3. Assign non-overlapping file scopes to parallel writers.
 4. Use messages and reservation handoff to resolve ownership conflicts.
-5. Require independent review and configured verification.
+5. Require independent review. Final verification runs automatically on completion under the Project's verification policy; do not select a profile or command.
 6. Submit completion only after objective evidence is available.
 
 You must not edit files, run arbitrary shell commands, mutate Git state,
@@ -1794,7 +1835,7 @@ The user authenticates with host-native `muse login` before managed use. A start
 The adapter speaks only the stable MSP v1 surface over the host's stdio as newline-delimited JSON-RPC 2.0, one host per `muse/<model-id>` session, with the project repository as `workspaceRoot`:
 
 1. `initialize` (client name `devfleet`) then the `initialized` notification. An envelope schema version other than `1` fails the start closed; an unexpected stable-surface fingerprint is a warning only.
-2. `session/start` with `approvalMode: denyUnmatched` and `modelId` = the selector's model id, omitted for `muse/default` so the host picks its own default. The returned provider session id is the `ProviderSessionId`.
+2. `session/start` with `approvalMode: denyUnmatched` and `modelId` = the selector's native model id (always forwarded; never omitted). The returned provider session id is the `ProviderSessionId`.
 3. `turn/start` submits the prompt; every later input is another `turn/start`, queued by the host behind a running turn.
 4. `turn/cancel` cancels the foreground turn; if the host does not settle within the cancel grace period the host is terminated so cancellation always lands.
 5. MSP has no session close method. Close is a best-effort `view/unsubscribe` followed by bounded host termination (SIGTERM, then process-tree kill); the process boundary is the close.
@@ -1886,6 +1927,8 @@ Use EF Core with SQLite.
 - CreatedAt
 - UpdatedAt
 - Version
+- TrustedVerificationProfileId (nullable; null means baseline only)
+- TrustedVerificationProfileRevision (nullable)
 
 #### WorkspaceBinding
 
@@ -1921,8 +1964,13 @@ The initial phase enforces at most one binding per Project and uniqueness on `(N
 - LastReconciledAt
 - TerminalAt
 - Version
+- VerificationPolicyRevision
+- BaselineVersion
+- TrustedVerificationProfileId (nullable)
+- TrustedVerificationProfileRevision (nullable)
+- MandatoryCommandIdsJson
 
-The assignment is one-to-one with its Work Request. Placement snapshots are immutable, and the row remains durable through `RecoveryRequired` and terminal history; lease expiry never deletes it or frees ownership.
+The assignment is one-to-one with its Work Request. Placement snapshots are immutable. The verification policy snapshot is captured from the node catalog at assignment time (or lazily for pre-upgrade assignments) and is the completion gate's only source for the mandatory command list. The row remains durable through `RecoveryRequired` and terminal history; lease expiry never deletes it or frees ownership.
 
 #### WorkRequest
 
@@ -1943,6 +1991,7 @@ The assignment is one-to-one with its Work Request. Placement snapshots are immu
 - CreatedAt
 - StartedAt
 - CompletedAt
+- OriginalRequestId (nullable, immutable, same Project; Restrict on delete)
 
 Queued waiting reasons are a nullable scheduling projection computed by the authoritative eligibility evaluator. They are distinct from `BlockedReason` and do not change a queued Work Request's lifecycle state.
 #### AgentSession
@@ -2034,6 +2083,10 @@ Queued waiting reasons are a nullable scheduling projection computed by the auth
 - CompletedAt
 - OutputSummary
 - OutputArtifactPath
+- Fingerprint
+- PolicyRevision
+- RunKind (`Baseline`, `ProjectCheck`, or `Intermediate`)
+- AttemptId
 
 #### ApprovalOrAttentionItem
 
@@ -2057,6 +2110,49 @@ Queued waiting reasons are a nullable scheduling projection computed by the auth
 - VerificationSummaryJson
 - CreatedAt
 
+#### CompletionEvidence
+
+Submitted with `submit_completion` / `EvaluateCompletion` (not persisted as columns on `RequestResult`):
+
+- SummaryMarkdown
+- ChangedFiles
+- ReviewFindings
+- CheckpointCommitId (nullable)
+- VerificationFingerprint
+- VerificationPolicyRevision
+
+The node populates the fingerprint and policy revision from the coordinator's last green result and confirms them by re-inspection at `Begin`.
+
+#### RecoveryHold
+
+- ProjectId (unique)
+- OperationId
+- Version
+
+#### RecoveryOperation
+
+- Id
+- ProjectId
+- Status (`Pending`, `Running`, `NeedsIntervention`, `Recovered`)
+- Attempt
+- Version
+- InventoryRevision
+- Reason
+- Actor
+- Stage
+- BlockerCodesJson
+- EvidenceJson
+- Deadline
+- Assignment and reservation targets with captured versions/states and outcomes
+
+#### RecoveryIdempotencyKey
+
+- Project, action (`start`, `recheck`, `confirm-manual`), key; reuse with a different input hash conflicts (`409`)
+
+#### RecoveryAuditFact
+
+- Append-only operator and node recovery facts; never a substitute for live proof
+
 ### 29.2 Concurrency
 
 Use optimistic concurrency tokens on:
@@ -2067,6 +2163,8 @@ Use optimistic concurrency tokens on:
 - WorkRequest.
 - AgentSession projection.
 - ReservationLease.
+- RecoveryHold
+- RecoveryOperation
 
 Enforce one WorkspaceBinding per Project and one ExecutionAssignment per Work Request with database uniqueness. Assignment creation, request `Queued → Starting`, eligibility/capacity checks, and claim-token creation commit in one serializable transaction. Count every nonterminal and recovery-required assignment for one-writer and node capacity; never exclude one because its lease expired.
 
@@ -2099,12 +2197,11 @@ POST   /api/projects/{projectId}/requests
 GET    /api/requests/{requestId}
 POST   /api/requests/{requestId}/cancel
 POST   /api/requests/{requestId}/guidance
-POST   /api/requests/{requestId}/retry
 GET    /api/requests/{requestId}/events
 GET    /api/requests/{requestId}/result
 ```
 
-`POST /api/requests/{requestId}/retry` creates a new linked Work Request. It never reuses or mutates the original request's ExecutionAssignment.
+`POST /api/projects/{projectId}/requests` accepts `QueueWorkRequestCommand` including optional immutable `OriginalRequestId`. Linked retry is a new Work Request in the same Project. It never copies claim tokens, sessions, leases, completion/verification evidence, or the original ExecutionAssignment snapshot. Enqueue does not clear a Recovery Hold. There is no `force=true` retry and no `POST /api/requests/{requestId}/retry` mutation of the original.
 
 Request creation requires no binding or online Node. Request list/detail responses include a nullable scheduling status for queued work and the immutable ExecutionAssignment projection when assigned.
 
@@ -2113,6 +2210,25 @@ Queued work with no assignment becomes `Cancelled` in one transaction and cannot
 claimed. Assigned nonterminal work changes both records to `Cancelling` before any best-effort
 node command; an offline owner receives a cancel disposition during reconnect reconciliation.
 Only the assignment-bound quiescence terminalizer may advance assigned work to `Cancelled`.
+
+### 30.2a Project recovery
+
+```text
+GET    /api/projects/{projectId}/recovery
+POST   /api/projects/{projectId}/recoveries
+GET    /api/projects/{projectId}/recoveries/{recoveryId}
+POST   /api/projects/{projectId}/recoveries/{recoveryId}/recheck
+POST   /api/projects/{projectId}/recoveries/{recoveryId}/confirm-manual
+POST   /api/projects/{projectId}/recovery/resume
+```
+
+Cookie admin (antiforgery) or `/api/v1` bearer. Node credentials cannot invoke these routes. Actor is `NameIdentifier` or Identity name, never a body field.
+
+- `GET …/recovery` is diagnosis only (`InventoryRevision`, hold, latest operation, nonterminal assignments, unresolved reservations). It does not create a hold.
+- `POST …/recoveries` body `StartProjectRecoveryRequest`: `InventoryRevision`, `Reason`, `IdempotencyKey`. Response `202`. Empty inventory is `NoOp` with no hold. Stale inventory is `409`. Start persists the operation and hold and records cancellation intent **before** sending `RecoverAssignment`.
+- Recheck body `ExpectedOperationVersion`, `IdempotencyKey`. Starts a new attempt from `NeedsIntervention`. Does not resume the queue.
+- `confirm-manual` is administrator attestation (`operator-attestation`) with exact project name, attempt/version fences, three required true acknowledgements, process-stop evidence, reservation/event gap accounting, and a fresh owning-workspace repository snapshot. Never `force=true`. Success keeps the hold.
+- Resume body `OperationId`, `ExpectedHoldVersion`. Requires operation `Recovered` and captured targets terminal/released. Clears only the hold.
 
 ### 30.3 Sessions
 
@@ -2204,6 +2320,8 @@ Display:
 - Recent completed requests.
 - Active agent count.
 - Active reservations.
+- A **Verification policy** card: automatic baseline always enabled; project checks default to none or one trusted profile from the connected node's bounded catalog (ids, labels, command ids, working-directory labels, mandatory/optional flags, timeout budgets — never environment values, credentials, raw paths, or editable command text). Copy when none selected: `Baseline repository checks will run. No project test suite is configured.` A node that advertises profiles while the Project remains baseline-only shows `Node advertises trusted profiles but none is selected`.
+- A **Recover project** action and diagnosis panel. Start requires a reason and current inventory revision. Recheck, confirm-manual, and resume are separate. Linked retry uses the ordinary request composer with `OriginalRequestId`. No unlock or `force=true` control.
 
 ### 31.3 Request page
 
@@ -2221,10 +2339,12 @@ Display:
 - Messages.
 - Reservations.
 - Current diff summary.
-- Verification results.
+- Verification results as separate rows for independent agent review, built-in baseline checks, and configured project checks when present. Success copy is precise (`Baseline checks passed.`, `Project checks passed: …`). Baseline-only success never says `All tests passed`. Final verification runs automatically on completion; project checks are selected on the Project page. Intermediate child checks appear in a collapsed history list and never in the final rows. Render `verification.rejected`, `verification.intermediate`, and `verification.cancelled` without treating them as phase changes.
 - Review findings.
 - Final result.
 - Cancel and send-guidance actions. Cancellation targets the assigned Node and does not release ownership before quiescence.
+- For a linked retry, `OriginalRequestId` as `Retry of` without implying the original assignment resumed.
+- Recover project when ownership is uncertain; it does not release the writer before quiescence.
 
 ### 31.4 Agent tree
 
@@ -2299,7 +2419,7 @@ The UI labels missing counters **Unavailable**. Estimated cost is each runtime's
 - Required implementation assignments completed.
 - Independent review completed.
 - No unresolved blocking findings.
-- Required verification commands passed.
+- Every mandatory command id in the assignment policy snapshot has a `Passed` `Baseline` or `ProjectCheck` row whose fingerprint and policy revision match the completion evidence (confirmed by node re-inspection at `Begin`). Optional and `Intermediate` rows never satisfy the gate. Empty `Verification:Profiles` is valid: the snapshot then requires `devfleet-baseline` / `repository-integrity` only.
 - Admission of new root/child work, mutations, verification, and Git operations is durably closed.
 - All root and child operations, writes, verification, Git work, and supervised processes are quiescent.
 - Assignment event spools are flushed or durably accounted for.
@@ -2322,6 +2442,8 @@ The UI labels missing counters **Unavailable**. Estimated cost is each runtime's
 ```
 
 The root receives this response and must resolve the missing requirements.
+
+If the current fingerprint lacks a green effective-policy result, `submit_completion` invokes final verification before terminalization. A failed admitted mandatory check blocks with `BlockedPhase=Verifying`. A rejected precondition leaves the prior phase. A fingerprint that differs at `Begin` is `verification_stale`; admission stays open.
 
 The Control Plane commits terminal request, ExecutionAssignment, and result state only after validating this assignment-bound quiescence barrier. Failure and cancellation use the same release predicate. Missing or uncertain proof moves the assignment to `RecoveryRequired` and continues to block another writer.
 
@@ -2378,6 +2500,15 @@ The design must record enough assignment, process, and provider-session metadata
 - A reconnect after expiry may restore the same assignment only through explicit reconciliation by the same authenticated Node with its persisted token and binding revision.
 - Startup validation or runtime failure after assignment blocks that assignment on its Node; it never returns the same Work Request to the queue.
 - If the assigned Node never returns, audited recovery must prove process death, reservation disposition, event-spool disposition, repository state, and fencing rotation before ownership can be released. There is no transparent failover.
+
+### 33.8 Project recovery
+
+- Hold before stop delivery. Quiescence proof before terminalization.
+- Linux stop proof uses `setsid` session/process-group identity (`AssignmentProcessIdentity`: PID, `/proc` start ticks, `ProcessGroupId`, `SessionId`). A reused PID (start ticks mismatch) is exited. Escaped descendants are listed. Tree kill is not proof. Non-Linux or missing `setsid` is `process_stop_unproven`.
+- Silence, disconnect, lease expiry, and node-service restart are never stop proof.
+- Node proof inventories distinguish known zero from unknown. Unknown cannot authorize release.
+- Returning node: reconnect reconciles, then `DispatchForNodeAsync` redelivers `RecoverAssignment` for open targets. `Cancelling` stays cancel. Terminal stays terminal. Stale claim tokens fail closed.
+- Never delete workspaces, Control Plane SQLite, node journals, `Node:EventSpoolPath`, or recovery rows to unstick recovery.
 
 ---
 
@@ -2472,30 +2603,35 @@ reservations:
   failClosed: true
 
 pi:
-  model: codex/default
+  model: codex/gpt-5.6-sol
   allowedChildRoles: [root, architect, implementer, reviewer, verifier]
   roleRoutes:
     root:
-      - model: codex/default
+      - model: codex/gpt-5.6-sol
     architect:
-      - model: claude-code/default
-      - model: antigravity/default
-      - model: muse/default
-      - model: codex/default
+      - model: claude-code/fable-5-1
+      - model: antigravity/gemini-3-pro
+      - model: muse/muse-spark-1.3
+      - model: codex/gpt-5.6-sol
     implementer:
-      - model: codex/default
-      - model: claude-code/default
+      - model: codex/gpt-5.6-sol
+      - model: claude-code/fable-5-1
     reviewer:
-      - model: antigravity/default
-      - model: claude-code/default
-      - model: muse/default
-      - model: codex/default
+      - model: antigravity/gemini-3-pro
+      - model: claude-code/fable-5-1
+      - model: muse/muse-spark-1.3
+      - model: codex/gpt-5.6-sol
     verifier:
-      - model: codex/default
-      - model: claude-code/default
+      - model: codex/gpt-5.6-sol
+      - model: claude-code/fable-5-1
+
+verification:
+  profiles: {}
 ```
 
 Use strongly typed options with startup validation.
+
+Empty `Verification:Profiles` is a valid baseline-only installation. Trusted profile command lists, when present, are node-owned and never required for completion of baseline-only Projects. The `verifier` role route selects an independent review model only.
 
 ---
 
@@ -2681,6 +2817,7 @@ Implementation must proceed in vertical slices and keep builds passing.
 - Persist and reconcile the Node's assignment journal before new claims.
 - Prove lease expiry and permanent Node loss never authorize a second writer or transparent failover.
 - Add reservation and repository recovery inspection.
+- Add project recovery hold/operation, diagnosis, start, recheck, operator `confirm-manual`, separate resume, and linked `OriginalRequestId` retry.
 - Add end-to-end demo fixtures.
 - Document local setup and provider login prerequisites.
 
@@ -2701,7 +2838,7 @@ Required areas:
 - Handoff.
 - Expiration and recovery transitions.
 - Status reducer precedence.
-- Completion-gate evaluation.
+- Completion-gate evaluation against the assignment policy snapshot (exact mandatory ids for the current fingerprint and policy revision; empty profiles; skipped selected checks; intermediate rows ignored).
 - Queue ordering, waiting-reason precedence, eligibility, and atomic ExecutionAssignment.
 - Runtime capability projection.
 
@@ -2752,6 +2889,20 @@ Contract tests must record the detected CLI version and fail with an actionable 
 4. Claude, Antigravity, or Muse Code reviews.
 5. Verification passes.
 6. Request completes.
+
+#### Scenario A1 — Zero-configuration verification
+
+1. `Verification:Profiles` is empty; baseline is healthy; a reviewer or verifier route is ready.
+2. A development request implements a simple change and independent review completes.
+3. Final verification runs `devfleet-baseline` / `repository-integrity` exactly once; no profile id is requested from the root.
+4. The request completes if other gates pass. Empty profiles must not fail completion.
+
+#### Scenario A2 — Snapshot gate and intermediate checks
+
+1. A Project selects a trusted profile with a mandatory command.
+2. Baseline passing alone does not satisfy completion; the missing command is named.
+3. An implementer `run_project_checks` call persists `Intermediate` without `verification.started` or phase change.
+4. Final verification still runs the effective policy once for the fingerprint.
 
 #### Scenario B — Concurrent disjoint writers
 

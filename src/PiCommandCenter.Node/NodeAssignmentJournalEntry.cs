@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Node.Runtime;
 
 namespace PiCommandCenter.Node;
 
@@ -9,7 +11,8 @@ public sealed record NodeAssignmentJournalEntry(
     ExecutionAssignmentMessage Assignment,
     AssignmentSupervisorState SupervisorState,
     bool RepositoryKnown,
-    int PendingEventCount);
+    int PendingEventCount,
+    IReadOnlyList<AssignmentProcessIdentity>? ProcessIdentities = null);
 
 /// <summary>Raised when a persisted assignment cannot be reconstructed safely.</summary>
 public sealed class NodeAssignmentJournalCorruptionException : Exception

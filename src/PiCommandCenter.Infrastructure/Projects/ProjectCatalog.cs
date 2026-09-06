@@ -1,6 +1,8 @@
+using System.Data;
 using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Projects;
+using PiCommandCenter.Application.VerificationPolicy;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Projects;
 using PiCommandCenter.Infrastructure.Persistence;
@@ -91,6 +93,103 @@ public sealed class ProjectCatalog(
         return ToDto(project, binding: null);
     }
 
+    public async Task<ProjectDto> SelectTrustedVerificationProfileAsync(
+        ProjectId id,
+        WorkspaceBindingId workspaceBindingId,
+        NodeId nodeId,
+        long validationRevision,
+        long expectedProjectVersion,
+        string? profileId,
+        string? profileRevision,
+        CancellationToken cancellationToken = default)
+    {
+        var selectedId = NormalizeOptional(profileId);
+        var selectedRevision = NormalizeOptional(profileRevision);
+        if (selectedId is null != selectedRevision is null)
+        {
+            throw new ArgumentException(
+                "Trusted verification profile id and revision must both be set or both be cleared.");
+        }
+
+        await using var transaction = await db.Database.BeginTransactionAsync(
+            IsolationLevel.Serializable,
+            cancellationToken);
+        var project = await db.Projects
+            .SingleOrDefaultAsync(candidate => candidate.Id == id, cancellationToken)
+            ?? throw new ProjectNotFoundException(id.Value);
+
+        if (project.Version != expectedProjectVersion)
+        {
+            throw new VerificationPolicySelectionException(
+                "The project changed before the verification policy selection could be persisted.");
+        }
+
+        await EnsureBindingFenceAsync(
+            id,
+            workspaceBindingId,
+            nodeId,
+            validationRevision,
+            cancellationToken);
+        ApplySelection(project, selectedId, selectedRevision, clock.GetUtcNow());
+        try
+        {
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.Entry(project).Reload();
+            throw new VerificationPolicySelectionException(
+                "The project changed before the verification policy selection could be persisted.");
+        }
+
+        var binding = await db.WorkspaceBindings
+            .AsNoTracking()
+            .SingleOrDefaultAsync(candidate => candidate.ProjectId == id, cancellationToken);
+        notifier.Publish(ProjectionChange.Project(id.Value));
+        notifier.Publish(ProjectionChange.Fleet());
+        return ToDto(project, binding);
+    }
+
+    private async Task EnsureBindingFenceAsync(
+        ProjectId projectId,
+        WorkspaceBindingId workspaceBindingId,
+        NodeId nodeId,
+        long validationRevision,
+        CancellationToken cancellationToken)
+    {
+        var matches = await db.WorkspaceBindings.AnyAsync(
+            binding => binding.ProjectId == projectId
+                && binding.Id == workspaceBindingId
+                && binding.NodeId == nodeId
+                && binding.ValidationRevision == validationRevision,
+            cancellationToken);
+        if (!matches)
+        {
+            throw new VerificationPolicySelectionException(
+                "The designated workspace changed before the verification policy selection could be persisted.");
+        }
+    }
+
+
+    private static void ApplySelection(
+        Project project,
+        string? profileId,
+        string? profileRevision,
+        DateTimeOffset updatedAt)
+    {
+        if (profileId is null)
+        {
+            project.ClearTrustedVerificationProfile(updatedAt);
+            return;
+        }
+
+        project.SelectTrustedVerificationProfile(profileId, profileRevision!, updatedAt);
+    }
+
+    private static string? NormalizeOptional(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
     private static List<string> CollectValidationErrors(RegisterProjectCommand command)
     {
         var errors = new List<string>();
@@ -142,6 +241,8 @@ public sealed class ProjectCatalog(
         project.CreateRequestBranch,
         project.CreateRequestCommit,
         project.AutoMerge,
+        project.TrustedVerificationProfileId,
+        project.TrustedVerificationProfileRevision,
         project.CreatedAt,
         project.UpdatedAt,
         project.Version,

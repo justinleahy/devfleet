@@ -30,6 +30,8 @@ public sealed class RequestAdmissionGate : IRequestAdmissionGate
         public int ActiveProcesses;
         public int CallbackSources;
         public bool TerminalizationInProgress;
+        public bool AdmissionSealed;
+        public bool AdmissionClosed;
         public bool TerminalizationCommitted;
         public TaskCompletionSource Drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -84,10 +86,23 @@ public sealed class RequestAdmissionGate : IRequestAdmissionGate
                     continue;
                 }
 
-                if (_terminalRequests.ContainsKey(requestId)
+                if (AdmissionBlocked(requestId, state)
                     || exclusiveTerminalization && state.TerminalizationInProgress)
                 {
                     return null;
+                }
+
+                if (exclusiveTerminalization)
+                {
+                    state.TerminalizationInProgress = true;
+                    return new NodeActivityLease(
+                        kind,
+                        description,
+                        () => ReleaseActivity(
+                            requestId,
+                            state,
+                            kind,
+                            exclusiveTerminalization: true));
                 }
 
                 switch (kind)
@@ -103,7 +118,6 @@ public sealed class RequestAdmissionGate : IRequestAdmissionGate
                         break;
                 }
 
-                state.TerminalizationInProgress |= exclusiveTerminalization;
                 return new NodeActivityLease(
                     kind,
                     description,
@@ -111,7 +125,7 @@ public sealed class RequestAdmissionGate : IRequestAdmissionGate
                         requestId,
                         state,
                         kind,
-                        exclusiveTerminalization));
+                        exclusiveTerminalization: false));
             }
         }
     }
@@ -129,7 +143,7 @@ public sealed class RequestAdmissionGate : IRequestAdmissionGate
                     continue;
                 }
 
-                if (_terminalRequests.ContainsKey(requestId))
+                if (AdmissionBlocked(requestId, state))
                 {
                     return null;
                 }
@@ -176,20 +190,22 @@ public sealed class RequestAdmissionGate : IRequestAdmissionGate
     {
         lock (state.Sync)
         {
-            switch (kind)
+            if (!exclusiveTerminalization)
             {
-                case NodeActivityKind.Child:
-                    state.ActiveChildren--;
-                    break;
-                case NodeActivityKind.Operation:
-                    state.ActiveOperations--;
-                    break;
-                case NodeActivityKind.Process:
-                    state.ActiveProcesses--;
-                    break;
+                switch (kind)
+                {
+                    case NodeActivityKind.Child:
+                        state.ActiveChildren--;
+                        break;
+                    case NodeActivityKind.Operation:
+                        state.ActiveOperations--;
+                        break;
+                    case NodeActivityKind.Process:
+                        state.ActiveProcesses--;
+                        break;
+                }
             }
-
-            if (exclusiveTerminalization)
+            else
             {
                 state.TerminalizationInProgress = false;
             }
@@ -208,7 +224,7 @@ public sealed class RequestAdmissionGate : IRequestAdmissionGate
         }
     }
 
-    public void CloseAdmission(Guid requestId)
+    public bool TrySealAdmission(Guid requestId)
     {
         while (true)
         {
@@ -220,6 +236,103 @@ public sealed class RequestAdmissionGate : IRequestAdmissionGate
                     continue;
                 }
 
+                if (AdmissionBlocked(requestId, state))
+                {
+                    return false;
+                }
+
+                state.AdmissionSealed = true;
+                return true;
+            }
+        }
+    }
+
+    public void UnsealAdmission(Guid requestId)
+    {
+        if (!_requests.TryGetValue(requestId, out var state))
+        {
+            return;
+        }
+
+        lock (state.Sync)
+        {
+            if (!IsCurrentState(requestId, state)
+                || state.AdmissionClosed
+                || state.TerminalizationCommitted
+                || _terminalRequests.ContainsKey(requestId))
+            {
+                return;
+            }
+
+            state.AdmissionSealed = false;
+            state.SignalLocked();
+        }
+    }
+
+    public async Task<bool> WaitUntilDrainedAsync(
+        Guid requestId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        var state = _requests.GetOrAdd(requestId, static _ => new RequestState());
+        var deadline = _timeProvider.GetUtcNow() + timeout;
+
+        while (true)
+        {
+            Task drainedSignal;
+            lock (state.Sync)
+            {
+                if (state.IsDrained)
+                {
+                    return true;
+                }
+
+                drainedSignal = state.Drained.Task;
+            }
+
+            var remaining = deadline - _timeProvider.GetUtcNow();
+            if (remaining <= TimeSpan.Zero)
+            {
+                return false;
+            }
+
+            var delay = Task.Delay(
+                remaining < PollInterval ? remaining : PollInterval, cancellationToken);
+            try
+            {
+                await Task.WhenAny(drainedSignal, delay).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+        }
+    }
+
+    private bool AdmissionBlocked(Guid requestId, RequestState state)
+        => state.AdmissionClosed
+            || state.TerminalizationCommitted
+            || _terminalRequests.ContainsKey(requestId)
+            || state.AdmissionSealed;
+
+    public void CloseAdmission(Guid requestId)
+    {
+        while (true)
+        {
+            var state = _requests.GetOrAdd(requestId, static _ => new RequestState());
+            lock (state.Sync)
+            {
+                if (!IsCurrentState(requestId, state))
+                {
+                    continue;
+                }
+                state.AdmissionClosed = true;
+                state.AdmissionSealed = false;
                 _terminalRequests.TryAdd(requestId, 0);
                 state.SignalLocked();
                 return;
@@ -433,8 +546,8 @@ public sealed class RequestAdmissionGate : IRequestAdmissionGate
                 }
 
                 _terminalRequests.TryAdd(requestId, 0);
+                state.AdmissionClosed = true;
                 state.TerminalizationCommitted = true;
-                TryCleanupLocked(requestId, state);
                 return;
             }
         }

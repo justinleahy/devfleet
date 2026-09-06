@@ -15,6 +15,8 @@ public sealed record ProjectDto(
     bool CreateRequestBranch,
     bool CreateRequestCommit,
     bool AutoMerge,
+    string? TrustedVerificationProfileId,
+    string? TrustedVerificationProfileRevision,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
     long Version,

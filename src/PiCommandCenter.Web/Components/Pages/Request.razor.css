@@ -228,7 +228,7 @@ h3 {
 }
 
 .overview-grid ::deep fluent-card,
-.run-grid ::deep fluent-card {
+.verification-stack ::deep fluent-card {
     width: 100%;
     min-width: 0;
     height: auto;
@@ -523,10 +523,12 @@ details[open] > summary {
     overflow-wrap: anywhere;
 }
 
-/* Verification: one profile per row on a phone, side by side when dense */
-.run-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
+/* Verification: the four concerns are sequential, not comparable, so they stay one
+   full-width card per row at every width. Only the accent on a row's inline start
+   distinguishes a pass, a mandatory failure, a warning, and retained history. */
+.verification-stack {
+    display: flex;
+    flex-direction: column;
     gap: calc(var(--design-unit) * 3px);
     min-width: 0;
 }
@@ -556,6 +558,25 @@ details[open] > summary {
 
 .run.is-running {
     border-inline-start-color: var(--warning);
+}
+
+.run.is-warning {
+    border-inline-start-color: var(--warning);
+}
+
+/* Retained history: present and readable, but never competing with a current result. */
+.run.is-history {
+    border-inline-start-color: var(--neutral-stroke-divider-rest);
+    color: var(--neutral-foreground-hint);
+}
+
+/* The one sentence a green group earns, above its rows. */
+.run-verdict {
+    margin: 0;
+    padding-inline-start: calc(var(--design-unit) * 2px);
+    border-inline-start: calc(var(--stroke-width) * 2px) solid var(--accent-fill-rest);
+    min-width: 0;
+    overflow-wrap: anywhere;
 }
 
 .run-command {
@@ -729,10 +750,6 @@ details[open] > summary {
 
     .result-grid {
         grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    }
-
-    .run-grid {
-        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
     }
 
     .progress-summary {

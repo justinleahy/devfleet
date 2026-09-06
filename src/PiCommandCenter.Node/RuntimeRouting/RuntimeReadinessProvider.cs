@@ -23,6 +23,7 @@ public sealed partial class RuntimeReadinessProvider : BackgroundService, IRunti
     private readonly IRuntimeReadinessProbe _probe;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<RuntimeReadinessProvider> _logger;
+    private readonly Verification.IVerificationPolicyCatalog _verificationPolicies;
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
     private ReadinessSnapshot? _snapshot;
 
@@ -32,7 +33,8 @@ public sealed partial class RuntimeReadinessProvider : BackgroundService, IRunti
         INodeRuntimeRoutingStore routing,
         IRuntimeReadinessProbe probe,
         TimeProvider timeProvider,
-        ILogger<RuntimeReadinessProvider> logger)
+        ILogger<RuntimeReadinessProvider> logger,
+        Verification.IVerificationPolicyCatalog verificationPolicies)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(worker);
@@ -40,6 +42,7 @@ public sealed partial class RuntimeReadinessProvider : BackgroundService, IRunti
         ArgumentNullException.ThrowIfNull(probe);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(verificationPolicies);
 
         _maxConcurrentRequests = options.Value.MaxConcurrentRequests;
         _rootModel = AgentModelSelector.Parse(worker.Value.Model).Value;
@@ -48,6 +51,7 @@ public sealed partial class RuntimeReadinessProvider : BackgroundService, IRunti
         _probe = probe;
         _timeProvider = timeProvider;
         _logger = logger;
+        _verificationPolicies = verificationPolicies;
     }
 
     public NodeExecutionStatusMessage Capture(IReadOnlyList<Guid> activeAssignmentIds)
@@ -96,7 +100,8 @@ public sealed partial class RuntimeReadinessProvider : BackgroundService, IRunti
             availableSlots,
             assignments,
             routingRevision,
-            observations);
+            observations,
+            _verificationPolicies.Capture());
     }
 
     internal async Task RefreshAsync(CancellationToken cancellationToken)

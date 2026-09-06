@@ -93,12 +93,16 @@ public class ProjectDtoShapeTests
             CreateRequestBranch: true,
             CreateRequestCommit: false,
             AutoMerge: false,
+            TrustedVerificationProfileId: null,
+            TrustedVerificationProfileRevision: null,
             now,
             now,
             Version: 1,
             Binding: null);
 
         Assert.Null(project.Binding);
+        Assert.Null(project.TrustedVerificationProfileId);
+        Assert.Null(project.TrustedVerificationProfileRevision);
 
         var binding = new WorkspaceBindingDto(
             Guid.NewGuid(),
@@ -213,7 +217,12 @@ public class WorkRequestDtoShapeTests
             leaseExpiresAt,
             lastRenewedAt,
             lastReconciledAt,
-            terminalAt);
+            terminalAt,
+            VerificationPolicyRevision: "policy-rev",
+            BaselineVersion: "baseline-1",
+            TrustedVerificationProfileId: "ci",
+            TrustedVerificationProfileRevision: "profile-rev",
+            MandatoryCommandIdsJson: "[\"repository-integrity\"]");
 
         Assert.Equal(requestId, assignment.RequestId);
         Assert.Equal(projectId, assignment.ProjectId);
@@ -228,6 +237,11 @@ public class WorkRequestDtoShapeTests
         Assert.Equal(lastRenewedAt, assignment.LastRenewedAt);
         Assert.Equal(lastReconciledAt, assignment.LastReconciledAt);
         Assert.Equal(terminalAt, assignment.TerminalAt);
+        Assert.Equal("policy-rev", assignment.VerificationPolicyRevision);
+        Assert.Equal("baseline-1", assignment.BaselineVersion);
+        Assert.Equal("ci", assignment.TrustedVerificationProfileId);
+        Assert.Equal("profile-rev", assignment.TrustedVerificationProfileRevision);
+        Assert.Equal("[\"repository-integrity\"]", assignment.MandatoryCommandIdsJson);
         Assert.Null(typeof(ExecutionAssignmentProjectionDto).GetProperty("ClaimToken"));
     }
 

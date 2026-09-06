@@ -16,7 +16,8 @@ public interface IRequestQueue
 
     /// <summary>Enqueues a new request in the Queued state.</summary>
     /// <exception cref="Application.Projects.ProjectNotFoundException">No project with the given id exists.</exception>
-    /// <exception cref="ArgumentException">The command violates a request invariant.</exception>
+    /// <exception cref="ArgumentException">The command violates a request invariant, including a cross-project original.</exception>
+    /// <exception cref="RequestNotFoundException">The linked original request does not exist.</exception>
     Task<WorkRequestDto> EnqueueAsync(ProjectId projectId, QueueWorkRequestCommand command, CancellationToken cancellationToken = default);
 
     /// <summary>Gets a single request by id.</summary>

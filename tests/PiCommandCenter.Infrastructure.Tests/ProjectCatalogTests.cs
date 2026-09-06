@@ -1,7 +1,9 @@
 using PiCommandCenter.Application.Projects;
+using PiCommandCenter.Application.VerificationPolicy;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Projects;
+using PiCommandCenter.Infrastructure.Persistence;
 
 namespace PiCommandCenter.Infrastructure.Tests;
 
@@ -148,5 +150,317 @@ public class ProjectCatalogTests
         Assert.Equal(WorkspaceBindingStatus.PendingValidation, fetchedBinding.Status);
         Assert.Null(fetchedBinding.CanonicalRepositoryPath);
         Assert.Equal(fetchedBinding, listed.Binding);
+    }
+
+    [Fact]
+    public async Task Select_persists_a_trusted_profile_and_clear_returns_baseline_only()
+    {
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context);
+        var registered = await catalog.RegisterAsync(Command());
+        var projectId = new ProjectId(registered.Id);
+        var binding = await SeedBindingAsync(context, projectId);
+
+        var selected = await catalog.SelectTrustedVerificationProfileAsync(
+            projectId,
+            binding.Id,
+            binding.NodeId,
+            binding.ValidationRevision,
+            registered.Version,
+            "dotnet-ci",
+            "rev-3");
+
+        Assert.Equal("dotnet-ci", selected.TrustedVerificationProfileId);
+        Assert.Equal("rev-3", selected.TrustedVerificationProfileRevision);
+        Assert.True(selected.Version > registered.Version);
+
+        var cleared = await catalog.SelectTrustedVerificationProfileAsync(
+            projectId,
+            binding.Id,
+            binding.NodeId,
+            binding.ValidationRevision,
+            selected.Version,
+            profileId: null,
+            profileRevision: null);
+
+        Assert.Null(cleared.TrustedVerificationProfileId);
+        Assert.Null(cleared.TrustedVerificationProfileRevision);
+        var fetched = await catalog.GetAsync(projectId);
+        Assert.Null(fetched.TrustedVerificationProfileId);
+        Assert.Null(fetched.TrustedVerificationProfileRevision);
+    }
+
+    [Fact]
+    public async Task Select_throws_when_the_project_is_missing()
+    {
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context);
+
+        await Assert.ThrowsAsync<ProjectNotFoundException>(() =>
+            catalog.SelectTrustedVerificationProfileAsync(
+                new ProjectId(Guid.NewGuid()),
+                WorkspaceBindingId.New(),
+                NodeId.New(),
+                validationRevision: 1,
+                expectedProjectVersion: 1,
+                "dotnet-ci",
+                "rev-3"));
+    }
+
+    [Fact]
+    public async Task Select_rejects_when_the_workspace_binding_is_missing()
+    {
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context);
+        var registered = await catalog.RegisterAsync(Command());
+        var projectId = new ProjectId(registered.Id);
+
+        await Assert.ThrowsAsync<VerificationPolicySelectionException>(() =>
+            catalog.SelectTrustedVerificationProfileAsync(
+                projectId,
+                WorkspaceBindingId.New(),
+                NodeId.New(),
+                validationRevision: 1,
+                registered.Version,
+                "dotnet-ci",
+                "rev-3"));
+
+        var fetched = await catalog.GetAsync(projectId);
+        Assert.Null(fetched.TrustedVerificationProfileId);
+        Assert.Null(fetched.TrustedVerificationProfileRevision);
+        Assert.Equal(registered.Version, fetched.Version);
+    }
+
+    [Fact]
+    public async Task Select_rejects_when_the_binding_id_changes_before_persist()
+    {
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context);
+        var registered = await catalog.RegisterAsync(Command());
+        var projectId = new ProjectId(registered.Id);
+        var original = await SeedBindingAsync(context, projectId);
+        var fenceId = original.Id;
+        var fenceNodeId = original.NodeId;
+        var fenceRevision = original.ValidationRevision;
+
+        context.WorkspaceBindings.Remove(original);
+        await context.SaveChangesAsync();
+        await SeedBindingAsync(context, projectId);
+
+        await Assert.ThrowsAsync<VerificationPolicySelectionException>(() =>
+            catalog.SelectTrustedVerificationProfileAsync(
+                projectId,
+                fenceId,
+                fenceNodeId,
+                fenceRevision,
+                registered.Version,
+                "dotnet-ci",
+                "rev-3"));
+
+        var fetched = await catalog.GetAsync(projectId);
+        Assert.Null(fetched.TrustedVerificationProfileId);
+        Assert.Null(fetched.TrustedVerificationProfileRevision);
+    }
+
+    [Fact]
+    public async Task Select_rejects_when_the_binding_node_changes_before_persist()
+    {
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context);
+        var registered = await catalog.RegisterAsync(Command());
+        var projectId = new ProjectId(registered.Id);
+        var binding = await SeedBindingAsync(context, projectId);
+        var fenceId = binding.Id;
+        var fenceNodeId = binding.NodeId;
+        var fenceRevision = binding.ValidationRevision;
+
+        var reboundNodeId = NodeId.New();
+        context.FleetNodes.Add(FleetNode.Register(reboundNodeId, "Rebound", "1.0", "{}", DateTimeOffset.UtcNow));
+        binding.Redesignate(reboundNodeId, "/node/workspaces/rebound", DateTimeOffset.UtcNow);
+        await context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<VerificationPolicySelectionException>(() =>
+            catalog.SelectTrustedVerificationProfileAsync(
+                projectId,
+                fenceId,
+                fenceNodeId,
+                fenceRevision,
+                registered.Version,
+                "dotnet-ci",
+                "rev-3"));
+
+        var fetched = await catalog.GetAsync(projectId);
+        Assert.Null(fetched.TrustedVerificationProfileId);
+        Assert.Null(fetched.TrustedVerificationProfileRevision);
+    }
+
+    [Fact]
+    public async Task Select_rejects_when_the_validation_revision_changes_before_persist()
+    {
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context);
+        var registered = await catalog.RegisterAsync(Command());
+        var projectId = new ProjectId(registered.Id);
+        var binding = await SeedBindingAsync(context, projectId);
+        var fenceId = binding.Id;
+        var fenceNodeId = binding.NodeId;
+        var fenceRevision = binding.ValidationRevision;
+
+        binding.Redesignate(binding.NodeId, "/node/workspaces/fleet-revalidated", DateTimeOffset.UtcNow);
+        await context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<VerificationPolicySelectionException>(() =>
+            catalog.SelectTrustedVerificationProfileAsync(
+                projectId,
+                fenceId,
+                fenceNodeId,
+                fenceRevision,
+                registered.Version,
+                "dotnet-ci",
+                "rev-3"));
+
+        var fetched = await catalog.GetAsync(projectId);
+        Assert.Null(fetched.TrustedVerificationProfileId);
+        Assert.Null(fetched.TrustedVerificationProfileRevision);
+    }
+
+    [Fact]
+    public async Task Clear_rejects_when_the_binding_fence_changes_before_persist()
+    {
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context);
+        var registered = await catalog.RegisterAsync(Command());
+        var projectId = new ProjectId(registered.Id);
+        var binding = await SeedBindingAsync(context, projectId);
+        var selected = await catalog.SelectTrustedVerificationProfileAsync(
+            projectId,
+            binding.Id,
+            binding.NodeId,
+            binding.ValidationRevision,
+            registered.Version,
+            "dotnet-ci",
+            "rev-3");
+        var fenceId = binding.Id;
+        var fenceNodeId = binding.NodeId;
+        var fenceRevision = binding.ValidationRevision;
+
+        binding.Redesignate(binding.NodeId, "/node/workspaces/fleet-cleared", DateTimeOffset.UtcNow);
+        await context.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<VerificationPolicySelectionException>(() =>
+            catalog.SelectTrustedVerificationProfileAsync(
+                projectId,
+                fenceId,
+                fenceNodeId,
+                fenceRevision,
+                selected.Version,
+                profileId: null,
+                profileRevision: null));
+
+        var fetched = await catalog.GetAsync(projectId);
+        Assert.Equal("dotnet-ci", fetched.TrustedVerificationProfileId);
+        Assert.Equal("rev-3", fetched.TrustedVerificationProfileRevision);
+        Assert.Equal(selected.Version, fetched.Version);
+    }
+
+    [Fact]
+    public async Task Select_rejects_when_the_project_version_changes_before_persist()
+    {
+        using var context = TestRepositories.CreateContext(TestRepositories.CreateSqliteFile());
+        var catalog = TestRepositories.CreateCatalog(context);
+        var registered = await catalog.RegisterAsync(Command());
+        var projectId = new ProjectId(registered.Id);
+        var binding = await SeedBindingAsync(context, projectId);
+        var selected = await catalog.SelectTrustedVerificationProfileAsync(
+            projectId,
+            binding.Id,
+            binding.NodeId,
+            binding.ValidationRevision,
+            registered.Version,
+            "dotnet-ci",
+            "rev-3");
+
+        await Assert.ThrowsAsync<VerificationPolicySelectionException>(() =>
+            catalog.SelectTrustedVerificationProfileAsync(
+                projectId,
+                binding.Id,
+                binding.NodeId,
+                binding.ValidationRevision,
+                registered.Version,
+                "other",
+                "rev-9"));
+
+        var fetched = await catalog.GetAsync(projectId);
+        Assert.Equal("dotnet-ci", fetched.TrustedVerificationProfileId);
+        Assert.Equal("rev-3", fetched.TrustedVerificationProfileRevision);
+        Assert.Equal(selected.Version, fetched.Version);
+    }
+
+    [Fact]
+    public async Task Concurrent_select_and_redesignation_never_commit_stale_node_selection()
+    {
+        var sqlitePath = TestRepositories.CreateSqliteFile();
+        Guid projectIdValue;
+        WorkspaceBindingId fenceId;
+        NodeId fenceNodeId;
+        long fenceRevision;
+        long expectedVersion;
+
+        await using (var seed = TestRepositories.CreateContext(sqlitePath))
+        {
+            var seedCatalog = TestRepositories.CreateCatalog(seed);
+            var registered = await seedCatalog.RegisterAsync(Command());
+            var seededProjectId = new ProjectId(registered.Id);
+            var binding = await SeedBindingAsync(seed, seededProjectId);
+            projectIdValue = registered.Id;
+            fenceId = binding.Id;
+            fenceNodeId = binding.NodeId;
+            fenceRevision = binding.ValidationRevision;
+            expectedVersion = registered.Version;
+        }
+
+        var projectId = new ProjectId(projectIdValue);
+        await using var contextA = TestRepositories.CreateContext(sqlitePath);
+        await using var contextB = TestRepositories.CreateContext(sqlitePath);
+        var catalogA = TestRepositories.CreateCatalog(contextA);
+
+        var reboundNodeId = NodeId.New();
+        contextB.FleetNodes.Add(FleetNode.Register(reboundNodeId, "Rebound", "1.0", "{}", DateTimeOffset.UtcNow));
+        await contextB.SaveChangesAsync();
+        var current = contextB.WorkspaceBindings.ToList().Single(candidate => candidate.ProjectId == projectId);
+        current.Redesignate(reboundNodeId, "/node/workspaces/rebound", DateTimeOffset.UtcNow);
+        await contextB.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<VerificationPolicySelectionException>(() =>
+            catalogA.SelectTrustedVerificationProfileAsync(
+                projectId,
+                fenceId,
+                fenceNodeId,
+                fenceRevision,
+                expectedVersion,
+                "dotnet-ci",
+                "rev-3"));
+
+        var persisted = await catalogA.GetAsync(projectId);
+        var persistedBinding = Assert.IsType<WorkspaceBindingDto>(persisted.Binding);
+        Assert.Equal(reboundNodeId.Value, persistedBinding.NodeId);
+        Assert.NotEqual(fenceRevision, persistedBinding.ValidationRevision);
+        Assert.Null(persisted.TrustedVerificationProfileId);
+        Assert.Null(persisted.TrustedVerificationProfileRevision);
+        Assert.Equal(expectedVersion, persisted.Version);
+    }
+
+
+    private static async Task<WorkspaceBinding> SeedBindingAsync(
+        ControlPlaneDbContext context,
+        ProjectId projectId)
+    {
+        var nodeId = NodeId.New();
+        var now = DateTimeOffset.UtcNow;
+        context.FleetNodes.Add(FleetNode.Register(nodeId, "Worker", "1.0", "{}", now));
+        var binding = WorkspaceBinding.Designate(projectId, nodeId, "/node/workspaces/fleet", now);
+        context.WorkspaceBindings.Add(binding);
+        await context.SaveChangesAsync();
+        return binding;
     }
 }

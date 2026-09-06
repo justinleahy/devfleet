@@ -20,6 +20,12 @@ public enum ExecutionAssignmentState
 /// </summary>
 public sealed class ExecutionAssignment
 {
+    public const int MaxVerificationPolicyRevisionLength = 128;
+    public const int MaxBaselineVersionLength = 64;
+    public const int MaxTrustedVerificationProfileIdLength = 128;
+    public const int MaxTrustedVerificationProfileRevisionLength = 128;
+    public const int MaxMandatoryCommandIdsJsonLength = 4096;
+
     private ExecutionAssignment(
         WorkRequestId requestId,
         ProjectId projectId,
@@ -35,7 +41,12 @@ public sealed class ExecutionAssignment
         DateTimeOffset? lastRenewedAt,
         DateTimeOffset? lastReconciledAt,
         DateTimeOffset? terminalAt,
-        long version)
+        long version,
+        string? verificationPolicyRevision,
+        string? baselineVersion,
+        string? trustedVerificationProfileId,
+        string? trustedVerificationProfileRevision,
+        string? mandatoryCommandIdsJson)
     {
         RequestId = requestId;
         ProjectId = projectId;
@@ -52,6 +63,11 @@ public sealed class ExecutionAssignment
         LastReconciledAt = lastReconciledAt;
         TerminalAt = terminalAt;
         Version = version;
+        VerificationPolicyRevision = verificationPolicyRevision;
+        BaselineVersion = baselineVersion;
+        TrustedVerificationProfileId = trustedVerificationProfileId;
+        TrustedVerificationProfileRevision = trustedVerificationProfileRevision;
+        MandatoryCommandIdsJson = mandatoryCommandIdsJson;
     }
 
     /// <summary>The request identity is also the assignment's primary key.</summary>
@@ -86,6 +102,24 @@ public sealed class ExecutionAssignment
 
     /// <summary>Optimistic concurrency token.</summary>
     public long Version { get; private set; }
+
+    /// <summary>Captured effective-policy revision, or null until first capture.</summary>
+    public string? VerificationPolicyRevision { get; private set; }
+
+    /// <summary>Captured baseline version, or null until first capture.</summary>
+    public string? BaselineVersion { get; private set; }
+
+    /// <summary>Captured trusted project-check profile id, or null for baseline-only or uncaptured.</summary>
+    public string? TrustedVerificationProfileId { get; private set; }
+
+    /// <summary>Captured trusted profile revision, or null for baseline-only or uncaptured.</summary>
+    public string? TrustedVerificationProfileRevision { get; private set; }
+
+    /// <summary>JSON list of mandatory command ids the completion gate must see pass.</summary>
+    public string? MandatoryCommandIdsJson { get; private set; }
+
+    /// <summary>True after an immutable policy snapshot has been captured.</summary>
+    public bool HasCapturedVerificationPolicy => VerificationPolicyRevision is not null;
 
     /// <summary>Creates a starting assignment with an immutable validated placement snapshot.</summary>
     public static ExecutionAssignment Create(
@@ -126,7 +160,12 @@ public sealed class ExecutionAssignment
             lastRenewedAt: null,
             lastReconciledAt: null,
             terminalAt: null,
-            version: 1);
+            version: 1,
+            verificationPolicyRevision: null,
+            baselineVersion: null,
+            trustedVerificationProfileId: null,
+            trustedVerificationProfileRevision: null,
+            mandatoryCommandIdsJson: null);
     }
 
     /// <summary>Rehydrates persisted assignment and migration history without changing it.</summary>
@@ -145,7 +184,12 @@ public sealed class ExecutionAssignment
         DateTimeOffset? lastRenewedAt,
         DateTimeOffset? lastReconciledAt,
         DateTimeOffset? terminalAt,
-        long version)
+        long version,
+        string? verificationPolicyRevision = null,
+        string? baselineVersion = null,
+        string? trustedVerificationProfileId = null,
+        string? trustedVerificationProfileRevision = null,
+        string? mandatoryCommandIdsJson = null)
     {
         ValidateSnapshot(
             requestId,
@@ -165,6 +209,13 @@ public sealed class ExecutionAssignment
             lastReconciledAt,
             terminalAt,
             version);
+        var snapshot = NormalizePolicySnapshot(
+            verificationPolicyRevision,
+            baselineVersion,
+            trustedVerificationProfileId,
+            trustedVerificationProfileRevision,
+            mandatoryCommandIdsJson,
+            requireCaptured: false);
 
         return new ExecutionAssignment(
             requestId,
@@ -181,7 +232,42 @@ public sealed class ExecutionAssignment
             lastRenewedAt,
             lastReconciledAt,
             terminalAt,
-            version);
+            version,
+            snapshot.PolicyRevision,
+            snapshot.BaselineVersion,
+            snapshot.ProfileId,
+            snapshot.ProfileRevision,
+            snapshot.MandatoryCommandIdsJson);
+    }
+
+    /// <summary>
+    /// Captures the effective verification policy once. Later captures are rejected.
+    /// </summary>
+    public void CaptureVerificationPolicy(
+        string verificationPolicyRevision,
+        string baselineVersion,
+        string? trustedVerificationProfileId,
+        string? trustedVerificationProfileRevision,
+        string mandatoryCommandIdsJson)
+    {
+        if (HasCapturedVerificationPolicy)
+        {
+            throw new InvalidOperationException("Verification policy snapshot is immutable once captured.");
+        }
+
+        var snapshot = NormalizePolicySnapshot(
+            verificationPolicyRevision,
+            baselineVersion,
+            trustedVerificationProfileId,
+            trustedVerificationProfileRevision,
+            mandatoryCommandIdsJson,
+            requireCaptured: true);
+        VerificationPolicyRevision = snapshot.PolicyRevision;
+        BaselineVersion = snapshot.BaselineVersion;
+        TrustedVerificationProfileId = snapshot.ProfileId;
+        TrustedVerificationProfileRevision = snapshot.ProfileRevision;
+        MandatoryCommandIdsJson = snapshot.MandatoryCommandIdsJson;
+        Version++;
     }
 
     /// <summary>Reports lease liveness without changing assignment ownership or state.</summary>
@@ -534,5 +620,89 @@ public sealed class ExecutionAssignment
         {
             throw new ArgumentException($"{label} must not be empty.", parameterName);
         }
+    }
+
+    private static (
+        string? PolicyRevision,
+        string? BaselineVersion,
+        string? ProfileId,
+        string? ProfileRevision,
+        string? MandatoryCommandIdsJson) NormalizePolicySnapshot(
+        string? verificationPolicyRevision,
+        string? baselineVersion,
+        string? trustedVerificationProfileId,
+        string? trustedVerificationProfileRevision,
+        string? mandatoryCommandIdsJson,
+        bool requireCaptured)
+    {
+        var hasAny = !string.IsNullOrWhiteSpace(verificationPolicyRevision)
+            || !string.IsNullOrWhiteSpace(baselineVersion)
+            || !string.IsNullOrWhiteSpace(trustedVerificationProfileId)
+            || !string.IsNullOrWhiteSpace(trustedVerificationProfileRevision)
+            || !string.IsNullOrWhiteSpace(mandatoryCommandIdsJson);
+
+        if (!hasAny)
+        {
+            if (requireCaptured)
+            {
+                throw new ArgumentException("Verification policy snapshot must be complete.");
+            }
+
+            return (null, null, null, null, null);
+        }
+
+        var policyRevision = RequireBounded(
+            verificationPolicyRevision,
+            MaxVerificationPolicyRevisionLength,
+            nameof(verificationPolicyRevision),
+            "Verification policy revision");
+        var baseline = RequireBounded(
+            baselineVersion,
+            MaxBaselineVersionLength,
+            nameof(baselineVersion),
+            "Baseline version");
+        var commands = RequireBounded(
+            mandatoryCommandIdsJson,
+            MaxMandatoryCommandIdsJsonLength,
+            nameof(mandatoryCommandIdsJson),
+            "Mandatory command ids");
+
+        var hasProfileId = !string.IsNullOrWhiteSpace(trustedVerificationProfileId);
+        var hasProfileRevision = !string.IsNullOrWhiteSpace(trustedVerificationProfileRevision);
+        if (hasProfileId != hasProfileRevision)
+        {
+            throw new ArgumentException(
+                "Trusted verification profile id and revision must both be present or both be absent.");
+        }
+
+        string? profileId = null;
+        string? profileRevision = null;
+        if (hasProfileId)
+        {
+            profileId = RequireBounded(
+                trustedVerificationProfileId,
+                MaxTrustedVerificationProfileIdLength,
+                nameof(trustedVerificationProfileId),
+                "Trusted verification profile id");
+            profileRevision = RequireBounded(
+                trustedVerificationProfileRevision,
+                MaxTrustedVerificationProfileRevisionLength,
+                nameof(trustedVerificationProfileRevision),
+                "Trusted verification profile revision");
+        }
+
+        return (policyRevision, baseline, profileId, profileRevision, commands);
+    }
+
+    private static string RequireBounded(string? value, int maxLength, string paramName, string label)
+    {
+        EnsureRequired(value ?? string.Empty, paramName, label);
+        var trimmed = value!.Trim();
+        if (trimmed.Length > maxLength)
+        {
+            throw new ArgumentException($"{label} must not exceed {maxLength} characters.", paramName);
+        }
+
+        return trimmed;
     }
 }

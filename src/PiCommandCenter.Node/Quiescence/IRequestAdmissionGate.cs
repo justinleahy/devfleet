@@ -109,17 +109,18 @@ public sealed class RequestCallbackLease : IDisposable
 /// rejects all new spawn/mutation/verification/Git work for the request while already-admitted
 /// activity drains; <see cref="ProveQuiescenceAsync"/> waits for the drain and combines it with
 /// reservation, spool, and repository observations into an exact proof — or reports explicit
-/// uncertainty. Terminalization preflight is tracked until admission closes and the proof begins.
+/// uncertainty. Terminalization preflight is exclusive. A reversible seal rejects new mutating
+/// work without the irreversible tombstone until Begin is accepted or the seal is lifted.
 /// </summary>
 public interface IRequestAdmissionGate
 {
     /// <summary>True once admission for the request has been closed; closed is irreversible.</summary>
     bool IsAdmissionClosed(Guid requestId);
 
-    /// <summary>Admits one mutation/verification/Git operation, or returns null once admission is closed.</summary>
+    /// <summary>Admits one mutation/verification/Git operation, or returns null once admission is sealed or closed.</summary>
     NodeActivityLease? TryEnterOperation(Guid requestId, string operation);
 
-    /// <summary>Admits one child agent, or returns null once admission is closed.</summary>
+    /// <summary>Admits one child agent, or returns null once admission is sealed or closed.</summary>
     NodeActivityLease? TryAdmitChild(Guid requestId, string childSessionId);
 
     /// <summary>
@@ -139,6 +140,28 @@ public interface IRequestAdmissionGate
     /// by already-admitted work must stay visible to the barrier even after closure.
     /// </summary>
     NodeActivityLease TrackProcess(Guid requestId, string description);
+
+    /// <summary>
+    /// Reversibly rejects new mutating/child/callback admission without the irreversible
+    /// tombstone. Returns false when another seal is held or admission is already closed.
+    /// </summary>
+    bool TrySealAdmission(Guid requestId);
+
+    /// <summary>
+    /// Lifts a reversible seal. No-op after <see cref="CloseAdmission"/> or
+    /// <see cref="CommitTerminalization"/>.
+    /// </summary>
+    void UnsealAdmission(Guid requestId);
+
+    /// <summary>
+    /// Waits until locally tracked children, operations, and processes are zero.
+    /// Returns false on timeout or cancellation. Exclusive terminalization is not
+    /// counted as draining activity.
+    /// </summary>
+    Task<bool> WaitUntilDrainedAsync(
+        Guid requestId,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default);
 
     /// <summary>Atomically closes admission for the request; idempotent.</summary>
     void CloseAdmission(Guid requestId);

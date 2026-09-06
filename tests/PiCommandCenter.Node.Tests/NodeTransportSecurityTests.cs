@@ -9,6 +9,7 @@ using PiCommandCenter.Node.Child;
 using PiCommandCenter.Node.Projects;
 using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.SubscriptionUsage;
+using PiCommandCenter.Node.Verification;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -61,7 +62,11 @@ public sealed class NodeTransportSecurityTests
             DateTimeOffset.UtcNow,
             "passed",
             null,
-            Mandatory: true);
+            Mandatory: true,
+            Fingerprint: "test-fingerprint",
+            PolicyRevision: "test-policy-v1",
+            RunKind: VerificationRunKind.ProjectCheck,
+            AttemptId: Guid.NewGuid());
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
             () => gateway.RecordVerificationRunAsync("root-session-17", run, CancellationToken.None));
@@ -87,7 +92,11 @@ public sealed class NodeTransportSecurityTests
             DateTimeOffset.UtcNow,
             "passed",
             null,
-            Mandatory: true);
+            Mandatory: true,
+            Fingerprint: "test-fingerprint",
+            PolicyRevision: "test-policy-v1",
+            RunKind: VerificationRunKind.ProjectCheck,
+            AttemptId: Guid.NewGuid());
 
         var message = NodeTransportClient.CreateVerificationRunMessage(
             run,
@@ -130,6 +139,24 @@ public sealed class NodeTransportSecurityTests
         Assert.DoesNotContain(claimToken, exception.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Completion_gateway_rejects_missing_list_credential_before_transport()
+    {
+        await using var client = CreateClient("https://control.example.com");
+        var gateway = new NodeTransportCompletionGateway(
+            client,
+            new StubAssignmentCredentialSource());
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => gateway.ListVerificationRunsAsync(
+                "root-session-17",
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                CancellationToken.None));
+
+        Assert.Contains("assignment credential", exception.Message, StringComparison.Ordinal);
+    }
+
     private static NodeTransportClient CreateClient(string controlPlaneUrl)
     {
         var missingCredentialPath = Path.Combine(
@@ -150,6 +177,7 @@ public sealed class NodeTransportSecurityTests
             new UnusedSubscriptionUsageCache(),
             new UnusedWorkspaceBindingValidator(),
             new UnusedWorkspaceDirectoryBrowser(),
+            new UnusedVerificationPolicyCatalog(),
             NullLogger<NodeTransportClient>.Instance);
     }
 
@@ -189,6 +217,15 @@ public sealed class NodeTransportSecurityTests
         public Task<WorkspaceDirectoryBrowseResponseMessage> BrowseAsync(
             WorkspaceDirectoryBrowseRequestMessage request,
             CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class UnusedVerificationPolicyCatalog : IVerificationPolicyCatalog
+    {
+        public VerificationPolicyCatalogMessage Capture() => throw new NotSupportedException();
+
+        public VerificationProfileSelectionResultMessage ValidateSelection(
+            VerificationProfileSelectionRequestMessage request)
             => throw new NotSupportedException();
     }
 

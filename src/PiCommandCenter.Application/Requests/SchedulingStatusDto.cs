@@ -9,6 +9,7 @@ namespace PiCommandCenter.Application.Requests;
 /// </summary>
 public static class SchedulingReasonCodes
 {
+    public const string ProjectRecoveryPaused = "project_recovery_paused";
     public const string ProjectDisabled = "project_disabled";
     public const string WorkspaceBindingMissing = "workspace_binding_missing";
     public const string WorkspaceValidationPending = "workspace_validation_pending";
@@ -16,6 +17,7 @@ public static class SchedulingReasonCodes
     public const string NodeOffline = "node_offline";
     public const string RuntimeUnavailable = "runtime_unavailable";
     public const string RuntimeUnknown = "runtime_unknown";
+    public const string VerificationPolicyUnavailable = "verification_policy_unavailable";
     public const string NodeCapacityUnavailable = "node_capacity_unavailable";
     public const string ProjectConcurrencyUnavailable = "project_concurrency_unavailable";
     public const string Eligible = "eligible";

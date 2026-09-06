@@ -28,7 +28,8 @@ public sealed record FleetStatisticsDto(
     decimal? EstimatedCostUsd,
     int IgnoredTelemetryEvents,
     DateTimeOffset? LatestTelemetryAt,
-    IReadOnlyList<RuntimeStatisticsDto> Runtimes);
+    IReadOnlyList<RuntimeStatisticsDto> Runtimes,
+    IReadOnlyList<ProviderStatisticsDto> Providers);
 
 /// <summary>Nullable token series. Null means no runtime ever reported the series.</summary>
 public sealed record TokenTotalsDto(
@@ -41,6 +42,18 @@ public sealed record TokenTotalsDto(
 /// <summary>Per-runtime breakdown grouped by the session runtime identifier.</summary>
 public sealed record RuntimeStatisticsDto(
     string Runtime,
+    int TrackedAgents,
+    int ActiveAgents,
+    int AgentsWithReportedTokens,
+    TokenTotalsDto Tokens,
+    decimal? EstimatedCostUsd);
+
+/// <summary>
+/// Per-provider breakdown grouped by the canonical model selector prefix before
+/// <c>/</c>. Unqualified or empty prefixes are omitted, not labeled.
+/// </summary>
+public sealed record ProviderStatisticsDto(
+    string Provider,
     int TrackedAgents,
     int ActiveAgents,
     int AgentsWithReportedTokens,

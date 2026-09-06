@@ -22,4 +22,5 @@ public sealed record WorkRequestDto(
     DateTimeOffset UpdatedAt,
     long Version,
     SchedulingStatusDto? SchedulingStatus = null,
-    ExecutionAssignmentProjectionDto? Assignment = null);
+    ExecutionAssignmentProjectionDto? Assignment = null,
+    Guid? OriginalRequestId = null);

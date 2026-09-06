@@ -1,7 +1,9 @@
 using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Live;
+using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Requests;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
@@ -19,7 +21,8 @@ public sealed class ExecutionAssignmentService(
     TimeProvider clock,
     ControlPlaneDbContext db,
     IRequestEligibilityEvaluator eligibilityEvaluator,
-    IProjectionNotifier notifier) : IExecutionAssignmentService
+    IProjectionNotifier notifier,
+    IOptions<NodeLivenessOptions> livenessOptions) : IExecutionAssignmentService
 {
     public async Task<ExecutionAssignmentDto?> ClaimNextAsync(
         NodeId nodeId,
@@ -27,6 +30,7 @@ public sealed class ExecutionAssignmentService(
         CancellationToken cancellationToken = default)
     {
         ValidateNodeAndLease(nodeId, lease);
+        var staleAfter = livenessOptions.Value.StaleAfter;
 
         try
         {
@@ -60,7 +64,24 @@ public sealed class ExecutionAssignmentService(
                 var project = await db.Projects
                     .SingleAsync(candidate => candidate.Id == request.ProjectId, cancellationToken)
                     .ConfigureAwait(false);
+                var node = await db.FleetNodes
+                    .SingleAsync(candidate => candidate.Id == nodeId, cancellationToken)
+                    .ConfigureAwait(false);
                 var now = clock.GetUtcNow().ToUniversalTime();
+                if (!TryCapturePolicy(
+                        project,
+                        node.ExecutionStatusJson,
+                        now,
+                        staleAfter,
+                        out var policyRevision,
+                        out var baselineVersion,
+                        out var profileId,
+                        out var profileRevision,
+                        out var mandatoryCommandIdsJson))
+                {
+                    continue;
+                }
+
                 var assignment = ExecutionAssignment.Create(
                     request.Id,
                     request.ProjectId,
@@ -72,6 +93,12 @@ public sealed class ExecutionAssignmentService(
                     CreateClaimToken(),
                     now,
                     lease);
+                assignment.CaptureVerificationPolicy(
+                    policyRevision,
+                    baselineVersion,
+                    profileId,
+                    profileRevision,
+                    mandatoryCommandIdsJson);
                 request.Start(now);
                 db.ExecutionAssignments.Add(assignment);
 
@@ -122,6 +149,10 @@ public sealed class ExecutionAssignmentService(
             .ToDictionaryAsync(project => project.Id, cancellationToken)
             .ConfigureAwait(false);
         var now = clock.GetUtcNow().ToUniversalTime();
+        var staleAfter = livenessOptions.Value.StaleAfter;
+        var node = await db.FleetNodes
+            .SingleAsync(candidate => candidate.Id == nodeId, cancellationToken)
+            .ConfigureAwait(false);
         var results = new List<AssignmentReconciliationResultDto>(
             Math.Max(assignments.Count, inventoryByRequest.Count));
         var changed = new List<ExecutionAssignment>();
@@ -153,6 +184,37 @@ public sealed class ExecutionAssignmentService(
                 }
 
                 continue;
+            }
+
+            if (!assignment.HasCapturedVerificationPolicy)
+            {
+                if (!TryCapturePolicy(
+                        projects[assignment.ProjectId],
+                        node.ExecutionStatusJson,
+                        now,
+                        staleAfter,
+                        out var policyRevision,
+                        out var baselineVersion,
+                        out var profileId,
+                        out var profileRevision,
+                        out var mandatoryCommandIdsJson))
+                {
+                    MarkRecoveryRequired(assignment, now, changed);
+                    results.Add(RecoveryResult(assignment, requests, projects));
+                    continue;
+                }
+
+                assignment.CaptureVerificationPolicy(
+                    policyRevision,
+                    baselineVersion,
+                    profileId,
+                    profileRevision,
+                    mandatoryCommandIdsJson);
+                changed.Add(assignment);
+                authoritative = ToDto(
+                    assignment,
+                    requests[assignment.RequestId],
+                    projects[assignment.ProjectId]);
             }
 
             var item = reported is { Length: 1 } ? reported[0] : null;
@@ -332,7 +394,40 @@ public sealed class ExecutionAssignmentService(
             request.Kind,
             request.RiskLevel,
             project.CreateRequestBranch,
-            project.CreateRequestCommit);
+            project.CreateRequestCommit,
+            assignment.VerificationPolicyRevision,
+            assignment.BaselineVersion,
+            assignment.TrustedVerificationProfileId,
+            assignment.TrustedVerificationProfileRevision,
+            assignment.MandatoryCommandIdsJson);
+
+    private static bool TryCapturePolicy(
+        Project project,
+        string? executionStatusJson,
+        DateTimeOffset now,
+        TimeSpan staleAfter,
+        out string policyRevision,
+        out string baselineVersion,
+        out string? profileId,
+        out string? profileRevision,
+        out string mandatoryCommandIdsJson)
+    {
+        var executionStatus = VerificationPolicyAssignmentCapture.DeserializeExecutionStatus(
+            executionStatusJson,
+            maxJsonLength: 131072);
+        return VerificationPolicyAssignmentCapture.TryCreate(
+            project.TrustedVerificationProfileId,
+            project.TrustedVerificationProfileRevision,
+            executionStatus,
+            requireFreshCatalog: true,
+            now,
+            staleAfter,
+            out policyRevision,
+            out baselineVersion,
+            out profileId,
+            out profileRevision,
+            out mandatoryCommandIdsJson);
+    }
 
     private static string CreateClaimToken() =>
         Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();

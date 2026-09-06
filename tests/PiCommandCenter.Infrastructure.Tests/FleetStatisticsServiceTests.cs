@@ -38,7 +38,8 @@ public class FleetStatisticsServiceTests : IDisposable
         string runtime,
         string liveness = "Online",
         string workState = "Executing",
-        bool ended = false) => new()
+        bool ended = false,
+        string model = "model") => new()
     {
         Id = id,
         ProjectId = _projectId,
@@ -46,7 +47,7 @@ public class FleetStatisticsServiceTests : IDisposable
         AgentName = id,
         Role = "task",
         Runtime = runtime,
-        Model = "model",
+        Model = model,
         Liveness = liveness,
         Activity = "Responding",
         Attention = "None",
@@ -100,6 +101,7 @@ public class FleetStatisticsServiceTests : IDisposable
         Assert.Equal(0, result.IgnoredTelemetryEvents);
         Assert.Null(result.LatestTelemetryAt);
         Assert.Empty(result.Runtimes);
+        Assert.Empty(result.Providers);
     }
 
     [Fact]
@@ -670,6 +672,64 @@ public class FleetStatisticsServiceTests : IDisposable
         Assert.Equal(4, result.AgentsWithReportedTokens);
         Assert.Equal(3, result.AgentsWithEstimatedCost);
         Assert.Equal(0, result.IgnoredTelemetryEvents);
+    }
+
+    [Fact]
+    public async Task GetAsync_groups_canonical_providers_and_excludes_unqualified_models()
+    {
+        var sessions = new[]
+        {
+            Session("s-qwen-1", "pi", model: "qwen-token-plan/qwen3-coder-plus"),
+            Session("s-qwen-2", "pi", model: "qwen-token-plan/qwen3-coder-flash"),
+            Session("s-unqualified", "pi", model: "bare-model"),
+            Session("s-claude", "claude-code", model: "claude-code/opus"),
+            Session("s-empty-prefix", "pi", model: "/no-provider"),
+        };
+        var events = new[]
+        {
+            Telemetry("s-qwen-1", "message.completed", """
+                { "data": { "message": { "usage": { "input": 10, "output": 4,
+                  "cacheRead": 1, "cacheWrite": 2, "cost": { "total": 0.01 } } } } }
+                """, 1),
+            Telemetry("s-qwen-2", "message.completed", """
+                { "data": { "message": { "usage": { "input": 20, "output": 6,
+                  "cacheRead": 3, "cacheWrite": 0, "cost": { "total": 0.02 } } } } }
+                """, 1),
+            Telemetry("s-unqualified", "message.completed", """
+                { "data": { "message": { "usage": { "input": 999, "output": 999,
+                  "cacheRead": 0, "cacheWrite": 0, "cost": { "total": 9.99 } } } } }
+                """, 1),
+            Telemetry("s-claude", "result.completed", """
+                { "type": "result", "usage": { "input_tokens": 100, "output_tokens": 40,
+                    "cache_read_input_tokens": 5, "cache_creation_input_tokens": 1 },
+                  "total_cost_usd": 0.10 }
+                """, 1),
+            Telemetry("s-empty-prefix", "message.completed", """
+                { "data": { "message": { "usage": { "input": 7, "output": 1,
+                  "cacheRead": 0, "cacheWrite": 0 } } } }
+                """, 1),
+        };
+        await SeedAsync(sessions, events);
+
+        await using var db = CreateContext();
+        var result = await CreateService(db).GetAsync();
+
+        Assert.Equal(new[] { "claude-code", "qwen-token-plan" },
+            result.Providers.Select(p => p.Provider).ToArray());
+
+        var claude = result.Providers[0];
+        Assert.Equal(1, claude.TrackedAgents);
+        Assert.Equal(1, claude.ActiveAgents);
+        Assert.Equal(1, claude.AgentsWithReportedTokens);
+        Assert.Equal(new TokenTotalsDto(100, 40, 5, 1, null), claude.Tokens);
+        Assert.Equal(0.10m, claude.EstimatedCostUsd);
+
+        var qwen = result.Providers[1];
+        Assert.Equal(2, qwen.TrackedAgents);
+        Assert.Equal(2, qwen.ActiveAgents);
+        Assert.Equal(2, qwen.AgentsWithReportedTokens);
+        Assert.Equal(new TokenTotalsDto(30, 10, 4, 2, null), qwen.Tokens);
+        Assert.Equal(0.03m, qwen.EstimatedCostUsd);
     }
 
     [Fact]
