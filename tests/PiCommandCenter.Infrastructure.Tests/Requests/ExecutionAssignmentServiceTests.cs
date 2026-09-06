@@ -318,6 +318,32 @@ public sealed class ExecutionAssignmentServiceTests : IDisposable
         Assert.Equal(_clock.GetUtcNow().AddMinutes(5), persisted.LeaseExpiresAt);
         Assert.Equal(3, persisted.Version);
     }
+    [Fact]
+    public async Task Reconcile_preserves_a_start_blocked_assignment_for_node_retry()
+    {
+        await using var db = CreateContext();
+        var world = SeedAssignment(db, ExecutionAssignmentState.Starting);
+        await SaveAsync(db);
+        _clock.Advance(TimeSpan.FromMinutes(1));
+
+        var inventory = Inventory(world) with
+        {
+            SupervisorState = AssignmentSupervisorState.StartBlocked,
+            RepositoryKnown = false,
+        };
+        var result = Assert.Single(await CreateService(db).ReconcileAsync(
+            world.Node.Id,
+            [inventory],
+            TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(AssignmentReconciliationDisposition.Resume, result.Disposition);
+        Assert.Equal(ExecutionAssignmentState.Starting, result.Assignment?.State);
+        await using var reload = CreateContext();
+        var persisted = await reload.ExecutionAssignments.SingleAsync();
+        Assert.Equal(ExecutionAssignmentState.Starting, persisted.State);
+        Assert.Equal(_clock.GetUtcNow(), persisted.LastRenewedAt);
+    }
+
 
     [Theory]
     [InlineData(ExecutionAssignmentState.Starting)]

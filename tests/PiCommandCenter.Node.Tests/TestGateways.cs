@@ -330,7 +330,7 @@ public sealed class NoopCompletionGateway : PiCommandCenter.Node.Child.INodeComp
     public Task<PiCommandCenter.Application.Completion.CompletionGateDecision> BeginTerminalizationAsync(
         Guid projectId,
         Guid requestId,
-        string rootSessionId,
+        string? rootSessionId,
         PiCommandCenter.Contracts.NodeTransport.TerminalizationIntent intent,
         PiCommandCenter.Application.Completion.CompletionEvidence? evidence,
         string? reason,
@@ -340,7 +340,7 @@ public sealed class NoopCompletionGateway : PiCommandCenter.Node.Child.INodeComp
     public Task<PiCommandCenter.Application.Completion.CompletionGateDecision> ConfirmTerminalizationAsync(
         Guid projectId,
         Guid requestId,
-        string rootSessionId,
+        string? rootSessionId,
         PiCommandCenter.Contracts.NodeTransport.TerminalizationIntent intent,
         PiCommandCenter.Application.Completion.CompletionEvidence? evidence,
         string? reason,

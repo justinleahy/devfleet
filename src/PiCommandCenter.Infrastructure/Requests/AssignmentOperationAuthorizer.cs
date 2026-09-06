@@ -137,6 +137,17 @@ public sealed class AssignmentOperationAuthorizer(ControlPlaneDbContext db)
             return;
         }
 
+        if (assignment.State is ExecutionAssignmentState.RecoveryRequired)
+        {
+            await RequireRecordedSessionCorrelationAsync(
+                    @event.RequestId,
+                    @event.ProjectId,
+                    @event.SessionId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return;
+        }
+
         if (!IsTerminal(assignment.State))
         {
             throw Denied(AssignmentAuthorizationCodes.StateForbidden);

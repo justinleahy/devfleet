@@ -104,7 +104,7 @@ The Command Center must never read, copy, store, relay, or transform provider su
 
 ### 3.6 One canonical project workspace
 
-A Project is fleet-owned and contains no node identity or repository path. In the initial phase it may have zero or one designated WorkspaceBinding, which records one node-local canonical repository path after that node validates it.
+A Project is fleet-owned and contains no node identity or repository path. In the initial phase it may have zero or one designated WorkspaceBinding, which records one node-local canonical directory path after that node classifies it. The designated directory does not have to be a Git checkout already: an ordinary directory and an initialized repository with no commits are both preparable, and the node's supervisor performs the local Git preparation later, when the first request starts.
 
 All managed agents for a request use the immutable node and path snapshot in that request's ExecutionAssignment. The system may create ordinary Git branches and request-level commits in that workspace, but it must not create additional working trees, infer that another clone is equivalent, move work between repositories, or fail over to another node.
 
@@ -122,7 +122,7 @@ Managed agents must not independently run commands that change repository-wide G
 - `git merge`
 - `git rebase`
 
-The node supervisor owns branch setup, staging, commits, recovery, and final request checkpoints.
+The node supervisor owns repository initialization, baseline capture, branch setup, staging, commits, recovery, and final request checkpoints. Its Git access is argv-only trusted commands with a fixed command-local identity; it configures no remote, hook, or credential helper and edits no global or repository Git configuration.
 
 ---
 
@@ -463,16 +463,28 @@ Creating or editing the binding's Node, path, default-branch policy, or other va
 
 The designation UI does not accept a typed path. After the operator selects an authenticated Node, Blazor calls `INodeWorkspaceDirectoryGateway.BrowseAsync` in-process (no HTTP browse endpoint). That gateway invokes the reverse SignalR callback `BrowseWorkspaceDirectories` only on that Node. A null request path lists configured `Projects:ApprovedRoots`; a non-null path lists one direct child-directory level under a canonical absolute path. Selecting a folder does not run Git or default-branch checks; those remain the existing revisioned `ValidateWorkspaceBinding` path.
 
-The bound Node validates:
+Browse cannot inspect Git state, so the designation UI cannot tell the operator whether the chosen folder is already a repository. It therefore always presents the operator-consent warning of §31.2 before designation is submitted.
+
+The bound Node checks:
 
 - Path exists and is a directory.
 - Resolved canonical path is within the node-local approved roots and satisfies symlink rules.
-- Path contains a Git repository and is readable by the Node process.
+- Path is readable and writable by the Node process.
 - Git is available.
-- Configured default branch exists locally or remotely.
-- The repository is not an application-created Git worktree.
+- The directory is not an application-created Git worktree and holds no broken `.git` metadata.
+- If the path already contains a repository with at least one commit, the configured default branch exists locally or remotely.
 
-Success stores the Node-returned canonical path and marks the current revision `Valid`. Failure stores a stable validation code and bounded operator-safe detail; a missing path is a binding result, not an invalid Project.
+The result is a stable *preparation classification*, not a checkout test. Three classifications are preparable and therefore report status `Valid` with the Node-returned canonical path:
+
+| Code | Directory state | Meaning |
+|---|---|---|
+| `valid` | Existing repository with commits and the configured default branch | Nothing to prepare. |
+| `repository_initialization_required` | Ordinary directory with no repository | The Node will initialize the repository and capture a baseline commit of its existing non-ignored contents at the first request start. |
+| `baseline_commit_required` | Initialized repository with no commits (unborn `HEAD`) | The Node will capture the baseline commit at the first request start. |
+
+Everything else is a failure: the current revision becomes `Invalid` with a stable code such as `path_missing`, `path_not_directory`, `path_outside_approved_root`, `path_symlink`, `path_not_writable`, `git_unavailable`, `nested_in_parent_repository`, `not_git_repository` (broken `.git` metadata or a gitfile worktree), `default_branch_missing`, or `unreadable`, plus bounded operator-safe detail. An existing repository that has commits but lacks the configured default branch stays `default_branch_missing`; preparation never invents a branch in a repository whose history the operator already owns. A missing path is a binding result, not an invalid Project.
+
+Classification is read-only. It never initializes a repository, commits, or otherwise changes node-local Git state; every mutation happens in the assignment-scoped preparation step of §19.1.
 
 Path uniqueness is scoped to `(NodeId, CanonicalRepositoryPath)`. The same path text on different nodes does not establish repository equivalence.
 
@@ -1164,15 +1176,37 @@ Therefore:
 
 ### 19.1 Request start
 
-For a development request, the node must:
+For a development request, the node must, in this order:
 
-1. Confirm no other development request is active for the project.
-2. Confirm repository state is permitted by project policy.
-3. Record current branch and base commit.
-4. If configured, create and checkout a request branch:
+1. Durably persist the assignment journal entry for the request (§23.1). Preparation may not run before the node can prove, after a restart, which assignment authorized it.
+2. Prepare the assigned workspace through the trusted supervisor Git service (§19.1.1). This step is skipped by its own idempotency checks when the workspace is already a repository with commits.
+3. Confirm no other development request is active for the project.
+4. Confirm repository state is permitted by project policy.
+5. Record current branch and base commit.
+6. If configured, create and checkout a request branch:
    - `command-center/DEV-00042-short-title`
-5. Record baseline Git status.
-6. Start the root session.
+7. Record baseline Git status.
+8. Start the root session.
+
+#### 19.1.1 Trusted workspace preparation
+
+Preparation is an `ITrustedGitService` operation (`PrepareWorkspaceAsync`), performed by the node supervisor with the assignment's canonical path and default branch. It runs after the assignment journal is durable and before baseline capture, request-branch creation, and root start. It is the only step permitted to create local Git metadata in a designated workspace, and it makes exactly the changes the classification of §10.2 named:
+
+- `repository_initialization_required`: initialize a repository on the configured default branch, then stage and commit the directory's existing non-ignored contents as the baseline commit.
+- `baseline_commit_required`: stage and commit the existing non-ignored contents of the unborn repository as the baseline commit.
+- `valid`: do nothing.
+
+The baseline commit message is exactly `Initialize workspace for DevFleet`. Its author and committer identity is fixed and command-local (`DevFleet Supervisor <devfleet@localhost>`, passed per command), so preparation never reads, writes, or depends on the operator's global or repository Git configuration. Preparation adds no remote, hook, credential helper, submodule, or worktree, and never deletes, resets, stashes, or cleans existing content.
+
+Preparation and request-branch creation are idempotent: re-running preparation on an already prepared workspace is a no-op, and a retry that finds the request branch already present at the default-branch tip succeeds. A request branch that already exists but has diverged is an error, not a silent reuse.
+
+#### 19.1.2 Startup failure and cancellation
+
+A failure in any startup step above — preparation included — blocks the request on its existing assignment instead of creating a session:
+
+- The node records `StartBlocked` in its assignment journal and spools one assignment-scoped `request.blocked` event carrying the failing phase and bounded reason. No session identity is fabricated for the event beyond the deterministic start-scoped id, and no root or child session exists.
+- The assignment is retained and remains retryable on the same assignment; it is never returned to the queue for another node, and reconciliation reports a `StartBlocked` assignment as retained rather than `RecoveryRequired`.
+- Cancelling a `StartBlocked` or `Starting` assignment that has no root session must still prove quiescence — no supervised process, mutation, verification, Git operation, or unflushed event — and then terminalize the assignment and request directly. Cancellation must not invent a session, plan, or result to terminalize.
 
 ### 19.2 During execution
 
@@ -1211,6 +1245,8 @@ repository:
 If the repository is unexpectedly dirty, the request becomes blocked and the UI lists affected files.
 
 The application must never silently delete, reset, or stash user changes.
+
+A workspace that preparation just initialized or baselined satisfies `requireCleanStart` by construction, because its existing non-ignored contents became the baseline commit rather than uncommitted changes. Preparation is the only reason the clean-start check may see a repository the operator did not create; it still never removes or rewrites content to reach a clean state.
 
 ### 19.5 External modifications
 
@@ -1495,7 +1531,7 @@ The Control Plane must reject events, session heartbeats, reservations, mutation
 
 ### 23.1 Local event and assignment spool
 
-Before launching work, the Node durably stores the assignment id, token, binding id/revision, immutable workspace snapshot, and root-session identity in owner-only local SQLite. It also stores unacknowledged events there.
+Before launching work, the Node durably stores the assignment id, token, binding id/revision, immutable workspace snapshot, and root-session identity in owner-only local SQLite. It also stores unacknowledged events there. This journal entry is written before workspace preparation (§19.1.1), so a node that dies mid-preparation still knows which assignment authorized the local Git changes it may have made.
 
 On reconnect or restart:
 
@@ -1507,6 +1543,8 @@ On reconnect or restart:
 6. Delete or mark events acknowledged only after Control Plane confirmation.
 
 A brief disconnect does not stop supervised processes or release ownership. A missed heartbeat or expired assignment lease places ownership in `RecoveryRequired` and continues to occupy capacity. Reconnection after expiry requires explicit reconciliation with the same authenticated Node and persisted token; normal renewal is insufficient. If that Node never returns, ownership remains recovery-required until audited administrator recovery proves quiescence. No other Node may claim the same request, and there is no automatic failover.
+
+A `StartBlocked` assignment — one whose startup steps failed before any session existed — reconciles as retained and retryable on the same assignment, not as `RecoveryRequired`: nothing was started, so there is no uncertain writer to recover from. Preparation and request-branch creation are idempotent so that the retry is safe.
 
 ---
 
@@ -2159,6 +2197,7 @@ Display:
 - Fleet-owned Project identity and policy.
 - A Workspace panel with nullable Node/path, validation status, code, time, revision, and current eligibility.
 - Actions to designate, edit, revalidate, or remove the sole WorkspaceBinding. Designation picks a Node, then browses that Node's approved-root tree one directory level at a time (`BrowseWorkspaceDirectories`); there is no manual path entry. Removal and replacement are disabled while an active or recovery assignment references it.
+- An operator-consent warning rendered beside the designation action, before submission, whenever designation is possible. Because browse lists directory names only and cannot inspect Git, the warning is always shown and always contains this exact sentence: `This directory is not a Git repository. DevFleet will initialize it and commit its existing non-ignored contents when the first request starts.` The surrounding copy must state that designating confirms consent to node-local Git metadata changes, that those changes happen only when they are needed, and that an existing repository on the configured default branch is left as it is.
 - New request composer, enabled even when no WorkspaceBinding exists, with notice that work remains queued until a designated workspace is eligible.
 - Active request.
 - Queue with deterministic scheduling reasons.

@@ -36,7 +36,7 @@ public sealed class AssignmentTerminalizationService(
         ProjectId projectId,
         WorkRequestId requestId,
         string claimToken,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
         string? reason,
@@ -113,7 +113,7 @@ public sealed class AssignmentTerminalizationService(
         ProjectId projectId,
         WorkRequestId requestId,
         string claimToken,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
         string? reason,
@@ -211,14 +211,14 @@ public sealed class AssignmentTerminalizationService(
         ProjectId projectId,
         WorkRequestId requestId,
         string claimToken,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent)
     {
         if (nodeId.Value == Guid.Empty
             || projectId.Value == Guid.Empty
             || requestId.Value == Guid.Empty
             || string.IsNullOrWhiteSpace(claimToken)
-            || string.IsNullOrWhiteSpace(rootSessionId))
+            || (intent != TerminalizationIntent.Cancel && string.IsNullOrWhiteSpace(rootSessionId)))
         {
             throw new AssignmentAuthorizationException(AssignmentAuthorizationCodes.InvalidInput);
         }

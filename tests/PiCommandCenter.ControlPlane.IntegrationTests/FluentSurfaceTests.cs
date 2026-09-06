@@ -367,6 +367,11 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
         Assert.Contains("Update designation", html);
         Assert.Contains("Revalidate workspace", html);
         Assert.Contains("Remove designation", html);
+        Assert.Contains("Designation consents to local Git changes", html);
+        Assert.Contains(
+            "This directory is not a Git repository. DevFleet will initialize it and commit its "
+                + "existing non-ignored contents when the first request starts.",
+            html);
         Assert.Contains("waiting for offline node", html);
         Assert.Contains("Node offline", html);
         Assert.Contains("The designated node is offline or its heartbeat is stale.", html);

@@ -204,6 +204,7 @@
                                                             Items="@_selectors"
                                                             OptionText="@(selector => selector)"
                                                             OptionValue="@(selector => selector)"
+                                                            Position="SelectPosition.Above"
                                                             Autocomplete="ComboboxAutocomplete.Both"
                                                             @bind-Value="candidate.Selector"
                                                             @bind-Value:after="MarkEdited"

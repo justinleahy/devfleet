@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
@@ -148,12 +150,16 @@ public sealed class RuntimeModelCommandRunner : IRuntimeModelCommandRunner
 }
 
 /// <summary>
-/// Queries each <see cref="AgentModelSelector"/> provider through its node-owned discovery
-/// mechanism. Every reported <see cref="RuntimeModelMessage.Id"/> is a canonical selector under
-/// the catalog's <see cref="RuntimeModelCatalogMessage.Provider"/>, so it can be saved as-is.
+/// Keeps the latest Pi, Antigravity, and Muse discovery results in memory. Collection runs once
+/// immediately at node startup and then on a non-overlapping five-minute cadence; readers never
+/// invoke providers and wait only for the first completed refresh. Claude is excluded from the
+/// snapshot because its catalog embeds live configured route selectors.
+/// Every reported <see cref="RuntimeModelMessage.Id"/> is a canonical selector under the
+/// catalog's <see cref="RuntimeModelCatalogMessage.Provider"/>, so it can be saved as-is.
 /// </summary>
-public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery, IDisposable
+public sealed partial class RuntimeModelDiscovery : BackgroundService, IRuntimeModelDiscovery
 {
+    public static readonly TimeSpan RefreshInterval = TimeSpan.FromMinutes(5);
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     // Claude Code cannot export the authenticated /model picker. Keep these stable aliases in
     // sync with https://code.claude.com/docs/en/model-config when Anthropic adds an option.
@@ -171,15 +177,16 @@ public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery, IDisposable
            && ClaudeCodeModels.Any(model =>
                string.Equals(model.Id, selector.Value, StringComparison.Ordinal));
 
-    private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
     private readonly PiWorkerOptions _pi;
     private readonly AntigravityOptions _antigravity;
     private readonly INodeRuntimeRoutingStore _routes;
     private readonly IRuntimeModelCommandRunner _runner;
     private readonly IMuseModelCatalogReader _muse;
     private readonly TimeProvider _timeProvider;
-    private readonly SemaphoreSlim _discoveryLock = new(1, 1);
-    private ExternalCatalogs? _cache;
+    private readonly ILogger<RuntimeModelDiscovery> _logger;
+    private readonly TaskCompletionSource<ExternalCatalogs> _initial =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private ExternalCatalogs? _current;
 
     public RuntimeModelDiscovery(
         IOptions<PiWorkerOptions> pi,
@@ -187,82 +194,83 @@ public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery, IDisposable
         INodeRuntimeRoutingStore routes,
         IRuntimeModelCommandRunner runner,
         IMuseModelCatalogReader muse,
+        ILogger<RuntimeModelDiscovery> logger,
         TimeProvider? timeProvider = null)
     {
+        ArgumentNullException.ThrowIfNull(logger);
         _pi = pi.Value;
         _antigravity = antigravity.Value;
         _routes = routes;
         _runner = runner;
         _muse = muse;
+        _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <summary>
     /// Cached Pi/Antigravity/Muse discovery results, including provider-level error catalogs.
-    /// Valid for <see cref="CacheLifetime"/> from the wave's completed result; Claude is excluded
-    /// because its catalog embeds live configured route selectors.
+    /// Claude is excluded because its catalog embeds live configured route selectors.
     /// </summary>
     private sealed record ExternalCatalogs(
         IReadOnlyList<RuntimeModelCatalogMessage> Pi,
         RuntimeModelCatalogMessage Antigravity,
-        RuntimeModelCatalogMessage Muse,
-        long CreatedTimestamp);
+        RuntimeModelCatalogMessage Muse);
 
+    /// <summary>
+    /// Serves the latest completed external wave; readers never run discovery processes. Before
+    /// the first completed refresh the read waits for it and honors caller cancellation. Claude
+    /// aliases and configured selectors are recomputed from live routing on every call.
+    /// </summary>
     public async Task<IReadOnlyList<RuntimeModelCatalogMessage>> DiscoverAsync(
         CancellationToken cancellationToken = default)
     {
-        var external = await ExternalCatalogsAsync(cancellationToken).ConfigureAwait(false);
+        var external = Volatile.Read(ref _current)
+            ?? await _initial.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
         return [.. external.Pi, ClaudeCatalog(), external.Antigravity, external.Muse];
     }
 
-    /// <summary>
-    /// Serves the Pi/Antigravity/Muse wave from the cache when fresh; otherwise runs one wave
-    /// under <see cref="_discoveryLock"/> with a double-checked expiry so concurrent misses
-    /// coalesce onto a single set of discovery processes. Cancellation or an escaping
-    /// exception leaves the cache unpopulated.
-    /// </summary>
-    private async Task<ExternalCatalogs> ExternalCatalogsAsync(CancellationToken cancellationToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var cached = Volatile.Read(ref _cache);
-        if (IsFresh(cached))
+        using var timer = new PeriodicTimer(RefreshInterval, _timeProvider);
+
+        await RefreshAsync(stoppingToken).ConfigureAwait(false);
+        while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
         {
-            return cached!;
+            await RefreshAsync(stoppingToken).ConfigureAwait(false);
         }
-        if (!_discoveryLock.Wait(0, CancellationToken.None))
-        {
-            await _discoveryLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        }
+    }
+
+    /// <summary>
+    /// Runs one concurrent Pi/Antigravity/Muse discovery wave and atomically publishes the
+    /// completed result. A failed refresh preserves the last completed snapshot.
+    /// </summary>
+    private async Task RefreshAsync(CancellationToken stoppingToken)
+    {
         try
         {
-            cached = _cache;
-            if (IsFresh(cached))
-            {
-                return cached!;
-            }
-            var pi = DiscoverPiAsync(cancellationToken);
-            var antigravity = DiscoverAntigravityAsync(cancellationToken);
-            var muse = DiscoverMuseAsync(cancellationToken);
+            var pi = DiscoverPiAsync(stoppingToken);
+            var antigravity = DiscoverAntigravityAsync(stoppingToken);
+            var muse = DiscoverMuseAsync(stoppingToken);
             await Task.WhenAll(pi, antigravity, muse).ConfigureAwait(false);
-            var fresh = new ExternalCatalogs(
-                pi.Result, antigravity.Result, muse.Result,
-                _timeProvider.GetTimestamp());
-            Volatile.Write(ref _cache, fresh);
-            return fresh;
+            var snapshot = new ExternalCatalogs(pi.Result, antigravity.Result, muse.Result);
+            Volatile.Write(ref _current, snapshot);
+            _initial.TrySetResult(snapshot);
         }
-        finally
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
-            _discoveryLock.Release();
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LogRefreshFailure(_logger, ex.GetType().Name);
         }
     }
 
-    private bool IsFresh(ExternalCatalogs? cached) =>
-        cached is not null && _timeProvider.GetElapsedTime(cached.CreatedTimestamp) < CacheLifetime;
-
-    public void Dispose()
-    {
-        _discoveryLock.Dispose();
-        GC.SuppressFinalize(this);
-    }
+    [LoggerMessage(
+        EventId = 1,
+        Level = LogLevel.Warning,
+        Message = "Runtime model catalog refresh failed with {ExceptionType}.")]
+    private static partial void LogRefreshFailure(ILogger logger, string exceptionType);
 
     /// <summary>
     /// Runs the worker's catalog script, which reports every authenticated Pi model using the

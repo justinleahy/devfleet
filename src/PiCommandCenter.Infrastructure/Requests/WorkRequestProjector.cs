@@ -24,8 +24,12 @@ public static class WorkRequestProjector
             return;
         }
 
+        var isUnblocked = string.Equals(
+            nodeEvent.Type,
+            "request.unblocked",
+            StringComparison.OrdinalIgnoreCase);
         var target = InferTarget(nodeEvent);
-        if (target is null)
+        if (target is null && !isUnblocked)
         {
             return;
         }
@@ -38,7 +42,17 @@ public static class WorkRequestProjector
             return;
         }
 
-        request.TryCatchUpTo(target.Value, nodeEvent.OccurredAt);
+        if (isUnblocked)
+        {
+            if (request.Status == WorkRequestStatus.Blocked)
+            {
+                request.Unblock(nodeEvent.OccurredAt);
+            }
+
+            return;
+        }
+
+        request.TryCatchUpTo(target!.Value, nodeEvent.OccurredAt);
     }
 
     internal static WorkRequestStatus? InferTarget(NodeEventDto nodeEvent)

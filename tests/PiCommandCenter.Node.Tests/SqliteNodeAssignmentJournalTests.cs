@@ -44,6 +44,29 @@ public sealed class SqliteNodeAssignmentJournalTests : IDisposable
         Assert.True(loaded.RepositoryKnown);
         Assert.Equal(7, loaded.PendingEventCount);
     }
+    [Fact]
+    public async Task Start_blocked_supervisor_state_survives_restart_for_safe_retry()
+    {
+        var assignment = MakeAssignment(Guid.NewGuid(), marker: "start-blocked");
+        await using (var journal = CreateJournal())
+        {
+            await journal.UpsertAsync(
+                new NodeAssignmentJournalEntry(
+                    assignment,
+                    AssignmentSupervisorState.StartBlocked,
+                    RepositoryKnown: false,
+                    PendingEventCount: 1),
+                CancellationToken.None);
+        }
+
+        await using var restarted = CreateJournal();
+        var loaded = Assert.Single(await restarted.LoadAsync(CancellationToken.None));
+
+        Assert.Equal(AssignmentSupervisorState.StartBlocked, loaded.SupervisorState);
+        Assert.False(loaded.RepositoryKnown);
+        Assert.Equal(1, loaded.PendingEventCount);
+    }
+
 
     [Fact]
     public async Task Upsert_replaces_the_complete_entry_and_delete_removes_only_the_requested_assignment()

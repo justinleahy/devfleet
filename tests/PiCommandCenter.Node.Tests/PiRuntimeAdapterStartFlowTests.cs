@@ -363,6 +363,11 @@ public sealed class PiRuntimeAdapterStartFlowTests
             CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
 
+        public Task<WorkspacePreparation> PrepareWorkspaceAsync(
+            WorkspacePreparationRequest request,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
         public Task<CheckpointCommitted> CreateCheckpointCommitAsync(
             CheckpointCommitRequest request,
             CancellationToken cancellationToken = default)

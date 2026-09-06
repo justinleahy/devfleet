@@ -78,7 +78,11 @@ builder.Services.AddFluentUIComponents();
 // Node fleet transport: SignalR hub at /nodeHub (server-only; never navigated from
 // the browser) plus the background sweeper that flips silent nodes offline after
 // three missed heartbeats.
-builder.Services.AddSignalR(options => options.EnableDetailedErrors = builder.Environment.IsDevelopment());
+builder.Services.AddSignalR(options =>
+{
+    options.EnableDetailedErrors = builder.Environment.IsDevelopment();
+    options.MaximumReceiveMessageSize = 1024 * 1024;
+});
 builder.Services.Configure<NodeLivenessOptions>(
     builder.Configuration.GetSection(NodeLivenessOptions.SectionName));
 builder.Services.AddHostedService<NodeLivenessService>();

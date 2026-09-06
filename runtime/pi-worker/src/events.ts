@@ -68,7 +68,7 @@ export function normalizeEventType(sdkType: string): string {
     case "tool_execution_start":
       return "tool.started";
     case "tool_execution_update":
-      return "tool.updated";
+      return "tool.progress";
     case "tool_execution_end":
       return "tool.completed";
     case "queue_update":

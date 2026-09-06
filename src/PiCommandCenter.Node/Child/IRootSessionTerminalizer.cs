@@ -35,6 +35,11 @@ public interface IRootSessionTerminalizer
         string rootSessionId,
         string reason,
         CancellationToken cancellationToken);
+    Task<RootTerminalizationOutcome> CancelBeforeRootAsync(
+        ExecutionAssignmentMessage assignment,
+        string reason,
+        CancellationToken cancellationToken);
+
 
     Task<RootTerminalizationOutcome> FailAsync(
         ExecutionAssignmentMessage assignment,

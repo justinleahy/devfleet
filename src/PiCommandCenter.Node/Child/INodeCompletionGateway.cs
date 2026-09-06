@@ -21,7 +21,7 @@ public interface INodeCompletionGateway
     Task<CompletionGateDecision> BeginTerminalizationAsync(
         Guid projectId,
         Guid requestId,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
         string? reason,
@@ -30,7 +30,7 @@ public interface INodeCompletionGateway
     Task<CompletionGateDecision> ConfirmTerminalizationAsync(
         Guid projectId,
         Guid requestId,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
         string? reason,

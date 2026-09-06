@@ -125,6 +125,126 @@ else
             </section>
         }
 
+        @{
+            // Reduced once per load so the section reads the same snapshot as every other panel;
+            // no timer and no polling participate — LiveView reloads on committed writes.
+            var progress = _progress
+                ?? RequestExecutionProgressReader.Read(request, _sessions, _events, _snapshot);
+        }
+
+        <section class="page-section progress-section" aria-labelledby="progress-heading">
+            <div class="section-head">
+                <h2 id="progress-heading">Ongoing progress</h2>
+                <span class="section-meta">
+                    @(progress.IsRunning ? "live" : "final") &middot;
+                    reduced from @progress.EventCount persisted event@(progress.EventCount == 1 ? string.Empty : "s")
+                </span>
+            </div>
+
+            <FluentCard>
+                <div class="panel progress-panel">
+                    @if (progress.IsRunning)
+                    {
+                        <FluentProgress aria-label="@($"{progress.Phase}, running for {progress.ElapsedText}")" />
+                    }
+
+                    <p class="progress-summary" role="status" aria-live="polite" aria-atomic="true">
+                        @ProgressAnnouncement(progress)
+                    </p>
+
+                    @* Assertive only for a terminal failure; always rendered, empty otherwise, so
+                       screen readers keep one stable region instead of a re-inserted node. *@
+                    <p class="visually-hidden" role="alert" aria-live="assertive" aria-atomic="true">
+                        @FailureAnnouncement(progress)
+                    </p>
+
+                    <dl class="facts">
+                        <dt>Phase</dt>
+                        <dd>@progress.Phase</dd>
+                        <dt>Request status</dt>
+                        <dd>@progress.Status</dd>
+                        <dt>@(progress.IsRunning ? "Running for" : "Ran for")</dt>
+                        <dd>
+                            @progress.ElapsedText
+                            <span class="hint">since @progress.ElapsedSince.ToString("u")</span>
+                        </dd>
+                        <dt>Last durable activity</dt>
+                        <dd class="fact-lines">
+                            @if (progress.LastActivityAt is { } activity)
+                            {
+                                <span>@Relative(activity, _snapshot)</span>
+                                <span class="hint">@activity.ToString("u")</span>
+                            }
+                            else
+                            {
+                                <span class="hint">no session event persisted yet</span>
+                            }
+                        </dd>
+                        <dt>Persisted events</dt>
+                        <dd>@progress.EventCount</dd>
+                        <dt>Tool calls observed</dt>
+                        <dd>@progress.ToolCallCount</dd>
+                    </dl>
+
+                    <div class="progress-block">
+                        <div class="section-head is-tight">
+                            <h3 id="progress-operations-heading">Agent operations</h3>
+                        </div>
+                        @if (progress.HasOperations)
+                        {
+                            <ul class="progress-list" aria-labelledby="progress-operations-heading">
+                                @foreach (var operation in progress.Operations)
+                                {
+                                    <li>
+                                        <span class="operation-label">@operation.Role &middot; @operation.AgentName</span>
+                                        <span>@(operation.Operation ?? operation.StatusReason ?? "no operation reported")</span>
+                                        <span class="hint">
+                                            @operation.Activity &middot; <span class="mono">@operation.SessionId</span>
+                                        </span>
+                                    </li>
+                                }
+                            </ul>
+                        }
+                        else
+                        {
+                            <p class="panel-empty">
+                                @(progress.IsTerminal
+                                    ? "No agent session is still open; the final state above is retained."
+                                    : "No live agent session reports an operation right now.")
+                            </p>
+                        }
+                    </div>
+
+                    <div class="progress-block">
+                        <div class="section-head is-tight">
+                            <h3 id="progress-activity-heading">Recent durable activity</h3>
+                            <span class="section-meta">newest first &middot; last @RequestExecutionProgressReader.FactCap</span>
+                        </div>
+                        @if (progress.Facts.Count > 0)
+                        {
+                            <ol class="progress-list" aria-labelledby="progress-activity-heading">
+                                @foreach (var fact in progress.Facts)
+                                {
+                                    <li>
+                                        <span class="event-time">@Relative(fact.OccurredAt, _snapshot)</span>
+                                        <span>@fact.Label</span>
+                                        <span class="hint mono">@fact.EventType</span>
+                                    </li>
+                                }
+                            </ol>
+                        }
+                        else
+                        {
+                            <p class="panel-empty">
+                                No lifecycle, turn, tool, child, or verification event is persisted yet.
+                                The full stream stays under <a href="#timeline-heading">Event timeline</a>.
+                            </p>
+                        }
+                    </div>
+                </div>
+            </FluentCard>
+        </section>
+
         <div class="overview-grid">
             <FluentCard>
                 <section class="panel" aria-labelledby="original-heading">
@@ -1062,6 +1182,7 @@ else
     private IReadOnlyList<VerificationRunDto> _verificationRuns = Array.Empty<VerificationRunDto>();
     private IReadOnlyList<AttentionSignal> _attention = Array.Empty<AttentionSignal>();
     private RequestInsights _insights = RequestInsights.Empty;
+    private RequestExecutionProgress? _progress;
     private RequestResultDto? _result;
     private string? _verificationError;
     private string? _resultError;
@@ -1183,6 +1304,9 @@ else
         finally
         {
             _snapshot = Clock.UtcNow;
+            _progress = _request is null
+                ? null
+                : RequestExecutionProgressReader.Read(_request, _sessions, _events, _snapshot);
             _loading = false;
             _busy = false;
         }
@@ -1707,6 +1831,72 @@ else
         CompletionRequirements.ResultSummary => "the result summary is blank",
         _ => "reported by the completion gate",
     };
+
+    /// <summary>
+    /// The one sentence the stable polite region announces: semantic state only. Phase or terminal
+    /// status, plus whatever an agent reports it is doing or, failing that, the newest narrated
+    /// durable fact. Elapsed time, relative ages, and event or tool counts are deliberately absent
+    /// — they move on every safety re-read and on low-level chatter, which would make the live
+    /// region speak without the request having actually progressed. Those values stay visible in
+    /// the metric list beside it.
+    /// </summary>
+    private static string ProgressAnnouncement(RequestExecutionProgress progress)
+    {
+        var detail = ReportedOperation(progress) ?? NewestFact(progress);
+
+        if (progress.IsTerminal)
+        {
+            return detail is null
+                ? progress.Status
+                : $"{progress.Status} \u00b7 {detail}";
+        }
+
+        return detail is null
+            ? $"{progress.Phase} \u00b7 no agent operation reported"
+            : $"{progress.Phase} \u00b7 {detail}";
+    }
+
+    /// <summary>
+    /// What the assertive region says, and only for a request the control plane recorded as
+    /// failed: completion and cancellation are announced politely like any other state change.
+    /// Empty for every other state, because the region itself is always rendered.
+    /// </summary>
+    private string FailureAnnouncement(RequestExecutionProgress progress)
+    {
+        if (!progress.IsTerminal
+            || _request is not { } request
+            || (WorkRequestStatus)request.Status != WorkRequestStatus.Failed)
+        {
+            return string.Empty;
+        }
+
+        var reason = _root is { StatusReason: { } stated } && !string.IsNullOrWhiteSpace(stated)
+            ? stated
+            : NewestFact(progress);
+
+        return reason is null
+            ? $"Request {request.StatusName} \u00b7 no reason persisted"
+            : $"Request {request.StatusName} \u00b7 {reason}";
+    }
+
+    /// <summary>The first operation a still-running session reports, or its status reason.</summary>
+    private static string? ReportedOperation(RequestExecutionProgress progress)
+    {
+        foreach (var operation in progress.Operations)
+        {
+            var reported = operation.Operation ?? operation.StatusReason;
+            if (!string.IsNullOrWhiteSpace(reported))
+            {
+                return reported;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The newest narrated durable fact; facts are reduced newest first.</summary>
+    private static string? NewestFact(RequestExecutionProgress progress) =>
+        progress.Facts.Count > 0 ? progress.Facts[0].Label : null;
 
     private static string Relative(DateTimeOffset instant, DateTimeOffset now) =>
         TimeText.Relative(instant, now);

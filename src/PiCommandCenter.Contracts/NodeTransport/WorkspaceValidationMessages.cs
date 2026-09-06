@@ -11,12 +11,16 @@ public static class WorkspaceValidationStatuses
 public static class WorkspaceValidationCodes
 {
     public const string Valid = "valid";
+    public const string RepositoryInitializationRequired = "repository_initialization_required";
+    public const string BaselineCommitRequired = "baseline_commit_required";
     public const string PathMissing = "path_missing";
     public const string PathNotDirectory = "path_not_directory";
     public const string PathOutsideApprovedRoot = "path_outside_approved_root";
     public const string PathSymlink = "path_symlink";
     public const string GitUnavailable = "git_unavailable";
     public const string NotGitRepository = "not_git_repository";
+    public const string PathNotWritable = "path_not_writable";
+    public const string NestedInParentRepository = "nested_in_parent_repository";
     public const string DefaultBranchMissing = "default_branch_missing";
     public const string Unreadable = "unreadable";
     public const string InvalidRequest = "invalid_request";

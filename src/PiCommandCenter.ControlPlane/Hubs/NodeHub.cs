@@ -604,7 +604,12 @@ public sealed class NodeHub(
     {
         ArgumentNullException.ThrowIfNull(message);
         var nodeId = RequireRegisteredNodeId();
-        RequireCorrelation(message.CorrelationId, message.ProjectId, message.RequestId, message.RootSessionId);
+        RequireTerminalizationCorrelation(
+            message.CorrelationId,
+            message.ProjectId,
+            message.RequestId,
+            message.RootSessionId,
+            message.Intent);
         RequireEvidenceBounds(message.Evidence);
 
         try
@@ -614,7 +619,7 @@ public sealed class NodeHub(
                 new ProjectId(message.ProjectId),
                 new WorkRequestId(message.RequestId),
                 message.ClaimToken,
-                message.RootSessionId.Trim(),
+                message.RootSessionId?.Trim(),
                 message.Intent,
                 ToEvidence(message.Evidence),
                 message.Reason,
@@ -642,7 +647,12 @@ public sealed class NodeHub(
     {
         ArgumentNullException.ThrowIfNull(message);
         var nodeId = RequireRegisteredNodeId();
-        RequireCorrelation(message.CorrelationId, message.ProjectId, message.RequestId, message.RootSessionId);
+        RequireTerminalizationCorrelation(
+            message.CorrelationId,
+            message.ProjectId,
+            message.RequestId,
+            message.RootSessionId,
+            message.Intent);
         RequireEvidenceBounds(message.Evidence);
         ArgumentNullException.ThrowIfNull(message.Proof);
 
@@ -653,7 +663,7 @@ public sealed class NodeHub(
                 new ProjectId(message.ProjectId),
                 new WorkRequestId(message.RequestId),
                 message.ClaimToken,
-                message.RootSessionId.Trim(),
+                message.RootSessionId?.Trim(),
                 message.Intent,
                 ToEvidence(message.Evidence),
                 message.Reason,
@@ -1124,6 +1134,40 @@ public sealed class NodeHub(
         var recipient = delivered.Recipients.Single(r =>
             string.Equals(r.SessionId, recipientSessionId, StringComparison.Ordinal));
         return new MailReceiptMessage(delivered.Id, recipientSessionId, recipient.ReadAtUtc, recipient.AcknowledgedAtUtc);
+    }
+
+    private static void RequireTerminalizationCorrelation(
+        Guid correlationId,
+        Guid projectId,
+        Guid requestId,
+        string? rootSessionId,
+        TerminalizationIntent intent)
+    {
+        if (correlationId == Guid.Empty)
+        {
+            throw new HubException("Correlation id is required.");
+        }
+
+        if (projectId == Guid.Empty)
+        {
+            throw new HubException("Project id is required.");
+        }
+
+        if (requestId == Guid.Empty)
+        {
+            throw new HubException("Request id is required.");
+        }
+
+        if (intent != TerminalizationIntent.Cancel
+            && string.IsNullOrWhiteSpace(rootSessionId))
+        {
+            throw new HubException("Root session id is required outside pre-session cancellation.");
+        }
+
+        if (rootSessionId?.Length > NodeTransportLimits.MaxSessionIdLength)
+        {
+            throw new HubException("Root session id is too long.");
+        }
     }
 
     private static void RequireCorrelation(Guid correlationId, Guid projectId, Guid requestId, string sessionId)

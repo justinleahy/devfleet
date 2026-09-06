@@ -13,12 +13,16 @@ namespace PiCommandCenter.Application.Completion;
 /// </summary>
 public interface IAssignmentTerminalizationService
 {
+    /// <param name="rootSessionId">
+    /// The root session identity; null is valid only for pre-root <see cref="TerminalizationIntent.Cancel"/>
+    /// when the assignment never registered a root session.
+    /// </param>
     Task<CompletionGateDecision> BeginAsync(
         NodeId nodeId,
         ProjectId projectId,
         WorkRequestId requestId,
         string claimToken,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
         string? reason,
@@ -29,7 +33,7 @@ public interface IAssignmentTerminalizationService
         ProjectId projectId,
         WorkRequestId requestId,
         string claimToken,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
         string? reason,

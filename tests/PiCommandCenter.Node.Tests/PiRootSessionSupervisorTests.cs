@@ -62,7 +62,9 @@ public class PiRootSessionSupervisorTests : IDisposable
             string workerScriptName,
             int requestTimeoutSeconds = 30,
             FakeRootSessionTerminalizer? terminalizer = null,
-            StubCrash? crashRecovery = null)
+            StubCrash? crashRecovery = null,
+            PiCommandCenter.Application.Git.ITrustedGitService? gitService = null,
+            IRepositoryInspector? inspector = null)
     {
         var spoolPath = Path.Combine(_root, "spool.db");
         var agentData = Path.Combine(_root, "agent-data");
@@ -93,12 +95,13 @@ public class PiRootSessionSupervisorTests : IDisposable
             Options.Create(new NodeOptions { RequireCleanStart = false }),
             adapter,
             spool,
-            new StubInspector(),
+            inspector ?? new StubInspector(),
             new RequestWorkspaceTracker(),
             crashRecovery ?? new StubCrash(),
             terminalizer ?? new FakeRootSessionTerminalizer(),
             TimeProvider.System,
-            new FileLogger<PiRootSessionSupervisor>(logPath));
+            new FileLogger<PiRootSessionSupervisor>(logPath),
+            gitService);
         return (supervisor, spool, handler);
     }
 
@@ -154,6 +157,26 @@ public class PiRootSessionSupervisorTests : IDisposable
         // The supervisor never answers custom-tool requests itself; the fake worker sent none.
         Assert.Empty(handler.Requests);
     }
+    [Fact]
+    public async Task Concurrent_starts_for_one_assignment_share_one_root_session()
+    {
+        var (supervisor, spool, _) = CreateWorld("fake-pi-worker.mjs");
+        await using var _ = supervisor;
+        var assignment = MakeAssignment(
+            Directory.CreateDirectory(Path.Combine(_root, "concurrent-repo")).FullName);
+
+        var sessions = await Task.WhenAll(
+            supervisor.StartForAssignmentAsync(assignment, CancellationToken.None),
+            supervisor.StartForAssignmentAsync(assignment, CancellationToken.None));
+
+        Assert.Equal(sessions[0], sessions[1]);
+        Assert.Single(supervisor.ActiveSessionIds);
+        var pending = await SpoolAwaitingAsync(
+            spool,
+            events => events.Any(e => e.Type == "session.registered"));
+        Assert.Single(pending, e => e.Type == "session.registered");
+    }
+
 
     [Fact]
     public async Task Cancelling_a_root_session_is_terminal_and_idempotent()
@@ -271,6 +294,45 @@ public class PiRootSessionSupervisorTests : IDisposable
         Assert.Empty(supervisor.ActiveSessionIds);
     }
 
+    [Fact]
+    public async Task Workspace_preparation_runs_before_baseline_request_branch_and_runtime_start()
+    {
+        var order = new List<string>();
+        var git = new RecordingGitService(order);
+        var (supervisor, spool, _) = CreateWorld(
+            "fake-pi-worker.mjs",
+            gitService: git,
+            inspector: new StubInspector(() => order.Add("baseline")));
+        await using var _ = supervisor;
+        var assignment = MakeAssignment(
+            Directory.CreateDirectory(Path.Combine(_root, "prep-repo")).FullName)
+            with
+        { CreateRequestBranch = true };
+
+        var sessionId = await supervisor.StartForAssignmentAsync(
+            assignment,
+            CancellationToken.None,
+            _ =>
+            {
+                order.Add("prepared");
+                return Task.CompletedTask;
+            });
+
+        Assert.Equal(["prepare", "baseline", "branch", "prepared"], order);
+        var prepared = Assert.Single(git.Preparations);
+        Assert.Equal(assignment.RequestId, prepared.RequestId);
+        Assert.Equal(assignment.CanonicalRepositoryPathSnapshot, prepared.RepositoryPath);
+        Assert.Equal(assignment.DefaultBranchSnapshot, prepared.DefaultBranch);
+        var branch = Assert.Single(git.Branches);
+        Assert.Equal(assignment.RequestId, branch.RequestId);
+        Assert.StartsWith("request/", branch.BranchName);
+
+        var pending = await SpoolAwaitingAsync(spool, events => events.Any(e => e.Type == "session.registered"));
+        var registered = Assert.Single(pending, e => e.Type == "session.registered");
+        Assert.Equal(sessionId, registered.SessionId);
+        Assert.Contains(branch.BranchName, registered.PayloadJson);
+    }
+
     private sealed class FileLogger<T> : ILogger<T>
     {
         private readonly string _path;
@@ -311,11 +373,46 @@ public class PiRootSessionSupervisorTests : IDisposable
         }
     }
 
-    private sealed class StubInspector : IRepositoryInspector
+    private sealed class RecordingGitService(List<string> order)
+        : PiCommandCenter.Application.Git.ITrustedGitService
+    {
+        public List<PiCommandCenter.Application.Git.WorkspacePreparationRequest> Preparations { get; } = [];
+        public List<PiCommandCenter.Application.Git.RequestBranchRequest> Branches { get; } = [];
+
+        public Task<PiCommandCenter.Application.Git.WorkspacePreparation> PrepareWorkspaceAsync(
+            PiCommandCenter.Application.Git.WorkspacePreparationRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            order.Add("prepare");
+            Preparations.Add(request);
+            return Task.FromResult(new PiCommandCenter.Application.Git.WorkspacePreparation(
+                request.RepositoryPath, request.DefaultBranch, "baseline-commit"));
+        }
+
+        public Task<PiCommandCenter.Application.Git.RequestBranchCreated> CreateRequestBranchAsync(
+            PiCommandCenter.Application.Git.RequestBranchRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            order.Add("branch");
+            Branches.Add(request);
+            return Task.FromResult(new PiCommandCenter.Application.Git.RequestBranchCreated(
+                request.BranchName, "base-commit"));
+        }
+
+        public Task<PiCommandCenter.Application.Git.CheckpointCommitted> CreateCheckpointCommitAsync(
+            PiCommandCenter.Application.Git.CheckpointCommitRequest request,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class StubInspector(Action? onBaseline = null) : IRepositoryInspector
     {
         public Task<RepositoryBaseline> CaptureBaselineAsync(
             string repositoryRoot, bool requireCleanStart, bool allowUntrackedFiles, CancellationToken cancellationToken)
-            => Task.FromResult(new RepositoryBaseline("main", "abc123", "", true, []));
+        {
+            onBaseline?.Invoke();
+            return Task.FromResult(new RepositoryBaseline("main", "abc123", "", true, []));
+        }
 
         public Task<RepositoryDiffInspection> InspectDiffAsync(
             string repositoryRoot, string baseCommit, IReadOnlyList<ReservationLeaseInfo> leases, CancellationToken cancellationToken)

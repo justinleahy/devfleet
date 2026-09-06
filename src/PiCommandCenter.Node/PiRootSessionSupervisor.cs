@@ -34,6 +34,7 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
     private readonly Application.Git.ITrustedGitService? _gitService;
     private readonly CancellationTokenSource _disposeCts = new();
     private readonly ConcurrentDictionary<Guid, ActiveRootSession> _sessions = new();
+    private readonly ConcurrentDictionary<Guid, SemaphoreSlim> _startGates = new();
     private int _disposed;
 
     public PiRootSessionSupervisor(
@@ -75,7 +76,34 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
     /// <summary>Starts one restricted root session for the execution assignment and persists its lifecycle.</summary>
     public async Task<string> StartForAssignmentAsync(
         ExecutionAssignmentMessage assignment,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? preparationCompleted = null)
+    {
+        ArgumentNullException.ThrowIfNull(assignment);
+        var gate = _startGates.GetOrAdd(assignment.RequestId, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_sessions.TryGetValue(assignment.RequestId, out var active))
+            {
+                return active.SessionId;
+            }
+
+            return await StartForAssignmentCoreAsync(
+                assignment,
+                cancellationToken,
+                preparationCompleted).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async Task<string> StartForAssignmentCoreAsync(
+        ExecutionAssignmentMessage assignment,
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? preparationCompleted)
     {
         ArgumentNullException.ThrowIfNull(assignment);
         ArgumentException.ThrowIfNullOrWhiteSpace(assignment.ClaimToken);
@@ -85,6 +113,21 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
                 $"Claim token must not exceed {NodeAssignmentCredential.MaxClaimTokenLength} characters.",
                 nameof(assignment.ClaimToken));
         }
+        // Supervisor-owned workspace preparation runs before baseline capture, request branch
+        // creation, and runtime start: ordinary directories are initialized with one baseline
+        // commit, unborn repositories are completed, and committed repositories are only
+        // revalidated. Preparation is idempotent, so retries of the same assignment are safe.
+        if (_gitService is not null)
+        {
+            await _gitService.PrepareWorkspaceAsync(
+                new Application.Git.WorkspacePreparationRequest(
+                    assignment.RequestId,
+                    assignment.CanonicalRepositoryPathSnapshot,
+                    assignment.DefaultBranchSnapshot),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+
         RepositoryBaseline baseline;
         try
         {
@@ -140,6 +183,10 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
                 cancellationToken).ConfigureAwait(false);
             requestBranch = created.BranchName;
             baseCommitId = created.BaseCommitId;
+        }
+        if (preparationCompleted is not null)
+        {
+            await preparationCompleted(cancellationToken).ConfigureAwait(false);
         }
 
         var handle = await _adapter.StartAsync(startRequest, cancellationToken).ConfigureAwait(false);

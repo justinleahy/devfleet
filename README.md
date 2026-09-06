@@ -31,7 +31,9 @@ node --version     # v26+
 
 ## Project placement model
 
-A **Project** is fleet-owned metadata and policy. It has no `NodeId` or repository path, so registration works with no node or checkout. In the initial phase each Project has zero or one **WorkspaceBinding**, which designates one node-local checkout. The designation UI browses the selected authenticated node's directories under that node's `Projects:ApprovedRoots` (null path lists those roots; each request returns one direct directory level; there is no manual path field). The control plane never inspects node filesystems. Choosing a folder only records a path; the selected node still validates the binding's current revision (Git, default branch, approved-root containment) on its own filesystem. Editing the node, path, or validation inputs makes the binding pending again.
+A **Project** is fleet-owned metadata and policy. It has no `NodeId` or repository path, so registration works with no node or checkout. In the initial phase each Project has zero or one **WorkspaceBinding**, which designates one node-local workspace directory. The designation UI browses the selected authenticated node's directories under that node's `Projects:ApprovedRoots` (null path lists those roots; each request returns one direct directory level; there is no manual path field). The control plane never inspects node filesystems. Choosing a folder only records a path; the selected node still classifies the binding's current revision on its own filesystem. Because browse cannot inspect Git, the designation form always states the consent warning first: designating a directory consents to node-local Git metadata changes, made only when they are needed.
+
+The directory does not have to be a Git checkout already. Classification is read-only and returns one of three preparable results — `valid` (repository with commits on the configured default branch), `repository_initialization_required` (ordinary directory), or `baseline_commit_required` (repository with no commits) — each with status valid and the node's canonical path. An existing repository with commits that lacks the configured default branch stays `default_branch_missing`. When the first request starts, the assigned node's supervisor prepares the workspace after journaling the assignment and before baseline capture, request-branch creation, and root start: it initializes the repository and/or commits the directory's existing non-ignored contents as `Initialize workspace for DevFleet` using a fixed command-local identity, never touching global or repository Git configuration and never adding remotes, hooks, or credential helpers. Preparation and request-branch creation are idempotent. Editing the node, path, or validation inputs makes the binding pending again.
 
 Requests can be enqueued while a Project is unbound or its node is offline and remain `Queued` with a scheduling reason. When the designated binding becomes eligible, the control plane atomically creates a durable **ExecutionAssignment** containing the request's immutable node, path, branch, and binding-revision snapshot. Only the connection authenticated as that assigned node, with the assignment token, may act for the request, and every child stays on that node and workspace.
 
@@ -228,10 +230,12 @@ authenticated Pi provider, so every reported selector is runnable.
 Authenticated operators can edit these routes at `/routing`. The page talks to the
 selected online node over the existing SignalR connection; updates take effect for the
 next child spawn and are persisted as `role-routes.json` under `Pi:AgentDataDirectory`.
-**Refresh models** queries the node's authenticated Pi providers, `agy models`, and Muse's
-`model/list`. Those three discovery snapshots are cached in memory on the node for five
-minutes, so repeated refreshes reuse the last completed snapshot instead of relaunching
-every discovery process. Claude aliases and configured route selectors are recomputed from
+**Refresh models** reads the node's in-memory catalog cache. The node collects the
+authenticated Pi providers, `agy models`, and Muse's `model/list` once at startup and then
+refreshes them automatically every five minutes, so refreshes reuse the last completed
+snapshot instead of relaunching every discovery process; a failed refresh keeps the prior
+snapshot.
+Claude aliases and configured route selectors are recomputed from
 live routing on every request. Claude Code cannot export its authenticated model picker, so DevFleet
 offers a maintained list of stable aliases (`default`, `fable`, `sonnet`, `opus`, and
 `haiku`) plus any full Claude selectors already used in a route. Muse 1.0.3's bundled

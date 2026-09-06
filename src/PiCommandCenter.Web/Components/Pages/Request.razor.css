@@ -269,6 +269,15 @@ h3 {
     overflow-wrap: anywhere;
 }
 
+/* A relative age and its absolute stamp are two facts, not one string. They own
+   separate lines at phone width so the pair never depends on collapsible
+   whitespace between an expression and the span that follows it. */
+.facts dd.fact-lines {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 0.5px);
+}
+
 .mono {
     font-family: var(--monospace-font-family, ui-monospace, monospace);
     font-size: var(--type-ramp-minus-1-font-size);
@@ -568,6 +577,56 @@ details[open] > summary {
     min-width: 0;
 }
 
+/* Ongoing progress. Phone-first: the announcement, the facts, and each activity
+   row stack in one column at 320px; nothing here animates once the request is
+   terminal, because the final state is what stays on screen. */
+.progress-panel {
+    gap: calc(var(--design-unit) * 3px);
+}
+
+.progress-panel ::deep fluent-progress {
+    width: 100%;
+}
+
+.progress-summary {
+    margin: 0;
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
+    overflow-wrap: anywhere;
+}
+
+.progress-block {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.progress-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.progress-list li {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    padding-block: calc(var(--design-unit) * 2px);
+    padding-inline-start: calc(var(--design-unit) * 2px);
+    border-block-start: 1px solid var(--neutral-stroke-divider-rest);
+    border-inline-start: 2px solid var(--accent-fill-rest);
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.progress-list li:first-child {
+    border-block-start: 0;
+}
+
 /* Small: headings share a row with their metadata, facts pair up */
 @media (min-width: 600px) {
     .page-head-actions {
@@ -606,6 +665,14 @@ details[open] > summary {
         margin-block-end: 0;
     }
 
+    /* Enough room to read as one line, with an explicit gap doing the parting. */
+    .facts dd.fact-lines {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: calc(var(--design-unit) * 2px);
+    }
+
     .operation {
         flex-direction: row;
         flex-wrap: wrap;
@@ -631,6 +698,19 @@ details[open] > summary {
         gap: calc(var(--design-unit) * 2px);
     }
 
+    /* Each activity and operation row reads as one line once there is room. */
+    .progress-list li {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: calc(var(--design-unit) * 3px);
+        row-gap: calc(var(--design-unit) * 1px);
+    }
+
+    .progress-list .event-time {
+        min-width: 6ch;
+    }
+
     .run {
         align-items: center;
     }
@@ -653,6 +733,12 @@ details[open] > summary {
 
     .run-grid {
         grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    }
+
+    .progress-summary {
+        max-width: 90ch;
+        font-size: var(--type-ramp-plus-2-font-size);
+        line-height: var(--type-ramp-plus-2-line-height);
     }
 
     .back-link {

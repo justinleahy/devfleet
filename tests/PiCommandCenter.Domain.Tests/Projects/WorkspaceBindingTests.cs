@@ -108,6 +108,28 @@ public sealed class WorkspaceBindingTests
         Assert.Equal(validatedAt, binding.UpdatedAt);
         Assert.Equal(2, binding.Version);
     }
+    [Theory]
+    [InlineData(WorkspaceBinding.ValidValidationCode)]
+    [InlineData(WorkspaceBinding.RepositoryInitializationRequiredValidationCode)]
+    [InlineData(WorkspaceBinding.BaselineCommitRequiredValidationCode)]
+    public void Every_preparable_classification_is_a_valid_binding(string validationCode)
+    {
+        var binding = Designate();
+
+        var applied = binding.ApplyValidationResult(
+            binding.NodeId,
+            binding.ValidationRevision,
+            WorkspaceBindingStatus.Valid,
+            validationCode,
+            "Preparation classification.",
+            "/srv/repos/fleet",
+            DesignatedAt.AddMinutes(1));
+
+        Assert.True(applied);
+        Assert.Equal(WorkspaceBindingStatus.Valid, binding.Status);
+        Assert.Equal(validationCode, binding.ValidationCode);
+    }
+
 
     [Fact]
     public void Apply_invalid_result_stores_bounded_safe_code_and_detail()

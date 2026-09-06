@@ -219,6 +219,37 @@ public class AssignmentTerminalizationServiceTests
         Assert.Equal(ExecutionAssignmentState.Cancelling, Assignment(world).State);
         Assert.Equal(WorkRequestStatus.Cancelling, Request(world).Status);
     }
+    [Fact]
+    public async Task Pre_root_cancel_accepts_null_session_correlation()
+    {
+        var world = await SeedAsync(happy: true, markRunning: false);
+
+        var begin = await world.Service.BeginAsync(
+            world.NodeId,
+            new ProjectId(world.ProjectId),
+            world.RequestId,
+            ClaimToken,
+            rootSessionId: null,
+            TerminalizationIntent.Cancel,
+            evidence: null,
+            reason: "operator stop");
+        var confirm = await world.Service.ConfirmAsync(
+            world.NodeId,
+            new ProjectId(world.ProjectId),
+            world.RequestId,
+            ClaimToken,
+            rootSessionId: null,
+            TerminalizationIntent.Cancel,
+            evidence: null,
+            reason: "operator stop",
+            CleanProof);
+
+        Assert.True(begin.Accepted, string.Join(",", begin.MissingRequirements));
+        Assert.True(confirm.Accepted, string.Join(",", confirm.MissingRequirements));
+        Assert.Equal(ExecutionAssignmentState.Cancelled, Assignment(world).State);
+        Assert.Equal(WorkRequestStatus.Cancelled, Request(world).Status);
+    }
+
 
     [Theory]
     [InlineData("AdmissionClosed")]

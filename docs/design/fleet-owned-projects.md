@@ -86,7 +86,7 @@ Initial aggregate with one row at most per Project:
 
 Liveness is not binding status. A valid binding can be temporarily ineligible because its node is offline. A missing path is a validation result, not proof that the Project is invalid.
 
-The node validates existence, directory type, approved-root containment, symlink rules, Git repository status, Git availability, default branch, readability, and the no-application-worktree rule. Editing `NodeId`, path, branch policy, or validation inputs increments the binding revision and returns it to `PendingValidation`. A response for an older revision is ignored.
+The node validates existence, directory type, approved-root containment, symlink rules, readability and writability, Git availability, `.git` metadata sanity, the no-application-worktree rule, and — for a repository that already has commits — the configured default branch. The result is a read-only preparation classification: `valid`, `repository_initialization_required` (ordinary directory), and `baseline_commit_required` (unborn repository) are all `Valid` with the canonical path, while a directory nested inside another repository is `nested_in_parent_repository` and an existing repository missing the configured branch is `default_branch_missing`. Classification changes nothing on disk; the node supervisor performs the local Git preparation later, inside the assignment. Editing `NodeId`, path, branch policy, or validation inputs increments the revision and resets validation to `PendingValidation`.
 
 ### ExecutionAssignment
 
@@ -299,7 +299,7 @@ The TypeScript Pi worker NDJSON protocol remains version 1; these are SignalR co
 | Control plane restarts | SQLite assignment survives. Node reconnects, inventory/reconciliation happens before `ClaimNext`, then spool replay. |
 | Node process restarts | Owner-only local assignment journal survives. Supervisor first proves old process trees are stopped or reattaches where supported; otherwise marks recovery required and captures repository state. It does not forget the assignment and claim replacement work. |
 | Node never returns | Assignment remains recovery required until an administrator performs audited recovery/cancellation. No transparent failover. |
-| Startup validation/runtime failure after assignment | Request becomes blocked on the assignment. The assignment is retained; it is not returned to the queue for another node. |
+| Startup validation/runtime failure after assignment | The node journals `StartBlocked` and publishes one assignment-scoped `request.blocked` event with the failing phase and no fabricated session identity. The assignment is retained and retryable on the same assignment; it is not returned to the queue for another node, and it reconciles as retained rather than `RecoveryRequired`. Cancelling a `StartBlocked` or `Starting` assignment with no root proves quiescence and terminalizes without inventing a session. |
 
 The current `NodeWorker` behavior that removes a rejected renewal from its in-memory dictionary without stopping/reconciling the root must change. Local removal is bookkeeping, never release of write ownership.
 
@@ -314,7 +314,7 @@ The current `NodeWorker` behavior that removes a rejected renewal from its in-me
 
 ### Project page
 
-A Workspace panel shows node, canonical path, validation status/time/revision, eligibility, and actions to designate/edit/revalidate/remove. Removing/replacing is disabled while referenced by a nonterminal or recovery assignment. Request composer remains enabled without a workspace and states that requests stay queued until the designated workspace is eligible.
+A Workspace panel shows node, canonical path, validation status/time/revision, eligibility, and actions to designate/edit/revalidate/remove. Designation always shows the operator-consent warning beside the action before submission, because browse cannot inspect Git: it states that designating consents to node-local Git metadata changes made only when needed, and contains the exact sentence `This directory is not a Git repository. DevFleet will initialize it and commit its existing non-ignored contents when the first request starts.` Removing/replacing is disabled while referenced by a nonterminal or recovery assignment. Request composer remains enabled without a workspace and states that requests stay queued until the designated workspace is eligible.
 
 ### Request page
 

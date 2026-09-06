@@ -523,6 +523,31 @@ public sealed class NodeHubTests : IClassFixture<ControlPlaneFixture>, IDisposab
     }
 
     [Fact]
+    public async Task PublishEvents_accepts_a_replay_batch_larger_than_the_SignalR_default()
+    {
+        await RegisterNodeAsync();
+        var assignment = await SeedAssignmentAsync(WorkRequestKind.Development);
+        var payload = """{"message":"__PAYLOAD__"}"""
+            .Replace("__PAYLOAD__", new string('x', 5 * 1024), StringComparison.Ordinal);
+        var events = Enumerable.Range(1, 88)
+            .Select(sequence => CreateEvent(
+                assignment,
+                assignment.SessionId,
+                sequence,
+                "sdk.message_update") with
+            {
+                PayloadJson = payload,
+            })
+            .ToArray();
+
+        var acknowledgement = await _connection.InvokeAsync<NodeEventAcknowledgementMessage>(
+            "PublishEvents",
+            new NodeEventBatchMessage(events));
+
+        Assert.Equal(events.Select(@event => @event.EventId), acknowledgement.EventIds);
+    }
+
+    [Fact]
     public async Task PublishEvents_rejects_batches_over_the_transport_limit()
     {
         await RegisterNodeAsync();

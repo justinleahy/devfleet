@@ -235,6 +235,22 @@ describe("event normalization", () => {
     const ids = new Set(events.map((frame) => frame.messageId));
     assert.equal(ids.size, events.length, "event ids must be unique");
   });
+
+  it("maps tool start, update, and end to started, progress, and completed with tool identity", async () => {
+    const h = await harness();
+    h.session.emit({ type: "tool_execution_start", toolName: "read_file" });
+    h.session.emit({ type: "tool_execution_update", toolName: "read_file" });
+    h.session.emit({ type: "tool_execution_end", toolName: "read_file" });
+
+    const events = h.framesOfKind("event");
+    const types = events.map((frame) => frame.type);
+    assert.deepEqual(types, ["tool.started", "tool.progress", "tool.completed"]);
+    assert.equal(types.includes("tool.updated"), false);
+    for (const frame of events) {
+      const data = (frame.payload as Record<string, unknown>)["data"] as Record<string, unknown>;
+      assert.equal(data["toolName"], "read_file");
+    }
+  });
 });
 
 describe("heartbeat and goodbye", () => {

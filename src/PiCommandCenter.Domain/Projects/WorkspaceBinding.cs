@@ -36,6 +36,14 @@ public sealed class WorkspaceBinding
     public const int MaxValidationCodeLength = 64;
     public const int MaxValidationDetailLength = 512;
     public const string ValidValidationCode = "valid";
+    public const string RepositoryInitializationRequiredValidationCode = "repository_initialization_required";
+    public const string BaselineCommitRequiredValidationCode = "baseline_commit_required";
+
+    /// <summary>Valid results are classified as committed, ordinary, or unborn; nothing else is valid.</summary>
+    public static bool IsValidValidationCode(string? code) =>
+        code is ValidValidationCode
+            or RepositoryInitializationRequiredValidationCode
+            or BaselineCommitRequiredValidationCode;
 
     private WorkspaceBinding(
         WorkspaceBindingId id,
@@ -274,23 +282,22 @@ public sealed class WorkspaceBinding
 
         if (status == WorkspaceBindingStatus.Valid)
         {
-            if (!string.Equals(code, ValidValidationCode, StringComparison.Ordinal))
+            if (!IsValidValidationCode(code))
             {
                 throw new ArgumentException(
-                    $"A valid result must use the '{ValidValidationCode}' validation code.",
+                    "A valid result must use a recognized preparation classification code.",
                     nameof(validationCode));
             }
-
             var canonicalPath = NormalizeAbsolutePath(
                 canonicalRepositoryPath,
                 nameof(canonicalRepositoryPath));
             return new ValidationState(canonicalPath, code, detail);
         }
 
-        if (string.Equals(code, ValidValidationCode, StringComparison.Ordinal))
+        if (IsValidValidationCode(code))
         {
             throw new ArgumentException(
-                $"An invalid result must not use the '{ValidValidationCode}' validation code.",
+                "An invalid result must not use a valid preparation classification code.",
                 nameof(validationCode));
         }
 

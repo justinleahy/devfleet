@@ -16,7 +16,22 @@ public sealed class RestrictedGitServiceTests : IDisposable
     private readonly RestrictedGitService _service = new("git", TestTimeout);
     private readonly string _repo = CreateRepo();
 
-    public void Dispose() => Directory.Delete(Path.GetDirectoryName(_repo)!, recursive: true);
+    public void Dispose()
+    {
+        Directory.Delete(Path.GetDirectoryName(_repo)!, recursive: true);
+        foreach (var root in _tempRoots)
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    private readonly System.Collections.Generic.List<string> _tempRoots = new();
 
     [Fact]
     public async Task CreateRequestBranch_creates_branch_from_default_branch()
@@ -30,13 +45,37 @@ public sealed class RestrictedGitServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task CreateRequestBranch_rejects_an_existing_branch()
+    public async Task CreateRequestBranch_retry_for_the_same_request_is_idempotent()
+    {
+        var requestId = Guid.NewGuid();
+        var first = await _service.CreateRequestBranchAsync(new RequestBranchRequest(
+            requestId, _repo, "main", "request/dup"));
+        _ = await GitAsync("checkout", "main");
+
+        // A retry after an interrupted start finds the branch still at the default branch tip.
+        var second = await _service.CreateRequestBranchAsync(new RequestBranchRequest(
+            requestId, _repo, "main", "request/dup"));
+
+        Assert.Equal(first.BranchName, second.BranchName);
+        Assert.Equal(first.BaseCommitId, second.BaseCommitId);
+        var currentBranch = await GitAsync("branch", "--show-current");
+        Assert.Equal("request/dup", currentBranch);
+        var count = await GitAsync("rev-list", "--count", "main");
+        Assert.Equal("1", count);
+    }
+
+    [Fact]
+    public async Task CreateRequestBranch_rejects_a_divergent_preexisting_branch()
     {
         await _service.CreateRequestBranchAsync(new RequestBranchRequest(
-            Guid.NewGuid(), _repo, "main", "request/dup"));
+            Guid.NewGuid(), _repo, "main", "request/divergent"));
+        await File.WriteAllTextAsync(Path.Combine(_repo, "extra.txt"), "diverged");
+        await _service.CreateCheckpointCommitAsync(new CheckpointCommitRequest(
+            Guid.NewGuid(), _repo, "request/divergent", "advance", ["extra.txt"]));
+        await GitAsync("checkout", "main");
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => _service.CreateRequestBranchAsync(
-            new RequestBranchRequest(Guid.NewGuid(), _repo, "main", "request/dup")));
+            new RequestBranchRequest(Guid.NewGuid(), _repo, "main", "request/divergent")));
     }
 
     [Theory]
@@ -85,6 +124,136 @@ public sealed class RestrictedGitServiceTests : IDisposable
                 Guid.NewGuid(), _repo, "request/not-checked-out", "message", ["README.md"])));
     }
 
+    [Fact]
+    public async Task PrepareWorkspace_initializes_an_empty_ordinary_directory()
+    {
+        var dir = NewTempDirectory("empty");
+
+        var prepared = await _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), dir, "main"));
+
+        Assert.Equal("main", prepared.Branch);
+        Assert.Equal("main", await GitInAsync(dir, "symbolic-ref", "--short", "HEAD"));
+        Assert.Equal(prepared.BaselineCommitId, await GitInAsync(dir, "rev-parse", "HEAD"));
+        Assert.Equal("1", await GitInAsync(dir, "rev-list", "--count", "HEAD"));
+        Assert.Equal(
+            RestrictedGitService.BaselineCommitMessage,
+            await GitInAsync(dir, "log", "-1", "--format=%s"));
+        Assert.Equal("DevFleet Supervisor", await GitInAsync(dir, "log", "-1", "--format=%an"));
+        Assert.Equal("devfleet@localhost", await GitInAsync(dir, "log", "-1", "--format=%ae"));
+        // Empty directory: the baseline commit still exists but tracks nothing.
+        Assert.Equal(string.Empty, await GitInAsync(dir, "ls-tree", "--name-only", "HEAD"));
+    }
+
+    [Fact]
+    public async Task PrepareWorkspace_stages_only_nonignored_contents_of_an_ordinary_directory()
+    {
+        var dir = NewTempDirectory("nonempty");
+        await File.WriteAllTextAsync(Path.Combine(dir, "app.cs"), "class App {}");
+        await File.WriteAllTextAsync(Path.Combine(dir, ".gitignore"), "bin/\n*.log\n");
+        Directory.CreateDirectory(Path.Combine(dir, "bin"));
+        await File.WriteAllTextAsync(Path.Combine(dir, "bin", "app.dll"), "ignored");
+        await File.WriteAllTextAsync(Path.Combine(dir, "debug.log"), "ignored");
+
+        var prepared = await _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), dir, "main"));
+
+        var tracked = (await GitInAsync(dir, "ls-tree", "-r", "--name-only", "HEAD"))
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.Equal([".gitignore", "app.cs"], tracked);
+        Assert.Equal(string.Empty, await GitInAsync(dir, "status", "--porcelain"));
+        Assert.NotEmpty(prepared.BaselineCommitId);
+    }
+
+    [Fact]
+    public async Task PrepareWorkspace_completes_the_baseline_for_an_unborn_repository()
+    {
+        var dir = NewTempDirectory("unborn");
+        Git(dir, "init", "--initial-branch=main");
+        await File.WriteAllTextAsync(Path.Combine(dir, "seed.txt"), "seed");
+
+        var prepared = await _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), dir, "main"));
+
+        Assert.Equal("1", await GitInAsync(dir, "rev-list", "--count", "HEAD"));
+        Assert.Equal(
+            RestrictedGitService.BaselineCommitMessage,
+            await GitInAsync(dir, "log", "-1", "--format=%s"));
+        Assert.Equal("seed.txt", await GitInAsync(dir, "ls-tree", "--name-only", "HEAD"));
+        Assert.Equal(prepared.BaselineCommitId, await GitInAsync(dir, "rev-parse", "HEAD"));
+    }
+
+    [Fact]
+    public async Task PrepareWorkspace_leaves_existing_history_unchanged()
+    {
+        var headBefore = await GitAsync("rev-parse", "HEAD");
+
+        var prepared = await _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), _repo, "main"));
+
+        Assert.Equal(headBefore, prepared.BaselineCommitId);
+        Assert.Equal("1", await GitAsync("rev-list", "--count", "HEAD"));
+        Assert.Equal("initial", await GitAsync("log", "-1", "--format=%s"));
+        Assert.Equal("main", prepared.Branch);
+    }
+
+    [Fact]
+    public async Task PrepareWorkspace_retry_after_interrupted_initialization_creates_one_commit()
+    {
+        // Simulates a retry after init succeeded but the baseline commit did not.
+        var dir = NewTempDirectory("interrupted");
+        Git(dir, "init", "--initial-branch=main");
+        await File.WriteAllTextAsync(Path.Combine(dir, "work.txt"), "work");
+
+        var first = await _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), dir, "main"));
+        var second = await _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), dir, "main"));
+
+        Assert.Equal(first.BaselineCommitId, second.BaselineCommitId);
+        Assert.Equal("1", await GitInAsync(dir, "rev-list", "--count", "HEAD"));
+    }
+
+    [Fact]
+    public async Task PrepareWorkspace_refuses_a_branch_mismatch()
+    {
+        await GitAsync("checkout", "-b", "other");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), _repo, "main")));
+    }
+
+    [Fact]
+    public async Task PrepareWorkspace_refuses_a_dirty_committed_repository()
+    {
+        await File.WriteAllTextAsync(Path.Combine(_repo, "README.md"), "modified\n");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), _repo, "main")));
+    }
+
+    [Fact]
+    public async Task PrepareWorkspace_refuses_a_directory_nested_inside_another_repository()
+    {
+        var nested = Path.Combine(_repo, "nested-dir");
+        Directory.CreateDirectory(nested);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), nested, "main")));
+    }
+
+    [Fact]
+    public async Task PrepareWorkspace_refuses_a_linked_worktree()
+    {
+        var root = Directory.CreateTempSubdirectory("pi-cc-git").FullName;
+        _tempRoots.Add(root);
+        var worktree = Path.Combine(root, "worktree");
+        await GitAsync("worktree", "add", worktree, "-b", "wt");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => _service.PrepareWorkspaceAsync(
+            new WorkspacePreparationRequest(Guid.NewGuid(), worktree, "main")));
+    }
+
     private static string CreateRepo()
     {
         var root = Directory.CreateTempSubdirectory("pi-cc-git").FullName;
@@ -99,6 +268,16 @@ public sealed class RestrictedGitServiceTests : IDisposable
         Git(repo, "commit", "-m", "initial");
         return repo;
     }
+
+    private string NewTempDirectory(string name)
+    {
+        var root = Directory.CreateTempSubdirectory("pi-cc-git").FullName;
+        _tempRoots.Add(root);
+        return Directory.CreateDirectory(Path.Combine(root, name)).FullName;
+    }
+
+    private Task<string> GitInAsync(string repo, params string[] arguments) =>
+        Task.Run(() => Git([repo, .. arguments]));
 
     private static string Git(params string[] arguments)
     {

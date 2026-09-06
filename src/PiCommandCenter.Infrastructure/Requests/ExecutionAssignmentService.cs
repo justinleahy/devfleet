@@ -174,9 +174,11 @@ public sealed class ExecutionAssignmentService(
                 continue;
             }
 
+            var startupBlocked = assignment.State == ExecutionAssignmentState.Starting
+                && item.SupervisorState == AssignmentSupervisorState.StartBlocked;
             if (assignment.State == ExecutionAssignmentState.RecoveryRequired
-                || item.SupervisorState != AssignmentSupervisorState.Running
-                || !item.RepositoryKnown
+                || (!startupBlocked && item.SupervisorState != AssignmentSupervisorState.Running)
+                || (!startupBlocked && !item.RepositoryKnown)
                 || item.PendingEventCount < 0)
             {
                 MarkRecoveryRequired(assignment, now, changed);
@@ -187,14 +189,15 @@ public sealed class ExecutionAssignmentService(
             if (assignment.IsLeaseExpired(now))
             {
                 var restoredState = assignment.State == ExecutionAssignmentState.Starting
-                    ? ExecutionAssignmentState.Running
-                    : assignment.State;
+                    && !startupBlocked
+                        ? ExecutionAssignmentState.Running
+                        : assignment.State;
                 assignment.MarkRecoveryRequired(now);
                 assignment.Reconcile(nodeId, item.ClaimToken, restoredState, lease, now);
             }
             else
             {
-                if (assignment.State == ExecutionAssignmentState.Starting)
+                if (assignment.State == ExecutionAssignmentState.Starting && !startupBlocked)
                 {
                     assignment.MarkRunning(now);
                 }

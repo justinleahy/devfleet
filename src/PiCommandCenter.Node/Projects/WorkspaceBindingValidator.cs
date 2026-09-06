@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Contracts.NodeTransport;
@@ -114,10 +115,12 @@ public sealed class WorkspaceBindingValidator : IWorkspaceBindingValidator
             return Invalid(request, WorkspaceValidationCodes.Unreadable, "Repository path is not readable.");
         }
 
-        var gitDirectoryResult = InspectGitDirectory(request, repositoryPath);
-        if (gitDirectoryResult is not null)
+        if (!IsWritable(repositoryPath))
         {
-            return gitDirectoryResult;
+            return Invalid(
+                request,
+                WorkspaceValidationCodes.PathNotWritable,
+                "Repository path is not writable by this node.");
         }
 
         var gitVersion = await RunGitAsync(repositoryPath, ["--version"], useRepository: false, cancellationToken)
@@ -127,28 +130,10 @@ public sealed class WorkspaceBindingValidator : IWorkspaceBindingValidator
             return Invalid(request, WorkspaceValidationCodes.GitUnavailable, "Git is not available on this node.");
         }
 
-        var topLevel = await RunGitAsync(
-            repositoryPath,
-            ["rev-parse", "--show-toplevel"],
-            useRepository: true,
-            cancellationToken).ConfigureAwait(false);
-        if (!topLevel.Available)
-        {
-            return Invalid(request, WorkspaceValidationCodes.GitUnavailable, "Git is not available on this node.");
-        }
-
-        if (!topLevel.Succeeded || !IsSameCanonicalPath(repositoryPath, topLevel.StandardOutput))
-        {
-            return Invalid(
-                request,
-                WorkspaceValidationCodes.NotGitRepository,
-                "Repository path is not the root of a readable Git working tree.");
-        }
-
         var branchFormat = await RunGitAsync(
             repositoryPath,
             ["check-ref-format", "--branch", request.DefaultBranch],
-            useRepository: true,
+            useRepository: false,
             cancellationToken).ConfigureAwait(false);
         if (!branchFormat.Available)
         {
@@ -163,6 +148,67 @@ public sealed class WorkspaceBindingValidator : IWorkspaceBindingValidator
                 "Configured default branch is not a valid Git branch name.");
         }
 
+        var gitDirectoryResult = InspectGitDirectory(request, repositoryPath);
+        if (gitDirectoryResult is not null)
+        {
+            return gitDirectoryResult;
+        }
+
+        var hasGitMetadata = Directory.Exists(Path.Combine(repositoryPath, ".git"));
+        var topLevel = await RunGitAsync(
+            repositoryPath,
+            ["rev-parse", "--show-toplevel"],
+            useRepository: true,
+            cancellationToken).ConfigureAwait(false);
+        if (!topLevel.Available)
+        {
+            return Invalid(request, WorkspaceValidationCodes.GitUnavailable, "Git is not available on this node.");
+        }
+
+        if (!hasGitMetadata)
+        {
+            if (topLevel.Succeeded)
+            {
+                return Invalid(
+                    request,
+                    WorkspaceValidationCodes.NestedInParentRepository,
+                    "Workspace path is nested inside another Git repository; select that repository root.");
+            }
+
+            return Valid(
+                request,
+                repositoryPath,
+                WorkspaceValidationCodes.RepositoryInitializationRequired,
+                "Ordinary directory is eligible and will be initialized when its first request starts.");
+        }
+
+        if (!topLevel.Succeeded || !IsSameCanonicalPath(repositoryPath, topLevel.StandardOutput))
+        {
+            return Invalid(
+                request,
+                WorkspaceValidationCodes.NotGitRepository,
+                "Repository path is not the root of a readable Git working tree.");
+        }
+
+        var head = await RunGitAsync(
+            repositoryPath,
+            ["rev-parse", "--verify", "--quiet", "HEAD"],
+            useRepository: true,
+            cancellationToken).ConfigureAwait(false);
+        if (!head.Available)
+        {
+            return Invalid(request, WorkspaceValidationCodes.GitUnavailable, "Git is not available on this node.");
+        }
+
+        if (!head.Succeeded)
+        {
+            return Valid(
+                request,
+                repositoryPath,
+                WorkspaceValidationCodes.BaselineCommitRequired,
+                "Git repository has no commits and will receive a baseline commit when its first request starts.");
+        }
+
         var branchExists = await BranchExistsAsync(
             repositoryPath,
             request.DefaultBranch,
@@ -172,15 +218,16 @@ public sealed class WorkspaceBindingValidator : IWorkspaceBindingValidator
             return Invalid(request, WorkspaceValidationCodes.GitUnavailable, "Git is not available on this node.");
         }
 
-        if (branchExists.Value)
-        {
-            return Valid(request, repositoryPath);
-        }
-
-        return Invalid(
-            request,
-            WorkspaceValidationCodes.DefaultBranchMissing,
-            "Configured default branch does not exist locally or in a remote-tracking ref.");
+        return branchExists.Value
+            ? Valid(
+                request,
+                repositoryPath,
+                WorkspaceValidationCodes.Valid,
+                "Workspace validation succeeded.")
+            : Invalid(
+                request,
+                WorkspaceValidationCodes.DefaultBranchMissing,
+                "Configured default branch does not exist locally or in a remote-tracking ref.");
     }
 
     private async Task<bool?> BranchExistsAsync(
@@ -292,10 +339,7 @@ public sealed class WorkspaceBindingValidator : IWorkspaceBindingValidator
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
-            return Invalid(
-                request,
-                WorkspaceValidationCodes.NotGitRepository,
-                "Repository path does not contain Git metadata.");
+            return null;
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
         {
@@ -495,6 +539,16 @@ public sealed class WorkspaceBindingValidator : IWorkspaceBindingValidator
         }
     }
 
+    private static bool IsWritable(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return !File.GetAttributes(path).HasFlag(FileAttributes.ReadOnly);
+        }
+
+        return Access(path, WriteAccess) == 0;
+    }
+
     private static string? GetInvalidRequestDetail(WorkspaceBindingValidationRequestMessage request)
     {
         if (request.BindingId == Guid.Empty)
@@ -533,13 +587,15 @@ public sealed class WorkspaceBindingValidator : IWorkspaceBindingValidator
 
     private static WorkspaceBindingValidationResultMessage Valid(
         WorkspaceBindingValidationRequestMessage request,
-        string canonicalRepositoryPath) => new(
+        string canonicalRepositoryPath,
+        string validationCode,
+        string detail) => new(
         request.BindingId,
         request.ProjectId,
         request.Revision,
         WorkspaceValidationStatuses.Valid,
-        WorkspaceValidationCodes.Valid,
-        BoundDetail("Workspace validation succeeded."),
+        validationCode,
+        BoundDetail(detail),
         canonicalRepositoryPath);
 
     private static WorkspaceBindingValidationResultMessage Invalid(
@@ -561,6 +617,11 @@ public sealed class WorkspaceBindingValidator : IWorkspaceBindingValidator
     private static StringComparison PathComparison => OperatingSystem.IsWindows()
         ? StringComparison.OrdinalIgnoreCase
         : StringComparison.Ordinal;
+
+    private const int WriteAccess = 2;
+
+    [DllImport("libc", EntryPoint = "access", SetLastError = true)]
+    private static extern int Access(string path, int mode);
 
     private readonly record struct GitCommandResult(bool Available, int? ExitCode, string StandardOutput)
     {

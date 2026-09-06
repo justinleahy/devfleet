@@ -313,6 +313,34 @@ public class NodeEventSinkTests : IDisposable
     }
 
     [Fact]
+    public async Task Startup_unblocked_event_restores_the_request_phase()
+    {
+        await using var db = CreateContext();
+        var nodeId = TestNodes.NewNodeId();
+        TestNodes.SeedNode(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
+        var request = TestNodes.SeedRequest(db, project, _clock);
+        request.Block(_clock.GetUtcNow());
+        await TestNodes.SaveAsync(db);
+
+        var sink = new NodeEventSink(_clock, db, _notifier);
+        await sink.AppendAsync(new EventBatch(
+        [
+            Evt(
+                request.Id.Value,
+                project.Id.Value,
+                nodeId.Value,
+                "request.unblocked",
+                """{"status":"starting","phase":"root_start"}"""),
+        ]));
+
+        await using var reload = CreateContext();
+        var persisted = await reload.WorkRequests.SingleAsync();
+        Assert.Equal(WorkRequestStatus.Queued, persisted.Status);
+        Assert.Null(persisted.BlockedPhase);
+    }
+
+    [Fact]
     public async Task Appended_events_publish_one_change_per_touched_request_after_the_commit()
     {
         await using var db = CreateContext();

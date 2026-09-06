@@ -60,7 +60,8 @@ public interface IRootSessionSupervisor
 
     Task<string> StartForAssignmentAsync(
         ExecutionAssignmentMessage assignment,
-        CancellationToken cancellationToken);
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? preparationCompleted = null);
 
     Task<bool> CancelSessionAsync(string sessionId, string reason);
     Guid? FindRequestId(string sessionId);
@@ -406,6 +407,7 @@ public sealed class NodeWorker
             await RenewDueAssignmentsAsync(now, cancellationToken).ConfigureAwait(false);
             await ReplayPendingEventsAsync(cancellationToken).ConfigureAwait(false);
             await ReconcileAssignmentsIfDueAsync(now, cancellationToken).ConfigureAwait(false);
+            await RetryStartBlockedAssignmentsAsync(cancellationToken).ConfigureAwait(false);
             await StartNextAssignmentIfCapacityAsync(cancellationToken).ConfigureAwait(false);
 
             if (now - _lastHeartbeat >= TimeSpan.FromSeconds(_options.HeartbeatSeconds))
@@ -498,6 +500,58 @@ public sealed class NodeWorker
         }
     }
 
+    private async Task RetryStartBlockedAssignmentsAsync(CancellationToken cancellationToken)
+    {
+        NodeAssignmentJournalEntry[] blocked;
+        lock (_assignmentsLock)
+        {
+            blocked =
+            [
+                .. _activeAssignments.Values
+                    .Where(entry => entry.SupervisorState == AssignmentSupervisorState.StartBlocked
+                        && entry.Assignment.State != "Cancelling"),
+            ];
+        }
+
+        foreach (var entry in blocked)
+        {
+            try
+            {
+                await _rootSessions
+                    .StartForAssignmentAsync(
+                        entry.Assignment,
+                        cancellationToken,
+                        preparationCompleted: ct => MarkPreparationCompletedAsync(
+                            entry.Assignment.RequestId,
+                            ct))
+                    .ConfigureAwait(false);
+                var running = entry with
+                {
+                    SupervisorState = AssignmentSupervisorState.Running,
+                    RepositoryKnown = true,
+                };
+                await _journal.UpsertAsync(running, cancellationToken).ConfigureAwait(false);
+                ReplaceAssignment(running);
+                await AppendStartupUnblockedAsync(entry.Assignment, cancellationToken).ConfigureAwait(false);
+                await RefreshPendingEventCountAsync(entry.Assignment.RequestId, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (InvalidOperationException ex)
+            {
+                var blockedEntry = entry with
+                {
+                    SupervisorState = AssignmentSupervisorState.StartBlocked,
+                    RepositoryKnown = false,
+                };
+                await _journal.UpsertAsync(blockedEntry, cancellationToken).ConfigureAwait(false);
+                await AppendStartupBlockedAsync(entry.Assignment, ex, cancellationToken).ConfigureAwait(false);
+                ReplaceAssignment(blockedEntry);
+                await RefreshPendingEventCountAsync(entry.Assignment.RequestId, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+    }
+
     private async Task StartNextAssignmentIfCapacityAsync(CancellationToken cancellationToken)
     {
         int activeCount;
@@ -536,7 +590,7 @@ public sealed class NodeWorker
 
         var initialEntry = new NodeAssignmentJournalEntry(
             assignment,
-            AssignmentSupervisorState.Unknown,
+            AssignmentSupervisorState.StartBlocked,
             RepositoryKnown: false,
             PendingEventCount: await _spool
                 .CountPendingForRequestAsync(assignment.RequestId, cancellationToken)
@@ -550,7 +604,12 @@ public sealed class NodeWorker
         try
         {
             await _rootSessions
-                .StartForAssignmentAsync(assignment, cancellationToken)
+                .StartForAssignmentAsync(
+                    assignment,
+                    cancellationToken,
+                    preparationCompleted: ct => MarkPreparationCompletedAsync(
+                        assignment.RequestId,
+                        ct))
                 .ConfigureAwait(false);
             var runningEntry = initialEntry with
             {
@@ -570,7 +629,14 @@ public sealed class NodeWorker
         }
         catch (InvalidOperationException ex)
         {
+            var blockedEntry = initialEntry with
+            {
+                SupervisorState = AssignmentSupervisorState.StartBlocked,
+                RepositoryKnown = false,
+            };
+            await _journal.UpsertAsync(blockedEntry, cancellationToken).ConfigureAwait(false);
             await AppendStartupBlockedAsync(assignment, ex, cancellationToken).ConfigureAwait(false);
+            ReplaceAssignment(blockedEntry);
             await RefreshPendingEventCountAsync(assignment.RequestId, cancellationToken)
                 .ConfigureAwait(false);
             _logger.LogWarning(
@@ -578,6 +644,30 @@ public sealed class NodeWorker
                 assignment.RequestId,
                 Security.DiagnosticSanitizer.Sanitize(ex.Message, 512));
         }
+    }
+
+
+    private async Task MarkPreparationCompletedAsync(
+        Guid requestId,
+        CancellationToken cancellationToken)
+    {
+        NodeAssignmentJournalEntry entry;
+        lock (_assignmentsLock)
+        {
+            if (!_activeAssignments.TryGetValue(requestId, out entry!))
+            {
+                throw new InvalidOperationException(
+                    $"Assignment {requestId} disappeared during workspace preparation.");
+            }
+        }
+
+        var prepared = entry with
+        {
+            SupervisorState = AssignmentSupervisorState.Unknown,
+            RepositoryKnown = true,
+        };
+        await _journal.UpsertAsync(prepared, cancellationToken).ConfigureAwait(false);
+        ReplaceAssignment(prepared);
     }
 
     private Task AppendStartupBlockedAsync(
@@ -593,16 +683,16 @@ public sealed class NodeWorker
                 $"No active assignment credential is available for request {assignment.RequestId} in project {assignment.ProjectId}.");
         }
 
-        var sessionId = $"root-start-{assignment.RequestId:N}";
+        var eventId = $"assignment-start-{assignment.RequestId:N}-request.blocked";
         var reason = Security.DiagnosticSanitizer.Sanitize(exception.Message, 512);
         return _spool.AppendAsync(
             new NodeEventMessage(
-                EventId: $"{sessionId}-1-request.blocked",
+                EventId: eventId,
                 NodeId: assignment.NodeIdSnapshot,
                 ProjectId: assignment.ProjectId,
                 RequestId: assignment.RequestId,
                 ClaimToken: credential.ClaimToken,
-                SessionId: sessionId,
+                SessionId: null,
                 Sequence: 1,
                 Type: "request.blocked",
                 OccurredAt: _timeProvider.GetUtcNow(),
@@ -614,6 +704,31 @@ public sealed class NodeWorker
                 })),
             cancellationToken);
     }
+    private Task AppendStartupUnblockedAsync(
+        ExecutionAssignmentMessage assignment,
+        CancellationToken cancellationToken)
+    {
+        if (!_assignmentCredentials.TryGetByRequest(assignment.RequestId, out var credential))
+        {
+            throw new InvalidOperationException(
+                $"No active assignment credential is available for request {assignment.RequestId}.");
+        }
+
+        return _spool.AppendAsync(
+            new NodeEventMessage(
+                EventId: $"assignment-start-{assignment.RequestId:N}-request.unblocked",
+                NodeId: assignment.NodeIdSnapshot,
+                ProjectId: assignment.ProjectId,
+                RequestId: assignment.RequestId,
+                ClaimToken: credential.ClaimToken,
+                SessionId: null,
+                Sequence: 2,
+                Type: "request.unblocked",
+                OccurredAt: _timeProvider.GetUtcNow(),
+                PayloadJson: """{"status":"starting","phase":"root_start"}"""),
+            cancellationToken);
+    }
+
 
     private async Task ReconcileAssignmentsIfDueAsync(
         DateTimeOffset now,
@@ -674,12 +789,12 @@ public sealed class NodeWorker
             switch (result.Disposition)
             {
                 case AssignmentReconciliationDisposition.Resume:
-                {
-                    var resumed = current with { Assignment = result.Assignment! };
-                    await _journal.UpsertAsync(resumed, cancellationToken).ConfigureAwait(false);
-                    ReplaceAssignment(resumed);
-                    break;
-                }
+                    {
+                        var resumed = current with { Assignment = result.Assignment! };
+                        await _journal.UpsertAsync(resumed, cancellationToken).ConfigureAwait(false);
+                        ReplaceAssignment(resumed);
+                        break;
+                    }
                 case AssignmentReconciliationDisposition.Cancel:
                     if (result.Assignment is not null)
                     {
@@ -823,17 +938,13 @@ public sealed class NodeWorker
 
         if (!terminalAccepted)
         {
-            if (rootSessionId is null)
-            {
-                _logger.LogWarning(
-                    "Cancellation for request {RequestId} remains durable because no active root session could be identified.",
-                    requestId);
-                return;
-            }
-
-            var outcome = await _rootTerminalizer
-                .CancelAsync(entry.Assignment, rootSessionId, reason, cancellationToken)
-                .ConfigureAwait(false);
+            var outcome = rootSessionId is null
+                ? await _rootTerminalizer
+                    .CancelBeforeRootAsync(entry.Assignment, reason, cancellationToken)
+                    .ConfigureAwait(false)
+                : await _rootTerminalizer
+                    .CancelAsync(entry.Assignment, rootSessionId, reason, cancellationToken)
+                    .ConfigureAwait(false);
             if (outcome != RootTerminalizationOutcome.Accepted)
             {
                 _logger.LogWarning(
@@ -912,9 +1023,10 @@ public sealed class NodeWorker
 
     private AssignmentSupervisorState ObserveSupervisorState(NodeAssignmentJournalEntry entry)
     {
-        if (entry.SupervisorState == AssignmentSupervisorState.Unknown)
+        if (entry.SupervisorState is AssignmentSupervisorState.Unknown
+            or AssignmentSupervisorState.StartBlocked)
         {
-            return AssignmentSupervisorState.Unknown;
+            return entry.SupervisorState;
         }
 
         return _rootSessions.ActiveSessionIds.Any(

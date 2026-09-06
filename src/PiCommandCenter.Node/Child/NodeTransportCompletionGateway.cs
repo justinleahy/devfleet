@@ -40,7 +40,7 @@ public sealed class NodeTransportCompletionGateway : INodeCompletionGateway
     public Task<CompletionGateDecision> BeginTerminalizationAsync(
         Guid projectId,
         Guid requestId,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
         string? reason,
@@ -61,7 +61,7 @@ public sealed class NodeTransportCompletionGateway : INodeCompletionGateway
     public Task<CompletionGateDecision> ConfirmTerminalizationAsync(
         Guid projectId,
         Guid requestId,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
         string? reason,

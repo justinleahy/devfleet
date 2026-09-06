@@ -687,6 +687,35 @@ public class PiChildSessionSupervisorTests : IDisposable
         Assert.Equal(0, proof.ActiveReservations);
         Assert.True(proof.RepositoryInspected);
     }
+    [Fact]
+    public async Task Pre_root_cancellation_confirms_quiescence_without_a_session_id()
+    {
+        var requestId = Guid.NewGuid();
+        var assignment = NodeWorkerTestHarness.Assignment(
+            requestId,
+            DateTimeOffset.UtcNow.AddMinutes(1)) with
+        {
+            CanonicalRepositoryPathSnapshot = _repoRoot,
+        };
+        _completion.Accept = true;
+
+        var outcome = await _supervisor.CancelBeforeRootAsync(
+            assignment,
+            "operator_cancel",
+            CancellationToken.None);
+
+        Assert.Equal(RootTerminalizationOutcome.Accepted, outcome);
+        Assert.Equal([null, null], _completion.RootSessionIds);
+        var proof = Assert.Single(_completion.Proofs);
+        Assert.True(proof.AdmissionClosed);
+        Assert.Equal(0, proof.ActiveChildren);
+        Assert.Equal(0, proof.ActiveOperations);
+        Assert.Equal(0, proof.ActiveProcesses);
+        Assert.Equal(0, proof.PendingEvents);
+        Assert.Equal(0, proof.ActiveReservations);
+        Assert.True(proof.RepositoryInspected);
+    }
+
 
     [Fact]
     public async Task Uncertain_root_failure_keeps_admission_closed_and_withholds_confirmation()
@@ -1378,6 +1407,7 @@ public class PiChildSessionSupervisorTests : IDisposable
         public List<PiCommandCenter.Application.Completion.AssignmentQuiescenceProof> Proofs { get; } = [];
         public List<(TerminalizationIntent Intent, string? Reason)> Begun { get; } = [];
         public List<(TerminalizationIntent Intent, string? Reason)> Confirmed { get; } = [];
+        public List<string?> RootSessionIds { get; } = [];
 
         public Task RecordVerificationRunAsync(
             string sessionId,
@@ -1389,9 +1419,10 @@ public class PiChildSessionSupervisorTests : IDisposable
         }
 
         public Task<CompletionGateDecision> BeginTerminalizationAsync(
-            Guid projectId, Guid requestId, string rootSessionId, TerminalizationIntent intent,
+            Guid projectId, Guid requestId, string? rootSessionId, TerminalizationIntent intent,
             CompletionEvidence? evidence, string? reason, CancellationToken cancellationToken)
         {
+            RootSessionIds.Add(rootSessionId);
             Begun.Add((intent, reason));
             if (evidence is not null)
             {
@@ -1402,10 +1433,11 @@ public class PiChildSessionSupervisorTests : IDisposable
         }
 
         public Task<CompletionGateDecision> ConfirmTerminalizationAsync(
-            Guid projectId, Guid requestId, string rootSessionId, TerminalizationIntent intent,
+            Guid projectId, Guid requestId, string? rootSessionId, TerminalizationIntent intent,
             CompletionEvidence? evidence, string? reason, PiCommandCenter.Application.Completion.AssignmentQuiescenceProof proof,
             CancellationToken cancellationToken)
         {
+            RootSessionIds.Add(rootSessionId);
             Confirmed.Add((intent, reason));
             if (evidence is not null)
             {

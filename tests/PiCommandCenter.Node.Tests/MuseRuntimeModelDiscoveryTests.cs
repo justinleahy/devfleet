@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
@@ -97,16 +98,19 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
     }
 
     [Fact]
-    public async Task Cancellation_reaches_the_reader_and_aborts_discovery()
+    public async Task Stopping_the_worker_cancels_the_in_flight_reader()
     {
-        using var cancellation = new CancellationTokenSource();
         var reader = new CancellationAwareMuseReader();
-        var discovery = Discover(reader, cancellation.Token);
-        await reader.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var (discovery, store) = CreateDiscovery(reader);
+        using (store)
+        using (discovery)
+        {
+            await discovery.StartAsync(CancellationToken.None);
+            await reader.Started.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-        await cancellation.CancelAsync();
+            await discovery.StopAsync(CancellationToken.None);
+        }
 
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => discovery);
         Assert.True(reader.LastToken.IsCancellationRequested);
     }
 
@@ -114,8 +118,26 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
         => (await Discover(reader)).Single(catalog => catalog.Provider == AgentModelSelector.Muse);
 
     private async Task<IReadOnlyList<RuntimeModelCatalogMessage>> Discover(
-        IMuseModelCatalogReader reader,
-        CancellationToken cancellationToken = default)
+        IMuseModelCatalogReader reader)
+    {
+        var (discovery, store) = CreateDiscovery(reader);
+        using (store)
+        using (discovery)
+        {
+            await discovery.StartAsync(CancellationToken.None);
+            try
+            {
+                return await discovery.DiscoverAsync();
+            }
+            finally
+            {
+                await discovery.StopAsync(CancellationToken.None);
+            }
+        }
+    }
+
+    private (RuntimeModelDiscovery Discovery, NodeRuntimeRoutingStore Store) CreateDiscovery(
+        IMuseModelCatalogReader reader)
     {
         var worker = new PiWorkerOptions
         {
@@ -123,7 +145,7 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
             WorkerPath = Path.Combine(_root, "runtime", "index.ts"),
             AgentDataDirectory = Path.Combine(_root, "agent-data"),
         };
-        using var store = new NodeRuntimeRoutingStore(
+        var store = new NodeRuntimeRoutingStore(
             Options.Create(new NodeOptions { Id = Guid.NewGuid() }), Options.Create(worker));
         var discovery = new RuntimeModelDiscovery(
             Options.Create(worker),
@@ -131,8 +153,9 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
             store,
             new EmptyModelRunner(),
             reader,
+            NullLogger<RuntimeModelDiscovery>.Instance,
             TimeProvider.System);
-        return await discovery.DiscoverAsync(cancellationToken);
+        return (discovery, store);
     }
 
     public void Dispose() => Directory.Delete(_root, recursive: true);

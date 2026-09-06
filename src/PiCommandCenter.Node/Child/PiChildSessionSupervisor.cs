@@ -591,6 +591,17 @@ public sealed class PiChildSessionSupervisor
             reason,
             TerminalizationIntent.Cancel,
             cancellationToken);
+    public Task<RootTerminalizationOutcome> CancelBeforeRootAsync(
+        ExecutionAssignmentMessage assignment,
+        string reason,
+        CancellationToken cancellationToken)
+        => TerminalizeRootAsync(
+            assignment,
+            rootSessionId: null,
+            reason,
+            TerminalizationIntent.Cancel,
+            cancellationToken);
+
 
     public Task<RootTerminalizationOutcome> FailAsync(
         ExecutionAssignmentMessage assignment,
@@ -606,7 +617,7 @@ public sealed class PiChildSessionSupervisor
 
     private async Task<RootTerminalizationOutcome> TerminalizeRootAsync(
         ExecutionAssignmentMessage assignment,
-        string rootSessionId,
+        string? rootSessionId,
         string reason,
         TerminalizationIntent intent,
         CancellationToken cancellationToken)
@@ -615,7 +626,7 @@ public sealed class PiChildSessionSupervisor
 
         using var terminalization = _admission.TryEnterTerminalization(
             assignment.RequestId,
-            $"terminalize:{rootSessionId}");
+            $"terminalize:{rootSessionId ?? "pre-root"}");
         if (terminalization is null)
         {
             return RootTerminalizationOutcome.Rejected;
@@ -648,7 +659,7 @@ public sealed class PiChildSessionSupervisor
             }
         }
 
-        if (intent == TerminalizationIntent.Cancel)
+        if (intent == TerminalizationIntent.Cancel && rootSessionId is not null)
         {
             stopTasks.Add(_rootSessions.Value.CancelSessionAsync(rootSessionId, reason));
         }
@@ -698,7 +709,7 @@ public sealed class PiChildSessionSupervisor
     private Task<CompletionGateDecision> BeginTerminalizationAsync(
         Guid projectId,
         Guid requestId,
-        string rootSessionId,
+        string? rootSessionId,
         TerminalizationIntent intent,
         CompletionEvidence? evidence,
         string? reason,
@@ -723,10 +734,14 @@ public sealed class PiChildSessionSupervisor
     private Quiescence.QuiescenceObservation BuildQuiescenceObservation(
         Guid projectId,
         Guid requestId,
-        string rootSessionId,
+        string? rootSessionId,
         string? repositoryRoot)
     {
-        var owners = new HashSet<string>(StringComparer.Ordinal) { rootSessionId };
+        var owners = new HashSet<string>(StringComparer.Ordinal);
+        if (rootSessionId is not null)
+        {
+            owners.Add(rootSessionId);
+        }
         foreach (var child in _childrenBySession.Values)
         {
             if (Guid.TryParse(child.RequestId, out var childRequestId)
@@ -748,9 +763,18 @@ public sealed class PiChildSessionSupervisor
             ct => _spool.CountPendingForRequestAsync(requestId, ct),
             async ct =>
             {
-                if (string.IsNullOrEmpty(repositoryRoot)
-                    || !_workspace.TryGetBaseline(requestId, out var baseline))
+                if (string.IsNullOrEmpty(repositoryRoot))
                 {
+                    return false;
+                }
+
+                if (!_workspace.TryGetBaseline(requestId, out var baseline))
+                {
+                    _ = await _repository.CaptureBaselineAsync(
+                        repositoryRoot,
+                        requireCleanStart: false,
+                        allowUntrackedFiles: true,
+                        ct).ConfigureAwait(false);
                     return true;
                 }
 

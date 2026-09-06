@@ -348,7 +348,7 @@ public sealed class RequestEligibilityEvaluator : IRequestEligibilityEvaluator
         binding.Status == WorkspaceBindingStatus.Valid
         && binding.ValidationRevision > 0
         && binding.ValidatedAt is not null
-        && string.Equals(binding.ValidationCode, WorkspaceBinding.ValidValidationCode, StringComparison.Ordinal)
+        && WorkspaceBinding.IsValidValidationCode(binding.ValidationCode)
         && !string.IsNullOrWhiteSpace(binding.CanonicalRepositoryPath)
         && Path.IsPathFullyQualified(binding.CanonicalRepositoryPath);
 

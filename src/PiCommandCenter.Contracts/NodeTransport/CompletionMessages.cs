@@ -48,7 +48,7 @@ public sealed record BeginTerminalizationMessage(
     Guid ProjectId,
     Guid RequestId,
     [property: Required, MaxLength(128)] string ClaimToken,
-    string RootSessionId,
+    string? RootSessionId,
     TerminalizationIntent Intent,
     CompletionEvidenceMessage? Evidence,
     string? Reason);
@@ -77,7 +77,7 @@ public sealed record ConfirmTerminalizationMessage(
     Guid ProjectId,
     Guid RequestId,
     [property: Required, MaxLength(128)] string ClaimToken,
-    string RootSessionId,
+    string? RootSessionId,
     TerminalizationIntent Intent,
     CompletionEvidenceMessage? Evidence,
     string? Reason,

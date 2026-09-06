@@ -5,6 +5,8 @@ public enum AssignmentSupervisorState
     Running,
     Stopped,
     Unknown,
+    /// <summary>Root startup failed before any session existed; the node retries the same assignment.</summary>
+    StartBlocked,
 }
 
 public enum AssignmentReconciliationDisposition

@@ -71,7 +71,10 @@ public static class NodeServiceCollectionExtensions
                 static sp => sp.GetRequiredService<RuntimeReadinessProvider>())
             .AddHostedService(static sp => sp.GetRequiredService<RuntimeReadinessProvider>())
             .AddSingleton<IRuntimeModelCommandRunner, RuntimeModelCommandRunner>()
-            .AddSingleton<IRuntimeModelDiscovery, RuntimeModelDiscovery>()
+            .AddSingleton<RuntimeModelDiscovery>()
+            .AddSingleton<IRuntimeModelDiscovery>(
+                static sp => sp.GetRequiredService<RuntimeModelDiscovery>())
+            .AddHostedService(static sp => sp.GetRequiredService<RuntimeModelDiscovery>())
             .AddSingleton<IRuntimeSubscriptionUsageCommandRunner, RuntimeSubscriptionUsageCommandRunner>()
             .AddSingleton<IAntigravitySubscriptionUsageCommandRunner, AntigravitySubscriptionUsageCommandRunner>()
             .AddOptions<SubscriptionUsageOptions>()

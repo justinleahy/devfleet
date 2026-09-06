@@ -257,6 +257,40 @@ public sealed class AssignmentOperationAuthorizerTests : IDisposable
     }
 
     [Fact]
+    public async Task Recovery_history_accepts_an_event_from_a_recorded_session()
+    {
+        await using var db = CreateContext();
+        var world = SeedAssignment(
+            db,
+            ExecutionAssignmentState.RecoveryRequired,
+            [OwnedSessionId]);
+        await SaveAsync(db);
+
+        await AuthorizeEventAsync(
+            db,
+            world,
+            OwnedSessionId,
+            EventId(OwnedSessionId, 2, "sdk.message_update"),
+            "sdk.message_update");
+    }
+
+    [Fact]
+    public async Task Recovery_history_rejects_registration_of_a_new_session()
+    {
+        await using var db = CreateContext();
+        var world = SeedAssignment(db, ExecutionAssignmentState.RecoveryRequired, []);
+        await SaveAsync(db);
+
+        await AssertDeniedAsync("session_mismatch", () =>
+            AuthorizeEventAsync(
+                db,
+                world,
+                OwnedSessionId,
+                EventId(OwnedSessionId, 0, "session.registered"),
+                "session.registered"));
+    }
+
+    [Fact]
     public async Task Terminal_history_requires_a_recorded_session()
     {
         await using var db = CreateContext();

@@ -119,7 +119,7 @@ public sealed class SqliteNodeAssignmentJournal : INodeAssignmentJournal
             }
 
             EnsureCompleteAssignment(persistedRequestId, assignment);
-            _ = ReadSupervisorState(reader, persistedRequestId);
+            var persistedSupervisorState = ReadSupervisorState(reader, persistedRequestId);
             var repositoryKnown = ReadBoolean(reader, 3, "RepositoryKnown", persistedRequestId);
             var pendingEventCount = reader.GetInt32(4);
             if (pendingEventCount < 0)
@@ -129,7 +129,9 @@ public sealed class SqliteNodeAssignmentJournal : INodeAssignmentJournal
 
             return new NodeAssignmentJournalEntry(
                 assignment,
-                AssignmentSupervisorState.Unknown,
+                persistedSupervisorState == AssignmentSupervisorState.StartBlocked
+                    ? AssignmentSupervisorState.StartBlocked
+                    : AssignmentSupervisorState.Unknown,
                 repositoryKnown,
                 pendingEventCount);
         }

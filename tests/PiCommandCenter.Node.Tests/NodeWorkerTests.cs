@@ -251,7 +251,7 @@ internal sealed class FakeRootSessionTerminalizer : IRootSessionTerminalizer
     public TaskCompletionSource FailureInvoked { get; } =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Action? Failing { get; set; }
-    public List<(ExecutionAssignmentMessage Assignment, string SessionId, string Reason)> Requests { get; } = [];
+    public List<(ExecutionAssignmentMessage Assignment, string? SessionId, string Reason)> Requests { get; } = [];
     public List<(ExecutionAssignmentMessage Assignment, string SessionId, string Reason)> Failures { get; } = [];
 
     public async Task<RootTerminalizationOutcome> CancelAsync(
@@ -261,6 +261,23 @@ internal sealed class FakeRootSessionTerminalizer : IRootSessionTerminalizer
         CancellationToken cancellationToken)
     {
         Requests.Add((assignment, rootSessionId, reason));
+        if (Cancelling is not null)
+        {
+            await Cancelling();
+        }
+
+        Invoked.TrySetResult();
+        return Completion is null
+            ? Outcome
+            : await Completion.Task.WaitAsync(cancellationToken);
+    }
+
+    public async Task<RootTerminalizationOutcome> CancelBeforeRootAsync(
+        ExecutionAssignmentMessage assignment,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        Requests.Add((assignment, null, reason));
         if (Cancelling is not null)
         {
             await Cancelling();
@@ -294,9 +311,10 @@ internal sealed class FakeRootSessionSupervisor : IRootSessionSupervisor
     public Action<ExecutionAssignmentMessage>? Starting { get; set; }
     private readonly Dictionary<string, Guid> _requestIdsBySession = new(StringComparer.Ordinal);
 
-    public Task<string> StartForAssignmentAsync(
+    public async Task<string> StartForAssignmentAsync(
         ExecutionAssignmentMessage assignment,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<CancellationToken, Task>? preparationCompleted = null)
     {
         Starting?.Invoke(assignment);
         if (StartException is not null)
@@ -304,10 +322,15 @@ internal sealed class FakeRootSessionSupervisor : IRootSessionSupervisor
             throw StartException;
         }
 
+        if (preparationCompleted is not null)
+        {
+            await preparationCompleted(cancellationToken);
+        }
+
         StartedAssignments.Add(assignment);
         var sessionId = $"root-{assignment.RequestId:N}";
         _requestIdsBySession[sessionId] = assignment.RequestId;
-        return Task.FromResult(sessionId);
+        return sessionId;
     }
 
     public Task<bool> CancelSessionAsync(string sessionId, string reason)
@@ -636,7 +659,13 @@ public class NodeWorkerAssignmentTests
         await worker.RunTickAsync(clock.Now, CancellationToken.None);
 
         Assert.True(journalPresentAtStart);
-        Assert.Equal(AssignmentSupervisorState.Unknown, journal.Upserts[0].SupervisorState);
+        Assert.Equal(
+            [
+                AssignmentSupervisorState.StartBlocked,
+                AssignmentSupervisorState.Unknown,
+                AssignmentSupervisorState.Running,
+            ],
+            journal.Upserts.Select(entry => entry.SupervisorState));
         var persisted = journal.Entries[assignment.RequestId];
         Assert.Equal(AssignmentSupervisorState.Running, persisted.SupervisorState);
         Assert.True(persisted.RepositoryKnown);
@@ -823,11 +852,14 @@ public class NodeWorkerAssignmentTests
     [Fact]
     public async Task Startup_precondition_failure_projects_request_blocked()
     {
+        var journal = new FakeAssignmentJournal();
         var roots = new FakeRootSessionSupervisor
         {
             StartException = new InvalidOperationException("BLOCKED — repository is dirty"),
         };
-        var (worker, hub, spool, clock) = NodeWorkerTestHarness.Create(roots: roots);
+        var (worker, hub, spool, clock) = NodeWorkerTestHarness.Create(
+            journal: journal,
+            roots: roots);
         var assignment = NodeWorkerTestHarness.Assignment(Guid.NewGuid(), clock.Now.AddSeconds(60));
         hub.EnqueueAssignment(assignment);
 
@@ -839,7 +871,32 @@ public class NodeWorkerAssignmentTests
         Assert.Equal(assignment.RequestId, blocked.RequestId);
         Assert.Equal(assignment.ClaimToken, blocked.ClaimToken);
         Assert.Contains("root_start", blocked.PayloadJson);
+        Assert.Null(blocked.SessionId);
+        Assert.Equal(
+            AssignmentSupervisorState.StartBlocked,
+            journal.Entries[assignment.RequestId].SupervisorState);
     }
+    [Fact]
+    public async Task Startup_blocked_assignment_retries_without_reclaiming()
+    {
+        var roots = new FakeRootSessionSupervisor
+        {
+            StartException = new InvalidOperationException("git is temporarily unavailable"),
+        };
+        var (worker, hub, spool, clock) = NodeWorkerTestHarness.Create(roots: roots);
+        var assignment = NodeWorkerTestHarness.Assignment(Guid.NewGuid(), clock.Now.AddSeconds(60));
+        hub.EnqueueAssignment(assignment);
+        await worker.RunTickAsync(clock.Now, CancellationToken.None);
+
+        roots.StartException = null;
+        await worker.RunTickAsync(clock.Now, CancellationToken.None);
+
+        Assert.Single(roots.StartedAssignments);
+        Assert.Equal(assignment.RequestId, roots.StartedAssignments[0].RequestId);
+        var unblocked = Assert.Single(spool.Pending, message => message.Type == "request.unblocked");
+        Assert.Null(unblocked.SessionId);
+    }
+
 
     [Fact]
     public async Task Startup_blocked_without_an_exact_credential_is_not_spooled_or_dropped()
@@ -936,6 +993,7 @@ public class NodeWorkerAssignmentTests
         var roots = new FakeRootSessionSupervisor();
         var completion = new TaskCompletionSource<RootTerminalizationOutcome>(
             TaskCreationOptions.RunContinuationsAsynchronously);
+
         var terminalizer = new FakeRootSessionTerminalizer { Completion = completion };
         var (worker, hub, _, clock) = NodeWorkerTestHarness.Create(
             roots: roots,
@@ -957,6 +1015,29 @@ public class NodeWorkerAssignmentTests
         completion.SetResult(RootTerminalizationOutcome.Accepted);
         await Task.WhenAll(first, second);
         Assert.Single(terminalizer.Requests);
+    }
+    [Fact]
+    public async Task Startup_blocked_assignment_cancels_without_a_root_session()
+    {
+        var roots = new FakeRootSessionSupervisor
+        {
+            StartException = new InvalidOperationException("git is temporarily unavailable"),
+        };
+        var terminalizer = new FakeRootSessionTerminalizer();
+        var (worker, hub, _, clock) = NodeWorkerTestHarness.Create(
+            roots: roots,
+            rootTerminalizer: terminalizer);
+        var assignment = NodeWorkerTestHarness.Assignment(Guid.NewGuid(), clock.Now.AddSeconds(60));
+        hub.EnqueueAssignment(assignment);
+        await worker.RunTickAsync(clock.Now, CancellationToken.None);
+
+        await hub.RaiseAssignmentCancelAsync(
+            new CancelAssignmentCommand(assignment.RequestId, "operator_cancel"));
+
+        var request = Assert.Single(terminalizer.Requests);
+        Assert.Equal(assignment.RequestId, request.Assignment.RequestId);
+        Assert.Null(request.SessionId);
+        Assert.DoesNotContain(assignment.RequestId, worker.ActiveAssignmentsSnapshot().Keys);
     }
 
     [Fact]

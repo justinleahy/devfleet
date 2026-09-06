@@ -64,13 +64,58 @@ public sealed class WorkspaceBindingValidatorTests : IDisposable
     }
 
     [Fact]
-    public async Task Directory_without_git_metadata_is_not_a_repository()
+    public async Task Ordinary_directory_is_valid_and_requires_repository_initialization()
     {
         var directory = Directory.CreateDirectory(Path.Combine(_approvedRoot, "ordinary-directory")).FullName;
 
         var result = await CreateValidator().ValidateAsync(Request(directory));
 
-        AssertInvalid(result, WorkspaceValidationCodes.NotGitRepository);
+        AssertValid(result, WorkspaceValidationCodes.RepositoryInitializationRequired, directory);
+    }
+
+    [Fact]
+    public async Task Unborn_repository_is_valid_and_requires_a_baseline_commit()
+    {
+        var repositoryPath = Directory.CreateDirectory(Path.Combine(_approvedRoot, "unborn")).FullName;
+        RunGit(repositoryPath, "init", "--initial-branch=main");
+
+        var result = await CreateValidator().ValidateAsync(Request(repositoryPath));
+
+        AssertValid(result, WorkspaceValidationCodes.BaselineCommitRequired, repositoryPath);
+    }
+
+    [Fact]
+    public async Task Directory_nested_inside_a_repository_is_rejected()
+    {
+        var repositoryPath = CreateRepository(_approvedRoot);
+        var nested = Directory.CreateDirectory(Path.Combine(repositoryPath, "nested")).FullName;
+
+        var result = await CreateValidator().ValidateAsync(Request(nested));
+
+        AssertInvalid(result, WorkspaceValidationCodes.NestedInParentRepository);
+    }
+
+    [Fact]
+    public async Task Directory_not_writable_by_the_node_is_rejected()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var directory = Directory.CreateDirectory(Path.Combine(_approvedRoot, "read-only")).FullName;
+        var originalMode = File.GetUnixFileMode(directory);
+        File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            var result = await CreateValidator().ValidateAsync(Request(directory));
+
+            AssertInvalid(result, WorkspaceValidationCodes.PathNotWritable);
+        }
+        finally
+        {
+            File.SetUnixFileMode(directory, originalMode);
+        }
     }
 
     [Fact]
@@ -154,6 +199,19 @@ public sealed class WorkspaceBindingValidatorTests : IDisposable
         Revision: 7,
         repositoryPath,
         defaultBranch);
+
+    private static void AssertValid(
+        WorkspaceBindingValidationResultMessage result,
+        string expectedCode,
+        string expectedPath)
+    {
+        Assert.Equal(WorkspaceValidationStatuses.Valid, result.Status);
+        Assert.Equal(expectedCode, result.ValidationCode);
+        Assert.Equal(
+            Path.TrimEndingDirectorySeparator(Path.GetFullPath(expectedPath)),
+            result.CanonicalRepositoryPath);
+        Assert.NotEmpty(result.Detail);
+    }
 
     private static void AssertInvalid(
         WorkspaceBindingValidationResultMessage result,

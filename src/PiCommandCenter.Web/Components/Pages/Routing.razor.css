@@ -234,6 +234,9 @@ h2 {
     align-self: start;
     min-width: 0;
     height: auto;
+    /* The card ships `contain: content`, which paint-clips the combobox popup
+       at the card edge. Route cards carry an open dropdown, so drop it. */
+    contain: none;
 }
 
 .role-head {
@@ -284,6 +287,23 @@ h2 {
 .candidate-fields ::deep .field {
     width: 100%;
     min-width: 0;
+}
+
+/* The selector popup is a shadow-DOM listbox (`::part(listbox)`) positioned
+   absolutely against the combobox. Its own rule reads
+   `max-height: calc(var(--max-height) - 40px)`, but nothing ever sets
+   `--max-height`, so a long catalog grew straight past the viewport with no
+   way to reach the lower options. Bound it to the viewport, let it scroll
+   itself, and lift only the open combobox over the sticky save bar
+   (`z-index: 2`). Card paint containment is dropped with .role-card above. */
+.candidate-fields ::deep fluent-combobox[open] {
+    z-index: 3;
+}
+
+.candidate-fields ::deep fluent-combobox::part(listbox) {
+    max-height: min(45vh, 20rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
 .candidate-note,

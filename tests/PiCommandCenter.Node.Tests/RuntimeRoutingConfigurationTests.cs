@@ -166,13 +166,15 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
         using var store = new NodeRuntimeRoutingStore(
             Options.Create(new NodeOptions { Id = Guid.NewGuid() }), Options.Create(worker));
         var runner = new FakeModelRunner();
-        var discovery = new RuntimeModelDiscovery(
+        using var discovery = new RuntimeModelDiscovery(
             Options.Create(worker),
             Options.Create(new AntigravityOptions { Executable = "agy-test" }),
             store,
             runner,
             new FakeMuseCatalogReader(),
+            NullLogger<RuntimeModelDiscovery>.Instance,
             TimeProvider.System);
+        await discovery.StartAsync(CancellationToken.None);
 
         var catalogs = await discovery.DiscoverAsync();
 
