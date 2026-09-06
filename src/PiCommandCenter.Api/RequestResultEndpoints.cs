@@ -23,7 +23,7 @@ internal static class RequestResultEndpoints
 
     private static async Task<Results<Ok<RequestResultDto>, NotFound<ProblemDetails>>> GetResultAsync(
         Guid requestId,
-        ICompletionGateService gate,
+        IAssignmentTerminalizationService gate,
         CancellationToken cancellationToken)
     {
         try

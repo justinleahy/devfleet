@@ -19,10 +19,9 @@ public sealed class NativeApiTests : IClassFixture<ControlPlaneFixture>
 
     public NativeApiTests(ControlPlaneFixture fixture) => _fixture = fixture;
 
-    private static HttpContent RegisterBody(string displayName, string repositoryPath) =>
+    private static HttpContent RegisterBody(string displayName) =>
         JsonContent.Create(new RegisterProjectCommand(
             DisplayName: displayName,
-            RepositoryPath: repositoryPath,
             DefaultBranch: "main",
             Enabled: true,
             MaxActiveWriteRequests: 2,
@@ -117,9 +116,8 @@ public sealed class NativeApiTests : IClassFixture<ControlPlaneFixture>
         using var client = await _fixture.CreateNativeAuthenticatedClientAsync();
         Assert.False(client.DefaultRequestHeaders.Contains("Cookie"));
         Assert.False(client.DefaultRequestHeaders.Contains("RequestVerificationToken"));
-        var repositoryPath = _fixture.CreateGitRepository();
 
-        var response = await client.PostAsync(ProjectsPath, RegisterBody("Native", repositoryPath));
+        var response = await client.PostAsync(ProjectsPath, RegisterBody("Native"));
         var body = await response.Content.ReadAsStringAsync();
 
         Assert.True(response.StatusCode == HttpStatusCode.Created, $"status {(int)response.StatusCode}: {body}");
@@ -161,13 +159,12 @@ public sealed class NativeApiTests : IClassFixture<ControlPlaneFixture>
     {
         using var client = _fixture.CreateAuthenticatedClient();
         client.DefaultRequestHeaders.Remove("RequestVerificationToken");
-        var repositoryPath = _fixture.CreateGitRepository();
 
-        var rejected = await client.PostAsync("/api/projects", RegisterBody("Legacy", repositoryPath));
+        var rejected = await client.PostAsync("/api/projects", RegisterBody("Legacy"));
         Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
 
         _fixture.AttachAntiforgery(client, asAdmin: true);
-        var accepted = await client.PostAsync("/api/projects", RegisterBody("Legacy", repositoryPath));
+        var accepted = await client.PostAsync("/api/projects", RegisterBody("Legacy"));
         var body = await accepted.Content.ReadAsStringAsync();
         Assert.True(accepted.StatusCode == HttpStatusCode.Created, $"status {(int)accepted.StatusCode}: {body}");
         Assert.Equal($"/api/projects/{JsonDocument.Parse(body).RootElement.GetProperty("id").GetString()}", accepted.Headers.Location?.ToString());

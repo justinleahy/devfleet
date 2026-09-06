@@ -8,7 +8,6 @@ public class ProjectTests
 
     private static Project Register(
         string displayName = "Fleet",
-        string repositoryPath = "/tmp/fleet",
         string defaultBranch = "main",
         int write = 2,
         int read = 4,
@@ -16,9 +15,7 @@ public class ProjectTests
         DateTimeOffset? createdAt = null)
     {
         return Project.Register(
-            Domain.NodeId.New(),
             displayName,
-            repositoryPath,
             defaultBranch,
             enabled: true,
             maxActiveWriteRequests: write,
@@ -37,44 +34,20 @@ public class ProjectTests
         var project = Register();
 
         Assert.NotEqual(Guid.Empty, project.Id.Value);
-        Assert.NotEqual(Guid.Empty, project.NodeId.Value);
         Assert.Equal(1, project.Version);
         Assert.Equal(Now, project.CreatedAt);
         Assert.Equal(Now, project.UpdatedAt);
     }
 
     [Fact]
-    public void Register_normalizes_text_fields()
+    public void Register_normalizes_fleet_metadata()
     {
         var project = Register(
             displayName: "  Fleet  ",
-            repositoryPath: "  /tmp/fleet  ",
             defaultBranch: "  main  ");
 
         Assert.Equal("Fleet", project.DisplayName);
-        Assert.Equal("/tmp/fleet", project.RepositoryPath);
         Assert.Equal("main", project.DefaultBranch);
-    }
-
-    [Fact]
-    public void Canonicalize_path_trims_whitespace_and_collapses_trailing_separator()
-    {
-        Assert.Equal("/tmp/fleet", Project.CanonicalizePath("  /tmp/fleet\t"));
-        Assert.Throws<ArgumentException>(() => Project.CanonicalizePath("   "));
-
-        var expected = Path.TrimEndingDirectorySeparator(Path.GetFullPath("/tmp/repo"));
-        Assert.Equal(expected, Project.CanonicalizePath("/tmp/repo"));
-        Assert.Equal(expected, Project.CanonicalizePath("/tmp/repo" + Path.DirectorySeparatorChar));
-        Assert.Equal(expected, Project.CanonicalizePath("/tmp/repo" + Path.DirectorySeparatorChar + "  "));
-    }
-
-    [Fact]
-    public void Canonicalize_path_preserves_filesystem_root()
-    {
-        var root = Path.GetPathRoot(Path.GetFullPath("/"))!;
-        var canonical = Project.CanonicalizePath(root + "  ");
-
-        Assert.Equal(Path.TrimEndingDirectorySeparator(root), canonical);
     }
 
     [Theory]
@@ -83,14 +56,6 @@ public class ProjectTests
     public void Register_rejects_blank_display_names(string displayName)
     {
         Assert.Throws<ArgumentException>(() => Register(displayName: displayName));
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("   ")]
-    public void Register_rejects_blank_repository_paths(string repositoryPath)
-    {
-        Assert.Throws<ArgumentException>(() => Register(repositoryPath: repositoryPath));
     }
 
     [Theory]
@@ -116,19 +81,16 @@ public class ProjectTests
     {
         var project = Register(write: 5_000, read: 5_000, children: 5_000);
 
-        Assert.True(project.MaxActiveWriteRequests <= 512);
-        Assert.True(project.MaxReadOnlyRequests <= 512);
-        Assert.True(project.MaxChildAgentsPerRequest <= 512);
         Assert.Equal(512, project.MaxActiveWriteRequests);
+        Assert.Equal(512, project.MaxReadOnlyRequests);
+        Assert.Equal(512, project.MaxChildAgentsPerRequest);
     }
 
     [Fact]
-    public void Register_keeps_the_requested_flags()
+    public void Register_keeps_the_requested_policy()
     {
         var project = Project.Register(
-            Domain.NodeId.New(),
             "Fleet",
-            "/tmp/fleet",
             "main",
             enabled: false,
             maxActiveWriteRequests: 1,
@@ -148,7 +110,7 @@ public class ProjectTests
     }
 
     [Fact]
-    public void Rehydrate_preserves_identity_timestamps_and_version()
+    public void Rehydrate_preserves_metadata_policy_identity_timestamps_and_version()
     {
         var id = ProjectId.New();
         var createdAt = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
@@ -156,37 +118,44 @@ public class ProjectTests
 
         var project = Project.Rehydrate(
             id,
-            Domain.NodeId.New(),
             "Fleet",
-            "/tmp/fleet",
             "main",
-            enabled: true,
+            enabled: false,
             maxActiveWriteRequests: 1,
             maxReadOnlyRequests: 2,
             maxChildAgentsPerRequest: 3,
-            requireCleanStart: true,
+            requireCleanStart: false,
             createRequestBranch: true,
             createRequestCommit: false,
-            autoMerge: false,
+            autoMerge: true,
             createdAt,
             updatedAt,
             version: 7);
 
         Assert.Equal(id, project.Id);
+        Assert.Equal("Fleet", project.DisplayName);
+        Assert.Equal("main", project.DefaultBranch);
+        Assert.False(project.Enabled);
+        Assert.Equal(1, project.MaxActiveWriteRequests);
+        Assert.Equal(2, project.MaxReadOnlyRequests);
+        Assert.Equal(3, project.MaxChildAgentsPerRequest);
+        Assert.False(project.RequireCleanStart);
+        Assert.True(project.CreateRequestBranch);
+        Assert.False(project.CreateRequestCommit);
+        Assert.True(project.AutoMerge);
         Assert.Equal(createdAt, project.CreatedAt);
         Assert.Equal(updatedAt, project.UpdatedAt);
         Assert.Equal(7, project.Version);
     }
 
     [Fact]
-    public void Update_rewrites_state_and_bumps_version()
+    public void Update_rewrites_metadata_and_policy_and_bumps_version()
     {
         var project = Register();
         var later = Now.AddHours(1);
 
         project.Update(
             "Renamed",
-            "/tmp/renamed",
             "develop",
             enabled: false,
             maxActiveWriteRequests: 3,
@@ -199,37 +168,41 @@ public class ProjectTests
             later);
 
         Assert.Equal("Renamed", project.DisplayName);
-        Assert.Equal("/tmp/renamed", project.RepositoryPath);
         Assert.Equal("develop", project.DefaultBranch);
         Assert.False(project.Enabled);
         Assert.Equal(3, project.MaxActiveWriteRequests);
         Assert.Equal(6, project.MaxReadOnlyRequests);
         Assert.Equal(2, project.MaxChildAgentsPerRequest);
+        Assert.False(project.RequireCleanStart);
+        Assert.False(project.CreateRequestBranch);
+        Assert.False(project.CreateRequestCommit);
         Assert.True(project.AutoMerge);
         Assert.Equal(later, project.UpdatedAt);
         Assert.Equal(2, project.Version);
     }
 
     [Fact]
-    public void Update_rejects_invalid_state_without_bumping_version()
+    public void Update_rejects_invalid_metadata_without_mutating_state()
     {
         var project = Register();
 
         Assert.Throws<ArgumentException>(() => project.Update(
             " ",
-            "/tmp/fleet",
-            "main",
-            enabled: true,
+            "develop",
+            enabled: false,
             maxActiveWriteRequests: 1,
             maxReadOnlyRequests: 1,
             maxChildAgentsPerRequest: 1,
-            requireCleanStart: true,
-            createRequestBranch: true,
-            createRequestCommit: true,
-            autoMerge: false,
+            requireCleanStart: false,
+            createRequestBranch: false,
+            createRequestCommit: false,
+            autoMerge: true,
             Now.AddMinutes(1)));
 
-        Assert.Equal(1, project.Version);
         Assert.Equal("Fleet", project.DisplayName);
+        Assert.Equal("main", project.DefaultBranch);
+        Assert.True(project.Enabled);
+        Assert.Equal(Now, project.UpdatedAt);
+        Assert.Equal(1, project.Version);
     }
 }

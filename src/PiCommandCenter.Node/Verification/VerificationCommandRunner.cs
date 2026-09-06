@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Node.Child;
+using PiCommandCenter.Node.Quiescence;
 
 namespace PiCommandCenter.Node.Verification;
 
@@ -12,15 +13,17 @@ public sealed class VerificationCommandRunner : IVerificationCommandRunner
 {
     private readonly IOptions<VerificationOptions> _options;
     private readonly INodeReservationGateway _reservations;
+    private readonly IRequestAdmissionGate _admission;
 
     public VerificationCommandRunner(
         IOptions<VerificationOptions> options,
-        INodeReservationGateway reservations)
+        INodeReservationGateway reservations,
+        IRequestAdmissionGate admission)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _reservations = reservations ?? throw new ArgumentNullException(nameof(reservations));
+        _admission = admission ?? throw new ArgumentNullException(nameof(admission));
     }
-
     public async Task<VerificationProfileRunResult> RunAsync(
         VerificationRunContext context,
         string profileId,
@@ -52,6 +55,16 @@ public sealed class VerificationCommandRunner : IVerificationCommandRunner
                     : $"Verification command '{commandId}' is not in trusted profile '{profileId}'.");
         }
 
+        using var operationActivity = _admission.TryEnterOperation(
+            context.RequestId,
+            "verification");
+        if (operationActivity is null)
+        {
+            throw new VerificationRejectedException(
+                "admission_closed",
+                "The request is terminalizing; no new verification work is admitted.");
+        }
+
         await RejectActiveSourceMutationAsync(context.ProjectId, cancellationToken).ConfigureAwait(false);
 
         var acquire = await _reservations.AcquireAsync(
@@ -70,9 +83,13 @@ public sealed class VerificationCommandRunner : IVerificationCommandRunner
         }
 
         var lease = acquire.Lease;
+        NodeActivityLease? processActivity = null;
         try
         {
             await RejectActiveSourceMutationAsync(context.ProjectId, cancellationToken).ConfigureAwait(false);
+            processActivity = _admission.TrackProcess(
+                context.RequestId,
+                $"verification:{profile.Id}");
 
             var results = new List<VerificationCommandResult>(commands.Count);
             foreach (var command in commands)
@@ -100,6 +117,7 @@ public sealed class VerificationCommandRunner : IVerificationCommandRunner
             {
                 // lease release is best-effort after the run; never hide the command result
             }
+            processActivity?.Dispose();
         }
     }
 

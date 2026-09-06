@@ -5,7 +5,13 @@ using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using PiCommandCenter.Application.Reservations;
+using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Domain;
+using PiCommandCenter.Domain.Nodes;
+using PiCommandCenter.Domain.Projects;
+using PiCommandCenter.Domain.Requests;
+using PiCommandCenter.Domain.Sessions;
 using PiCommandCenter.Domain.Reservations;
 using PiCommandCenter.Infrastructure.Persistence;
 
@@ -18,6 +24,7 @@ namespace PiCommandCenter.ControlPlane.IntegrationTests;
 /// </summary>
 public sealed class ReservationsEndpointsTests : IClassFixture<ControlPlaneFixture>
 {
+    private const string ClaimToken = "reservation-endpoints-fixture-token";
     private readonly ControlPlaneFixture _fixture;
     private readonly HubFixture _hub;
 
@@ -115,9 +122,12 @@ public sealed class ReservationsEndpointsTests : IClassFixture<ControlPlaneFixtu
         var stale = await _hub.Connection.InvokeAsync<MutationAuthorizationResultMessage>(
             "AuthorizeMutation",
             new MutationAuthorizationMessage(
+                lease.ProjectId,
+                lease.RequestId,
+                ClaimToken,
                 lease.LeaseId,
                 originalToken,
-                "session-a",
+                lease.OwnerSessionId,
                 "src/A.cs",
                 (int)MutationOperation.Edit,
                 nameof(MutationOperation.Edit)));
@@ -165,12 +175,69 @@ public sealed class ReservationsEndpointsTests : IClassFixture<ControlPlaneFixtu
     private async Task<ReservationLeaseDto> AcquireAsync(Guid projectId)
     {
         using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var project = await db.Projects.SingleAsync(candidate => candidate.Id == new ProjectId(projectId));
+        var nodeId = new NodeId(_fixture.AuthenticatedNodeId);
+        var sessionId = "reservation-endpoint-session-" + Guid.NewGuid().ToString("N");
+        var repositoryPath = _fixture.CreateGitRepository();
+        var binding = WorkspaceBinding.Designate(project.Id, nodeId, repositoryPath, now);
+        Assert.True(binding.ApplyValidationResult(
+            nodeId,
+            binding.ValidationRevision,
+            WorkspaceBindingStatus.Valid,
+            WorkspaceBinding.ValidValidationCode,
+            "Seeded for reservation endpoint tests.",
+            repositoryPath,
+            now));
+        var request = WorkRequest.Enqueue(
+            project.Id,
+            WorkRequestKind.Development,
+            RequestPriority.Normal,
+            RiskLevel.Standard,
+            "Reservation endpoint request",
+            "Exercise forced release.",
+            now);
+        request.Start(now);
+        var assignment = ExecutionAssignment.Create(
+            request.Id,
+            project.Id,
+            binding.Id,
+            nodeId,
+            binding.CanonicalRepositoryPath!,
+            project.DefaultBranch,
+            binding.ValidationRevision,
+            ClaimToken,
+            now,
+            TimeSpan.FromMinutes(5));
+        db.WorkspaceBindings.Add(binding);
+        db.WorkRequests.Add(request);
+        db.ExecutionAssignments.Add(assignment);
+        db.AgentSessions.Add(new AgentSessionRow
+        {
+            Id = sessionId,
+            ProjectId = projectId,
+            RequestId = request.Id.Value,
+            AgentName = "reservation-endpoint-session",
+            Role = "implementer",
+            Runtime = "pi",
+            Model = "codex/default",
+            Liveness = nameof(AgentLiveness.Online),
+            Activity = nameof(AgentActivity.Idle),
+            Attention = "None",
+            WorkState = nameof(AgentWorkState.Executing),
+            StatusReason = "Seeded for reservation endpoint tests",
+            StartedAtUtcTicks = now.UtcTicks,
+            Version = 1,
+        });
+        await db.SaveChangesAsync();
+
         var reservations = scope.ServiceProvider.GetRequiredService<IReservationService>();
         return await reservations.AcquireAsync(
             new AcquireReservationCommand(
                 projectId,
-                Guid.NewGuid(),
-                "session-a",
+                request.Id.Value,
+                sessionId,
                 [new ReservationScopeDto((int)ReservationScopeKind.File, nameof(ReservationScopeKind.File), "src/A.cs")],
                 "acquired before force release"));
     }
@@ -195,6 +262,15 @@ public sealed class ReservationsEndpointsTests : IClassFixture<ControlPlaneFixtu
                     fixture.ConfigureNodeHub)
                 .Build();
             Connection.StartAsync().GetAwaiter().GetResult();
+            _ = Connection.InvokeAsync<NodeDto>(
+                    "Register",
+                    new NodeRegistrationMessage(
+                        fixture.AuthenticatedNodeId,
+                        "reservation-endpoints-node",
+                        "1.0.0",
+                        "{}"))
+                .GetAwaiter()
+                .GetResult();
         }
 
         public void Dispose() => Connection.DisposeAsync().AsTask().GetAwaiter().GetResult();

@@ -1,9 +1,10 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Application.Live;
+using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Projects;
 using PiCommandCenter.Infrastructure.Requests;
@@ -92,15 +93,18 @@ public static class TestRepositories
         return context;
     }
 
-    public static ProjectCatalog CreateCatalog(ControlPlaneDbContext context, params IReadOnlyList<string> approvedRoots) =>
+    public static ProjectCatalog CreateCatalog(ControlPlaneDbContext context) =>
+        new(TimeProvider.System, context, new ProjectionNotifier());
+
+    public static RequestQueue CreateQueue(ControlPlaneDbContext context) =>
         new(
             TimeProvider.System,
             context,
-            Options.Create(new ProjectCatalogOptions { ApprovedRoots = approvedRoots }),
+            new RequestEligibilityEvaluator(
+                TimeProvider.System,
+                Options.Create(new NodeLivenessOptions()),
+                context),
             new ProjectionNotifier());
-
-    public static RequestQueue CreateQueue(ControlPlaneDbContext context) =>
-        new(TimeProvider.System, context, new ProjectionNotifier());
 
     public static readonly JsonSerializerOptions WebJson = new(JsonSerializerDefaults.Web);
 }

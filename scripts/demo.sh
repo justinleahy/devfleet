@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Loopback demonstration hosts. Default and --smoke never call providers and never
-# treat project registration as a completed SPEC demonstration. The canonical
-# request is submitted through the web UI. RUN_REAL_* starts the node so that a
-# UI-submitted request can launch the official CLIs (quota).
+# Loopback demonstration host. Default and --smoke start only the Control Plane,
+# register project metadata, and never call providers. RUN_REAL_* also starts the
+# node, designates and validates its WorkspaceBinding, and allows the canonical
+# web-UI request to launch the official CLIs (quota).
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +16,7 @@ if [[ "${1:-}" == "--smoke" ]]; then
 fi
 
 REAL_PIPELINE=0
-if [[ -n "${RUN_REAL_PI_TESTS:-}" || -n "${RUN_REAL_CLAUDE_TESTS:-}" || -n "${RUN_REAL_ANTIGRAVITY_TESTS:-}" ]]; then
+if [[ -n "${RUN_REAL_PI_TESTS:-}" || -n "${RUN_REAL_CLAUDE_TESTS:-}" || -n "${RUN_REAL_ANTIGRAVITY_TESTS:-}" || -n "${RUN_REAL_MUSE_TESTS:-}" ]]; then
     REAL_PIPELINE=1
 fi
 
@@ -39,7 +39,16 @@ fi
 
 if [[ "${SMOKE}" -eq 1 ]]; then
     PI_CC_DATA="$(mktemp -d "${TMPDIR:-/tmp}/pi-cc-demo-smoke.XXXXXX")"
-    export PI_CC_DATA
+    PI_CC_PORT="$(
+        python3 - <<'PY'
+import socket
+
+with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PY
+    )"
+    export PI_CC_DATA PI_CC_PORT
 fi
 
 export PI_CC_DATA="${PI_CC_DATA:-${XDG_DATA_HOME:-$HOME/.local/share}/pi-command-center}"
@@ -65,7 +74,11 @@ git -C "${WORKSPACE}" commit -q -m "Initial health-details fixture"
 
 CP_PID=""
 NODE_PID=""
+AUTHENTICATED_PAGE=""
 cleanup() {
+    if [[ -n "${AUTHENTICATED_PAGE}" ]]; then
+        rm -f "${AUTHENTICATED_PAGE}"
+    fi
     if [[ -n "${NODE_PID}" ]] && kill -0 "${NODE_PID}" 2>/dev/null; then
         kill "${NODE_PID}" 2>/dev/null || true
         wait "${NODE_PID}" 2>/dev/null || true
@@ -87,12 +100,16 @@ export Node__EventSpoolPath="${PI_CC_DATA}/node-spool.db"
 export Node__RequireCleanStart="false"
 export Admin__Username
 export Admin__PasswordFile
+export NodeAuthentication__CredentialDirectory
 export NodeAuthentication__CredentialFile
 export NodeAuthentication__Header
 export NodeAuthentication__Scheme
+export Node__Id
 
-dotnet run --project "${REPO_ROOT}/src/PiCommandCenter.ControlPlane" --no-launch-profile \
-    > "${PI_CC_DATA}/controlplane.log" 2>&1 &
+(
+    unset NodeAuthentication__CredentialFile Node__Id
+    exec dotnet run --project "${REPO_ROOT}/src/PiCommandCenter.ControlPlane" --no-launch-profile
+) > "${PI_CC_DATA}/controlplane.log" 2>&1 &
 CP_PID=$!
 
 ready=0
@@ -115,10 +132,25 @@ if [[ "${ready}" -ne 1 ]]; then
 fi
 
 if [[ "${REAL_PIPELINE}" -eq 1 ]]; then
-    dotnet run --project "${REPO_ROOT}/src/PiCommandCenter.Node" --no-launch-profile \
-        > "${PI_CC_DATA}/node.log" 2>&1 &
+    (
+        unset NodeAuthentication__CredentialDirectory
+        exec dotnet run --project "${REPO_ROOT}/src/PiCommandCenter.Node" --no-launch-profile
+    ) > "${PI_CC_DATA}/node.log" 2>&1 &
     NODE_PID=$!
 fi
+
+extract_antiforgery_token() {
+    python3 - "$1" "$2" <<'PY'
+import re, sys
+html = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(r'name="__RequestVerificationToken"[^>]*value="([^"]+)"', html)
+if not match:
+    match = re.search(r'value="([^"]+)"[^>]*name="__RequestVerificationToken"', html)
+if not match:
+    sys.exit(f"{sys.argv[2]} missing antiforgery token")
+print(match.group(1))
+PY
+}
 
 COOKIE_JAR="${PI_CC_DATA}/demo.cookies"
 touch "${COOKIE_JAR}"
@@ -126,17 +158,7 @@ chmod 0600 "${COOKIE_JAR}"
 PASSWORD="$(cat "${PI_CC_ADMIN_PASSWORD_ONCE_FILE}")"
 
 curl -sf -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" "${URL}/login" -o "${PI_CC_DATA}/login.html"
-TOKEN="$(python3 - "${PI_CC_DATA}/login.html" <<'PY'
-import re, sys
-html = open(sys.argv[1], encoding="utf-8").read()
-match = re.search(r'name="__RequestVerificationToken"[^>]*value="([^"]+)"', html)
-if not match:
-    match = re.search(r'value="([^"]+)"[^>]*name="__RequestVerificationToken"', html)
-if not match:
-    sys.exit("login page missing antiforgery token")
-print(match.group(1))
-PY
-)"
+TOKEN="$(extract_antiforgery_token "${PI_CC_DATA}/login.html" "login page")"
 
 curl -sf -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" -X POST "${URL}/account/login" \
     --data-urlencode "username=${Admin__Username}" \
@@ -146,10 +168,16 @@ curl -sf -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" -X POST "${URL}/account/login" \
     -H "RequestVerificationToken: ${TOKEN}" \
     -o /dev/null
 
+AUTHENTICATED_PAGE="$(mktemp "${TMPDIR:-/tmp}/pcc-demo-authenticated.XXXXXX.html")"
+curl -sSfL -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" "${URL}/" -o "${AUTHENTICATED_PAGE}"
+TOKEN="$(extract_antiforgery_token "${AUTHENTICATED_PAGE}" "authenticated home page")"
+rm -f "${AUTHENTICATED_PAGE}"
+AUTHENTICATED_PAGE=""
+
 register_body="$(curl -sf -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" -X POST "${URL}/api/projects" \
     -H "Content-Type: application/json" \
     -H "RequestVerificationToken: ${TOKEN}" \
-    -d "{\"displayName\":\"Health details fixture\",\"repositoryPath\":\"${WORKSPACE}\",\"defaultBranch\":\"main\",\"enabled\":true,\"maxActiveWriteRequests\":2,\"maxReadOnlyRequests\":4,\"maxChildAgentsPerRequest\":3,\"requireCleanStart\":false,\"createRequestBranch\":false,\"createRequestCommit\":false,\"autoMerge\":false}")"
+    -d "{\"displayName\":\"Health details fixture\",\"defaultBranch\":\"main\",\"enabled\":true,\"maxActiveWriteRequests\":2,\"maxReadOnlyRequests\":4,\"maxChildAgentsPerRequest\":3,\"requireCleanStart\":false,\"createRequestBranch\":false,\"createRequestCommit\":false,\"autoMerge\":false}")"
 
 project_id="$(printf '%s' "${register_body}" | sed -n 's/.*"id":"\([^"]*\)".*/\1/p' | head -n1)"
 if [[ -z "${project_id}" ]]; then
@@ -157,8 +185,45 @@ if [[ -z "${project_id}" ]]; then
     exit 1
 fi
 
+if [[ "${REAL_PIPELINE}" -eq 1 ]]; then
+    binding_body="$(python3 - "${Node__Id}" "${WORKSPACE}" <<'PY'
+import json, sys
+print(json.dumps({"nodeId": sys.argv[1], "repositoryPath": sys.argv[2]}))
+PY
+)"
+    binding_designated=0
+    for _ in $(seq 1 90); do
+        if curl -sf -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
+            -X PUT "${URL}/api/projects/${project_id}/workspace-binding" \
+            -H "Content-Type: application/json" \
+            -H "RequestVerificationToken: ${TOKEN}" \
+            -d "${binding_body}" >/dev/null; then
+            binding_designated=1
+            break
+        fi
+        if ! kill -0 "${NODE_PID}" 2>/dev/null; then
+            echo "Node exited before registering. Log:" >&2
+            cat "${PI_CC_DATA}/node.log" >&2 || true
+            exit 1
+        fi
+        sleep 0.5
+    done
+    if [[ "${binding_designated}" -ne 1 ]]; then
+        echo "Node did not register in time to designate the workspace binding. Log:" >&2
+        cat "${PI_CC_DATA}/node.log" >&2 || true
+        exit 1
+    fi
+
+    curl -sf -c "${COOKIE_JAR}" -b "${COOKIE_JAR}" \
+        -X POST "${URL}/api/projects/${project_id}/workspace-binding/validate" \
+        -H "RequestVerificationToken: ${TOKEN}" \
+        -o /dev/null
+fi
+
 if [[ "${REAL_PIPELINE}" -eq 0 ]]; then
-    echo "Node is intentionally stopped; queued UI requests cannot spend provider quota."
+    echo "Node is intentionally stopped; the project has no workspace binding and queued UI requests cannot spend provider quota."
+else
+    echo "Node is running; its workspace binding was designated and validation was requested."
 fi
 
 echo "Hosts are up. This is not a completed demonstration."
@@ -167,13 +232,13 @@ echo "  Login:         ${URL}/login  (admin; password in ${PI_CC_ADMIN_PASSWORD_
 echo "  Health:        ${URL}/health"
 echo "  Project URL:   ${URL}/projects/${project_id}"
 echo "  Project ID:    ${project_id}"
-echo "  Fixture:       ${WORKSPACE}"
+echo "  Fixture path:  ${WORKSPACE}"
 echo "Submit the canonical request from the project page (New request → Queue request)."
 echo "Guide: ${REPO_ROOT}/demo/FIRST-DEMO.md"
 
 
 if [[ "${SMOKE}" -eq 1 ]]; then
-    echo "Smoke mode: quota-free shutdown. Registration is not SPEC success."
+    echo "Smoke mode: quota-free shutdown after metadata-only Project registration; no workspace was designated."
     exit 0
 fi
 

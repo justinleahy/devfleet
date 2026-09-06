@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.Extensions.Options;
@@ -7,14 +8,14 @@ using PiCommandCenter.Infrastructure.Security;
 namespace PiCommandCenter.ControlPlane.Security;
 
 /// <summary>
-/// Authenticates node clients using the application-generated token from the private credential file.
-/// The presented secret is never written to logs or the authenticate ticket.
+/// Authenticates node clients using the credential registry.
+/// The presented secret is never written to logs or the authentication ticket.
 /// </summary>
 public sealed class NodeTokenAuthenticationHandler(
     IOptionsMonitor<AuthenticationSchemeOptions> options,
     ILoggerFactory logger,
     UrlEncoder encoder,
-    NodeTokenCredential credential,
+    NodeCredentialRegistry credentials,
     IOptions<NodeAuthenticationOptions> nodeOptions)
     : AuthenticationHandler<AuthenticationSchemeOptions>(options, logger, encoder)
 {
@@ -55,6 +56,11 @@ public sealed class NodeTokenAuthenticationHandler(
             presented = raw.Trim();
         }
 
+        if (presented.Length != NodeCredentialRegistry.CredentialHexLength)
+        {
+            return Task.FromResult(AuthenticateResult.Fail("Invalid node credential."));
+        }
+
         byte[] candidate;
         try
         {
@@ -65,13 +71,24 @@ public sealed class NodeTokenAuthenticationHandler(
             return Task.FromResult(AuthenticateResult.Fail("Invalid node credential."));
         }
 
-        if (!credential.Matches(candidate))
+        Guid nodeId;
+        bool authenticated;
+        try
+        {
+            authenticated = credentials.TryResolve(candidate, out nodeId);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(candidate);
+        }
+
+        if (!authenticated)
         {
             return Task.FromResult(AuthenticateResult.Fail("Invalid node credential."));
         }
 
         var identity = new ClaimsIdentity(
-            [new Claim(ClaimTypes.Name, "node"), new Claim(ClaimTypes.Role, "Node")],
+            [new Claim(ClaimTypes.NameIdentifier, nodeId.ToString("D")), new Claim(ClaimTypes.Role, "Node")],
             NodeTokenDefaults.AuthenticationScheme);
         var ticket = new AuthenticationTicket(new ClaimsPrincipal(identity), NodeTokenDefaults.AuthenticationScheme);
         return Task.FromResult(AuthenticateResult.Success(ticket));

@@ -1,5 +1,19 @@
+/* Mobile-first. The phone layout is the default: one full-width column that runs
+   edge to edge inside the safe area, with the sign-in surface reading as a plain
+   band rather than a floating card. Wider viewports promote that band to the
+   centered, bordered card and add the fuller DevFleet identity block. */
+
 .entry-shell {
+    /* Local gutter so the full-bleed card and the padded brand/footer stay on the
+       same optical edge without repeating the value in five places. */
+    --entry-gutter: calc(var(--design-unit) * 4px);
+
+    /* Explicit: the safe-area padding must not add to the 100dvh minimum, or a
+       notched phone gains a scrollbar on a page that otherwise fits. */
+    box-sizing: border-box;
     min-height: 100dvh;
+    padding-block: env(safe-area-inset-top) env(safe-area-inset-bottom);
+    padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
     background-color: var(--neutral-layer-2);
 }
 
@@ -7,55 +21,124 @@
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 4px);
-    max-width: 460px;
-    margin: 0 auto;
-    padding: calc(var(--design-unit) * 20px) calc(var(--design-unit) * 5px) calc(var(--design-unit) * 10px);
+    /* No inline padding on phone: the card is deliberately full width, so only the
+       brand and footer carry the gutter. */
+    padding-block: calc(var(--design-unit) * 6px) calc(var(--design-unit) * 8px);
 }
 
-.entry-card {
-    display: flex;
-    flex-direction: column;
-    gap: calc(var(--design-unit) * 6px);
-    padding: calc(var(--design-unit) * 8px);
-    background-color: var(--neutral-layer-1);
-    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-rest);
-    border-radius: calc(var(--control-corner-radius) * 2px);
-}
-
+/* Identity block: type weight and a compact uppercase eyebrow carry the brand.
+   No accent, no gradient — accent stays reserved for the primary action. */
 .entry-brand {
     display: flex;
     flex-direction: column;
+    gap: calc(var(--design-unit) * 0.5px);
+    padding-inline: var(--entry-gutter);
+}
+
+.entry-eyebrow {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
 }
 
 .brand {
-    font-size: var(--type-ramp-base-font-size);
-    line-height: var(--type-ramp-base-line-height);
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
     font-weight: 600;
-    letter-spacing: -0.01em;
+    letter-spacing: -0.015em;
 }
 
 .brand-sub {
+    color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
     line-height: var(--type-ramp-minus-1-line-height);
-    color: var(--neutral-foreground-hint);
+    max-width: 60ch;
+}
+
+/* The page body (sign-in, access denied) lands here. Both pages emit stacked
+   blocks, so the card owns the vertical rhythm between them. */
+.entry-card {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 5px);
+    padding: calc(var(--design-unit) * 6px) var(--entry-gutter);
+    background-color: var(--neutral-layer-1);
+    /* Full-bleed on phone: side borders on a band that touches both screen edges
+       read as clipped, so only the horizontal rules remain. */
+    border-block: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-rest);
 }
 
 .entry-foot {
-    padding-inline: calc(var(--design-unit) * 2px);
+    padding-inline: var(--entry-gutter);
     color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-minus-1-font-size);
-    line-height: var(--type-ramp-minus-1-line-height);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-variant-numeric: tabular-nums;
 }
 
-/* Short viewports and phones: stop pushing the card past the fold */
-@media (max-width: 520px), (max-height: 640px) {
+/* Tablet and up: the band becomes a compact centered card. */
+@media (min-width: 600px) {
+    .entry-shell {
+        --entry-gutter: calc(var(--design-unit) * 8px);
+    }
+
     .entry-main {
-        padding-top: calc(var(--design-unit) * 8px);
-        gap: calc(var(--design-unit) * 3px);
+        gap: calc(var(--design-unit) * 5px);
+        max-width: 27rem;
+        margin-inline: auto;
+        padding-block: calc(var(--design-unit) * 12px) calc(var(--design-unit) * 10px);
+        padding-inline: calc(var(--design-unit) * 5px);
+    }
+
+    .entry-brand,
+    .entry-foot {
+        padding-inline: 0;
     }
 
     .entry-card {
-        padding: calc(var(--design-unit) * 6px);
-        gap: calc(var(--design-unit) * 5px);
+        gap: calc(var(--design-unit) * 6px);
+        padding: var(--entry-gutter);
+        border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-rest);
+        border-radius: calc(var(--control-corner-radius) * 2px);
+    }
+
+    .brand {
+        font-size: var(--type-ramp-plus-3-font-size);
+        line-height: var(--type-ramp-plus-3-line-height);
+        letter-spacing: -0.02em;
+    }
+}
+
+/* Desktop, tall enough to center without clipping: park the card optically high
+   rather than dead center, which is where a command-center sign-in reads best. */
+@media (min-width: 960px) and (min-height: 720px) {
+    .entry-shell {
+        display: grid;
+        align-content: center;
+    }
+
+    .entry-main {
+        padding-block: calc(var(--design-unit) * 6px);
+    }
+}
+
+/* Short screens (landscape phones, split panes): keep the whole surface above the
+   fold instead of pushing the fields past it. */
+@media (max-height: 620px) {
+    .entry-main {
+        gap: calc(var(--design-unit) * 3px);
+        padding-block: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 5px);
+    }
+
+    .entry-card {
+        gap: calc(var(--design-unit) * 4px);
+        padding-block: calc(var(--design-unit) * 5px);
+    }
+
+    .brand-sub {
+        display: none;
     }
 }

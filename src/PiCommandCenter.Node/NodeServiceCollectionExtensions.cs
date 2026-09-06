@@ -4,6 +4,7 @@ using PiCommandCenter.Application.Runtime;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
+using PiCommandCenter.Node.Projects;
 using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.SubscriptionUsage;
 using PiCommandCenter.Node.SystemResources;
@@ -36,6 +37,10 @@ public static class NodeServiceCollectionExtensions
             .BindConfiguration(NodeAuthenticationOptions.SectionName)
             .Services
             .AddSingleton<NodeCredentialLoader>()
+            .AddOptions<WorkspaceValidationOptions>()
+            .BindConfiguration(WorkspaceValidationOptions.SectionName)
+            .Services
+            .AddSingleton<IWorkspaceBindingValidator, WorkspaceBindingValidator>()
             .AddOptions<Verification.VerificationOptions>()
             .BindConfiguration(Verification.VerificationOptions.SectionName)
             .ValidateOnStart()
@@ -46,6 +51,9 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<Repository.RequestWorkspaceTracker>()
             .AddSingleton<Application.Git.ITrustedGitService, Git.RestrictedGitService>()
             .AddSingleton<Child.INodeCompletionGateway, Child.NodeTransportCompletionGateway>()
+            .AddSingleton<Quiescence.RequestAdmissionGate>()
+            .AddSingleton<Quiescence.IRequestAdmissionGate>(
+                static sp => sp.GetRequiredService<Quiescence.RequestAdmissionGate>())
             .AddSingleton<Repository.IRuntimeCrashRecovery, Repository.RuntimeCrashRecovery>()
             .AddOptions<PiWorkerOptions>()
             .BindConfiguration(PiWorkerOptions.SectionName)
@@ -56,6 +64,11 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton<NodeRuntimeRoutingStore>()
             .AddSingleton<INodeRuntimeRoutingStore>(
                 static sp => sp.GetRequiredService<NodeRuntimeRoutingStore>())
+            .AddSingleton<IRuntimeReadinessProbe, RuntimeReadinessProbe>()
+            .AddSingleton<RuntimeReadinessProvider>()
+            .AddSingleton<IRuntimeReadinessProvider>(
+                static sp => sp.GetRequiredService<RuntimeReadinessProvider>())
+            .AddHostedService(static sp => sp.GetRequiredService<RuntimeReadinessProvider>())
             .AddSingleton<IRuntimeModelCommandRunner, RuntimeModelCommandRunner>()
             .AddSingleton<IRuntimeModelDiscovery, RuntimeModelDiscovery>()
             .AddSingleton<IRuntimeSubscriptionUsageCommandRunner, RuntimeSubscriptionUsageCommandRunner>()
@@ -76,6 +89,9 @@ public static class NodeServiceCollectionExtensions
                 static sp => sp.GetRequiredService<NodeSystemResourceMonitor>())
             .AddSingleton<SqliteNodeEventSpool>()
             .AddSingleton<INodeEventSpool>(static sp => sp.GetRequiredService<SqliteNodeEventSpool>())
+            .AddSingleton<SqliteNodeAssignmentJournal>()
+            .AddSingleton<INodeAssignmentJournal>(
+                static sp => sp.GetRequiredService<SqliteNodeAssignmentJournal>())
             .AddSingleton<NodeTransportClient>()
             .AddSingleton<INodeHubOps>(static sp => sp.GetRequiredService<NodeTransportClient>())
             .AddSingleton<IRootSessionSupervisor>(
@@ -94,8 +110,13 @@ public static class NodeServiceCollectionExtensions
             .AddSingleton(static sp => ActivatorUtilities.CreateInstance<Child.PiChildSessionSupervisor>(
                 sp,
                 sp.GetRequiredService<Runtime.PiOrchestrationRequestHandler>(),
-                new Lazy<IAgentRuntimeRegistry>(sp.GetRequiredService<IAgentRuntimeRegistry>)))
+                new Lazy<IAgentRuntimeRegistry>(sp.GetRequiredService<IAgentRuntimeRegistry>),
+                new Lazy<IRootSessionSupervisor>(sp.GetRequiredService<IRootSessionSupervisor>),
+                new Lazy<Child.INodeAssignmentTerminalizationOrchestrator>(
+                    sp.GetRequiredService<Child.INodeAssignmentTerminalizationOrchestrator>)))
             .AddSingleton<Runtime.IPiOrchestrationRequestHandler>(
+                static sp => sp.GetRequiredService<Child.PiChildSessionSupervisor>())
+            .AddSingleton<Child.IRootSessionTerminalizer>(
                 static sp => sp.GetRequiredService<Child.PiChildSessionSupervisor>())
             .AddSingleton<Runtime.PiRuntimeAdapter>()
             .AddSingleton<IAgentRuntimeAdapter>(static sp => sp.GetRequiredService<Runtime.PiRuntimeAdapter>())
@@ -133,8 +154,13 @@ public static class NodeServiceCollectionExtensions
                 sp.GetRequiredService<Runtime.Claude.ClaudeCodeRuntimeAdapter>(),
                 sp.GetRequiredService<Runtime.Antigravity.AntigravityRuntimeAdapter>(),
                 sp.GetRequiredService<Runtime.Muse.MuseCodeRuntimeAdapter>()))
+            .AddSingleton<NodeAssignmentCredentialSource>()
+            .AddSingleton<INodeAssignmentCredentialSource>(
+                static sp => sp.GetRequiredService<NodeAssignmentCredentialSource>())
             .AddSingleton<PiRootSessionSupervisor>()
             .AddSingleton<NodeWorker>()
+            .AddSingleton<Child.INodeAssignmentTerminalizationOrchestrator>(
+                static sp => sp.GetRequiredService<NodeWorker>())
             .AddSingleton<Runtime.Claude.Hooks.ClaudeHookAuditLog>()
             .AddSingleton<Runtime.Claude.Hooks.ClaudeReservationHookEvaluator>()
             .AddSingleton<Runtime.Claude.Hooks.ClaudeReservationHookServer>()

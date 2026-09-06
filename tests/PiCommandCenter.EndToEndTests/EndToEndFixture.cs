@@ -33,13 +33,17 @@ public sealed class EndToEndFixture : IDisposable
         {
         }
 
-        (PasswordFile, CredentialFile) = AuthTestMaterial.WriteTo(Path.Combine(_tempRoot, "auth"));
+        var auth = AuthTestMaterial.WriteTo(Path.Combine(_tempRoot, "auth"));
+        PasswordFile = auth.PasswordFile;
+        CredentialDirectory = auth.CredentialDirectory;
+        AuthenticatedNodeId = auth.AuthenticatedNodeId;
+        NodeTokenHex = auth.NodeTokenHex;
 
         Factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={SqlitePath}");
             builder.UseSetting("Projects:ApprovedRoots:0", ApprovedRoot);
-            builder.UseTestAuthFiles(PasswordFile, CredentialFile);
+            builder.UseTestAuthFiles(PasswordFile, CredentialDirectory);
         });
 
         using var scope = Factory.Services.CreateScope();
@@ -55,9 +59,11 @@ public sealed class EndToEndFixture : IDisposable
 
     public string PasswordFile { get; }
 
-    public string CredentialFile { get; }
+    public string CredentialDirectory { get; }
 
-    public string NodeTokenHex => AuthTestMaterial.NodeTokenHex;
+    public Guid AuthenticatedNodeId { get; }
+
+    public string NodeTokenHex { get; }
 
     public HttpClient CreateClient() => CreateAuthenticatedClient(Factory);
 

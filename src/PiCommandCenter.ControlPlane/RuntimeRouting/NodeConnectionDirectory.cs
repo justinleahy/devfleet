@@ -15,7 +15,13 @@ public sealed class NodeConnectionDirectory
         {
             if (_nodeByConnection.TryGetValue(connectionId, out var previousNode))
             {
-                _connectionByNode.Remove(previousNode);
+                if (previousNode != nodeId)
+                {
+                    throw new InvalidOperationException(
+                        $"Connection '{connectionId}' is already registered as node '{previousNode}'.");
+                }
+
+                return;
             }
             if (_connectionByNode.TryGetValue(nodeId, out var previousConnection))
             {
@@ -31,6 +37,16 @@ public sealed class NodeConnectionDirectory
         lock (_gate)
         {
             return _connectionByNode.GetValueOrDefault(nodeId);
+        }
+    }
+
+    public bool IsBound(Guid nodeId, string connectionId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionId);
+        lock (_gate)
+        {
+            return _nodeByConnection.TryGetValue(connectionId, out var registeredNodeId)
+                && registeredNodeId == nodeId;
         }
     }
 

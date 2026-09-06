@@ -17,10 +17,10 @@ public sealed class NodeOptionsValidator : IValidateOptions<NodeOptions>
 
         var failures = new List<string>();
 
-        if (!Uri.TryCreate(options.ControlPlaneUrl, UriKind.Absolute, out var url)
-            || (url.Scheme != Uri.UriSchemeHttp && url.Scheme != Uri.UriSchemeHttps))
+        var controlPlaneUrlFailure = GetControlPlaneUrlFailure(options.ControlPlaneUrl, out _);
+        if (controlPlaneUrlFailure is not null)
         {
-            failures.Add($"'{nameof(options.ControlPlaneUrl)}' must be an absolute http(s) URL.");
+            failures.Add(controlPlaneUrlFailure);
         }
 
         if (options.Id == Guid.Empty)
@@ -67,5 +67,39 @@ public sealed class NodeOptionsValidator : IValidateOptions<NodeOptions>
         return failures.Count > 0
             ? ValidateOptionsResult.Fail(failures)
             : ValidateOptionsResult.Success;
+    }
+
+    internal static Uri CreateControlPlaneUri(string? configuredUrl)
+    {
+        var failure = GetControlPlaneUrlFailure(configuredUrl, out var uri);
+        return failure is null
+            ? uri!
+            : throw new InvalidOperationException(failure);
+    }
+
+    private static string? GetControlPlaneUrlFailure(string? configuredUrl, out Uri? uri)
+    {
+        if (!Uri.TryCreate(configuredUrl, UriKind.Absolute, out var candidate)
+            || (candidate.Scheme != Uri.UriSchemeHttp && candidate.Scheme != Uri.UriSchemeHttps)
+            || string.IsNullOrEmpty(candidate.Host))
+        {
+            uri = null;
+            return $"'{nameof(NodeOptions.ControlPlaneUrl)}' must be an absolute http(s) URL.";
+        }
+
+        if (!string.IsNullOrEmpty(candidate.UserInfo))
+        {
+            uri = null;
+            return $"'{nameof(NodeOptions.ControlPlaneUrl)}' must not contain user information.";
+        }
+
+        if (candidate.Scheme == Uri.UriSchemeHttp && !candidate.IsLoopback)
+        {
+            uri = null;
+            return $"'{nameof(NodeOptions.ControlPlaneUrl)}' must use HTTPS unless the host is loopback.";
+        }
+
+        uri = candidate;
+        return null;
     }
 }

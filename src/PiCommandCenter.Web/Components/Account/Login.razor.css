@@ -1,31 +1,45 @@
+/* Mobile-first sign-in. The phone case is the default: full-width native controls
+   at a 44px touch target, one column, no horizontal overflow at 320px. Wider
+   viewports only tighten the type scale and rhythm — the structure never changes,
+   because the form must submit identically without JavaScript. */
+
+.login {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 5px);
+}
+
 .login-head {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 2px);
+    gap: calc(var(--design-unit) * 1.5px);
 }
 
 .login-head h1 {
     margin: 0;
-    font-size: var(--type-ramp-plus-3-font-size);
-    line-height: var(--type-ramp-plus-3-line-height);
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
     font-weight: 600;
-    letter-spacing: -0.02em;
+    letter-spacing: -0.015em;
 }
 
 .login-lead {
     margin: 0;
+    max-width: 62ch;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
     line-height: var(--type-ramp-minus-1-line-height);
 }
 
-/* Failure and sign-out feedback. Text only: no field values are ever reflected. */
+/* Failure and sign-out feedback. Text only: no field values are ever reflected.
+   Error keeps the semantic error stroke; the signed-out confirmation uses accent,
+   which is the live/primary channel rather than a second warning colour. */
 .login-alert,
 .login-status {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 1px);
-    padding: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
+    gap: calc(var(--design-unit) * 0.5px);
+    padding: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 3.5px);
     border-inline-start: calc(var(--stroke-width) * 3px) solid var(--error);
     border-radius: calc(var(--control-corner-radius) * 1px);
     background-color: var(--neutral-fill-secondary-rest);
@@ -33,8 +47,17 @@
     line-height: var(--type-ramp-minus-1-line-height);
 }
 
-.login-alert-title {
+.login-alert-title,
+.login-status-title {
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
     font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.login-alert-title {
+    color: var(--error);
 }
 
 .login-status {
@@ -42,33 +65,49 @@
     color: var(--neutral-foreground-rest);
 }
 
+.login-status-title {
+    color: var(--accent-foreground-rest);
+}
+
 .login-form {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 5px);
+    gap: calc(var(--design-unit) * 4px);
 }
 
 .field {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 1px);
+    gap: calc(var(--design-unit) * 1.5px);
+    /* Inputs are 100% wide by default; this keeps a long label or autofill chip
+       from forcing the column past the card at 320px. */
+    min-width: 0;
 }
 
 .field label {
-    font-size: var(--type-ramp-minus-1-font-size);
-    line-height: var(--type-ramp-minus-1-line-height);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
     font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--neutral-foreground-rest);
 }
 
 /* Native controls, deliberately: the form must submit without JavaScript so the
    cookie exists before the first interactive render. Fluent design tokens keep
    them visually identical to the component library used everywhere else. */
 .field input {
-    min-height: calc(var(--design-unit) * 10px);
+    /* 44px: the touch target the rest of the shell uses on phones. */
+    min-height: calc(var(--design-unit) * 11px);
+    width: 100%;
+    box-sizing: border-box;
     padding: 0 calc(var(--design-unit) * 3px);
     color: var(--neutral-foreground-rest);
     font-family: inherit;
-    font-size: var(--type-ramp-base-font-size);
+    /* 16px, not the base ramp: mobile Safari zooms the viewport on focus for any
+       smaller font size, which would break the 320px layout mid-sign-in. The
+       desktop breakpoint drops it back onto the type ramp. */
+    font-size: 16px;
     background-color: var(--neutral-fill-input-rest);
     /* Solid token on purpose: the -input- stroke tokens are gradients, which a
        border shorthand silently discards. */
@@ -81,6 +120,12 @@
     border-color: var(--neutral-stroke-strong-hover);
 }
 
+/* Pointer focus gets the accent stroke; keyboard focus adds the ring on top, so
+   the field is always visibly focused including the autofocused username. */
+.field input:focus {
+    border-color: var(--accent-fill-rest);
+}
+
 .field input:focus-visible {
     outline: calc(var(--focus-stroke-width) * 1px) solid var(--focus-stroke-outer);
     outline-offset: calc(var(--focus-stroke-width) * 1px);
@@ -88,12 +133,16 @@
 }
 
 .field input:autofill {
-    box-shadow: inset 0 0 0 calc(var(--design-unit) * 10px) var(--neutral-fill-input-rest);
+    box-shadow: inset 0 0 0 calc(var(--design-unit) * 11px) var(--neutral-fill-input-rest);
     -webkit-text-fill-color: var(--neutral-foreground-rest);
 }
 
 .submit {
-    min-height: calc(var(--design-unit) * 10px);
+    /* Full width and 44px tall: on a phone this is the thumb target, and on
+       desktop a single-action form has nothing to sit beside. */
+    min-height: calc(var(--design-unit) * 11px);
+    width: 100%;
+    margin-block-start: calc(var(--design-unit) * 1px);
     padding: 0 calc(var(--design-unit) * 5px);
     color: var(--foreground-on-accent-rest);
     font-family: inherit;
@@ -119,11 +168,46 @@
     outline-offset: calc(var(--focus-stroke-width) * 1px);
 }
 
+/* Cookie/security footnote: separated by a rule so it reads as a standing fact
+   about the session, not as form help text. */
 .login-note {
     margin: 0;
+    max-width: 68ch;
+    padding-block-start: calc(var(--design-unit) * 4px);
+    border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-2-font-size);
     line-height: var(--type-ramp-minus-2-line-height);
+}
+
+@media (min-width: 600px) {
+    .login-head h1 {
+        font-size: var(--type-ramp-plus-3-font-size);
+        line-height: var(--type-ramp-plus-3-line-height);
+        letter-spacing: -0.02em;
+    }
+
+    .field input {
+        font-size: var(--type-ramp-base-font-size);
+    }
+}
+
+/* Short screens: tighten the rhythm. Nothing is hidden — the lead explains that
+   this is a single local account, which is the one thing a first-time signer-in
+   needs, and a screen reader has no other source for it. */
+@media (max-height: 620px) {
+    .login,
+    .login-form {
+        gap: calc(var(--design-unit) * 3px);
+    }
+
+    .login-head {
+        gap: calc(var(--design-unit) * 1px);
+    }
+
+    .login-note {
+        padding-block-start: calc(var(--design-unit) * 3px);
+    }
 }
 
 @media (prefers-reduced-motion: reduce) {

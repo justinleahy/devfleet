@@ -181,7 +181,10 @@ public sealed class RuntimeModelDiscoveryCacheTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Interlocked.Increment(ref _reads);
-            return Task.FromResult(new MuseModelCatalogResult(["muse/muse-spark-1.3"], null));
+            return Task.FromResult(new MuseModelCatalogResult(
+                ["muse/muse-spark-1.3"],
+                [],
+                null));
         }
     }
 

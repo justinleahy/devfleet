@@ -18,10 +18,12 @@ public sealed class FakeReservationGateway : INodeReservationGateway
     public List<(Guid LeaseId, string Reason)> Recoveries { get; } = [];
     public GatewayError? AcquireError { get; set; }
     public int RenewFailuresRemaining { get; set; }
+    public int ListCount { get; private set; }
     public (Guid ProjectId, Guid RequestId, string OwnerSessionId, IReadOnlyList<ReservationScopeSpec> Scopes)? LastAcquire { get; private set; }
 
     /// <summary>When set, overrides the authorization decision for matching (path, operation).</summary>
     public Func<string, string, MutationAuthorizationResult?>? OnAuthorize { get; set; }
+    public Func<CancellationToken, Task>? OnReleaseAsync { get; set; }
 
     public ReservationLeaseInfo GrantLease(
         string ownerSessionId = "root-session-1",
@@ -78,19 +80,24 @@ public sealed class FakeReservationGateway : INodeReservationGateway
         return Task.FromResult(new ReservationOperationResult(expanded, null));
     }
 
-    public Task<ReservationOperationResult> ReleaseAsync(
+    public async Task<ReservationOperationResult> ReleaseAsync(
         Guid leaseId,
         Guid projectId,
         string sessionId,
         CancellationToken cancellationToken)
     {
         Releases.Add(leaseId);
-        return Task.FromResult(_granted.Remove(leaseId)
+        if (OnReleaseAsync is not null)
+        {
+            await OnReleaseAsync(cancellationToken);
+        }
+
+        return _granted.Remove(leaseId)
             ? new ReservationOperationResult(
                 new ReservationLeaseInfo(leaseId, 0, "Released", DateTimeOffset.UtcNow, []),
                 null)
             : new ReservationOperationResult(
-                null, new GatewayError("not_found", "No such lease.")));
+                null, new GatewayError("not_found", "No such lease."));
     }
 
     public Task<ReservationOperationResult> TransferAsync(
@@ -164,7 +171,10 @@ public sealed class FakeReservationGateway : INodeReservationGateway
         Guid projectId,
         bool includeReleased,
         CancellationToken cancellationToken)
-        => Task.FromResult<IReadOnlyList<ReservationLeaseInfo>>([.. _granted.Values]);
+    {
+        ListCount++;
+        return Task.FromResult<IReadOnlyList<ReservationLeaseInfo>>([.. _granted.Values]);
+    }
 
     public Task<ReservationOperationResult> MarkRecoveryRequiredAsync(
         Guid leaseId,
@@ -312,15 +322,29 @@ public sealed class NoopCrashRecovery : PiCommandCenter.Node.Repository.IRuntime
 public sealed class NoopCompletionGateway : PiCommandCenter.Node.Child.INodeCompletionGateway
 {
     public Task RecordVerificationRunAsync(
+        string sessionId,
         PiCommandCenter.Application.Verification.VerificationRunDto run,
         CancellationToken cancellationToken)
         => Task.CompletedTask;
 
-    public Task<PiCommandCenter.Application.Completion.CompletionGateDecision> EvaluateCompletionAsync(
+    public Task<PiCommandCenter.Application.Completion.CompletionGateDecision> BeginTerminalizationAsync(
         Guid projectId,
         Guid requestId,
         string rootSessionId,
-        PiCommandCenter.Application.Completion.CompletionEvidence evidence,
+        PiCommandCenter.Contracts.NodeTransport.TerminalizationIntent intent,
+        PiCommandCenter.Application.Completion.CompletionEvidence? evidence,
+        string? reason,
+        CancellationToken cancellationToken)
+        => throw new NotSupportedException("Not exercised by these tests.");
+
+    public Task<PiCommandCenter.Application.Completion.CompletionGateDecision> ConfirmTerminalizationAsync(
+        Guid projectId,
+        Guid requestId,
+        string rootSessionId,
+        PiCommandCenter.Contracts.NodeTransport.TerminalizationIntent intent,
+        PiCommandCenter.Application.Completion.CompletionEvidence? evidence,
+        string? reason,
+        PiCommandCenter.Application.Completion.AssignmentQuiescenceProof proof,
         CancellationToken cancellationToken)
         => throw new NotSupportedException("Not exercised by these tests.");
 }

@@ -1,36 +1,63 @@
+/* Phone first. Every rule below holds at 320px; the breakpoints only add
+   columns and reclaim density once there is room for it. */
+.page {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 4px);
+    min-width: 0;
+}
+
 .page-head {
     display: flex;
     flex-direction: column;
+    align-items: flex-start;
     gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.page-head-text {
+    min-width: 0;
 }
 
 .page-head h1 {
     margin: 0;
-    font-size: var(--type-ramp-plus-4-font-size);
-    line-height: var(--type-ramp-plus-4-line-height);
+    font-size: var(--type-ramp-plus-3-font-size);
+    line-height: var(--type-ramp-plus-3-line-height);
     font-weight: 600;
     letter-spacing: -0.02em;
+    overflow-wrap: anywhere;
 }
 
 h2 {
-    margin: 0 0 calc(var(--design-unit) * 3px);
-    font-size: var(--type-ramp-plus-2-font-size);
-    line-height: var(--type-ramp-plus-2-line-height);
+    margin: 0;
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
     font-weight: 600;
-    letter-spacing: -0.015em;
+    letter-spacing: -0.01em;
+    overflow-wrap: anywhere;
 }
 
 .page-lead {
-    margin: 0;
-    max-width: 78ch;
+    margin: calc(var(--design-unit) * 1px) 0 0;
+    max-width: 68ch;
     color: var(--neutral-foreground-hint);
+}
+
+.selector-format {
+    flex: 0 0 auto;
+    padding: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 2px);
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--control-corner-radius) * 1px);
+    color: var(--neutral-foreground-hint);
+    background: var(--neutral-layer-1);
+    overflow-wrap: anywhere;
 }
 
 .state-block {
     display: flex;
     align-items: center;
     gap: calc(var(--design-unit) * 3px);
-    padding-block: calc(var(--design-unit) * 6px);
+    padding-block: calc(var(--design-unit) * 4px);
     color: var(--neutral-foreground-hint);
 }
 
@@ -46,68 +73,128 @@ h2 {
     border: 0;
 }
 
-.panel {
+.node-section {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 4px);
-    padding: calc(var(--design-unit) * 5px);
+    gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
+    padding: calc(var(--design-unit) * 3px);
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--control-corner-radius) * 1px);
+    background: var(--neutral-layer-1);
 }
 
-.panel-lead {
-    margin: 0 0 calc(var(--design-unit) * 2px);
-    max-width: 72ch;
+.section-heading {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: calc(var(--design-unit) * 1px);
+}
+
+.section-heading span,
+.node-seen {
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
     line-height: var(--type-ramp-minus-1-line-height);
 }
 
+.panel {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
+    padding: calc(var(--design-unit) * 3px);
+}
+
+.panel-lead,
 .panel-empty {
     margin: 0;
-    padding-block: calc(var(--design-unit) * 3px);
-    max-width: 72ch;
+    max-width: 70ch;
     color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
 }
 
 .node-name {
     font-weight: 600;
 }
 
-.node-missing {
-    color: var(--neutral-foreground-hint);
-}
-
-.node-seen {
-    color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-minus-1-font-size);
-    font-variant-numeric: tabular-nums;
-}
-
-/* Node picker: selector on the left, its two fetch actions trailing it. */
+/* Node picker: the select and both node actions each take the full width of a
+   phone so nothing is a half-row tap target. */
 .node-picker {
     display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
+    flex-direction: column;
+    align-items: stretch;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
 }
 
 .node-picker ::deep .field {
-    min-width: 260px;
+    width: 100%;
+    min-width: 0;
 }
 
-.node-picker ::deep .node-picker-actions {
+.node-picker-actions {
+    display: flex;
+    flex-wrap: wrap;
     flex-shrink: 0;
+    gap: calc(var(--design-unit) * 2px);
+}
+
+.node-picker-actions ::deep fluent-button {
+    flex: 1 1 12ch;
 }
 
 .node-status {
-    margin: calc(var(--design-unit) * 2px) 0 0;
+    margin: 0;
     font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-size: var(--type-ramp-minus-1-font-size);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
 }
 
-/* Model catalogs: one dense row per runtime. */
-.catalog-list {
+/* Catalogs stay collapsed by default: reference material, not the task. */
+.catalog-panel {
+    overflow: hidden;
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--control-corner-radius) * 1px);
+    background: var(--neutral-layer-1);
+}
+
+.catalog-panel summary {
     display: flex;
     flex-direction: column;
-    margin: calc(var(--design-unit) * 2px) 0 0;
+    align-items: flex-start;
+    gap: calc(var(--design-unit) * 1px);
+    min-height: 44px;
+    padding: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+    font-weight: 600;
+    cursor: pointer;
+    list-style-position: inside;
+}
+
+.catalog-panel summary::marker {
+    color: var(--neutral-foreground-hint);
+}
+
+.catalog-summary {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    font-weight: 400;
+}
+
+.catalog-content {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    padding: 0 calc(var(--design-unit) * 3px) calc(var(--design-unit) * 3px);
+}
+
+.catalog-list {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0 calc(var(--design-unit) * 5px);
+    margin: 0;
     padding: 0;
     list-style: none;
     border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
@@ -117,13 +204,15 @@ h2 {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
     padding-block: calc(var(--design-unit) * 2px);
     border-block-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
 }
 
 .catalog-sample,
 .catalog-error {
+    flex: 1 1 100%;
     min-width: 0;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
@@ -134,34 +223,55 @@ h2 {
     font-family: var(--monospace-font-family, ui-monospace, monospace);
 }
 
-/* Ordered candidates: rank gutter, field cluster, row actions. */
+.roles-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    gap: calc(var(--design-unit) * 3px);
+}
+
+.roles-grid ::deep .role-card {
+    align-self: start;
+    min-width: 0;
+    height: auto;
+}
+
+.role-head {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
+}
+
 .candidate-list {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 3px);
+    gap: calc(var(--design-unit) * 2px);
     margin: 0;
     padding: 0;
     list-style: none;
 }
 
+/* One column on a phone: rank, editor, then the reorder/remove row. */
 .candidate-row {
     display: grid;
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: minmax(0, 1fr);
     align-items: start;
-    gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
-    padding: calc(var(--design-unit) * 3px);
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
+    padding: calc(var(--design-unit) * 2px);
     border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
     border-radius: calc(var(--control-corner-radius) * 1px);
     background: var(--neutral-layer-2);
 }
 
 .candidate-rank {
-    margin-block-start: calc(var(--design-unit) * 5px);
     min-width: 2ch;
     color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-plus-1-font-size);
+    font-size: var(--type-ramp-minus-1-font-size);
     font-variant-numeric: tabular-nums;
-    text-align: center;
+    text-align: start;
 }
 
 .candidate-fields {
@@ -173,6 +283,7 @@ h2 {
 
 .candidate-fields ::deep .field {
     width: 100%;
+    min-width: 0;
 }
 
 .candidate-note,
@@ -191,37 +302,154 @@ h2 {
 
 .candidate-actions {
     display: flex;
-    flex-wrap: wrap;
     gap: calc(var(--design-unit) * 1px);
-    margin-block-start: calc(var(--design-unit) * 4px);
+    margin-block-start: calc(var(--design-unit) * 1px);
 }
 
+.candidate-actions ::deep fluent-button {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.panel-actions {
+    display: flex;
+    gap: calc(var(--design-unit) * 2px);
+}
+
+/* On a phone the save bar sits at the end of the document so it can never
+   cover a candidate row; it only becomes sticky where there is height to spare. */
 .save-bar {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 3px);
-    padding-block-start: calc(var(--design-unit) * 2px);
+    gap: calc(var(--design-unit) * 2px);
+    padding-block-start: calc(var(--design-unit) * 3px);
     border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    background: var(--neutral-layer-2);
 }
 
-@media (max-width: 720px) {
-    /* Narrow widths cannot hold the rank gutter and the action column beside the
-       fields; stack the row and let the actions sit under their inputs. */
-    .candidate-row {
-        grid-template-columns: 1fr;
-    }
+.save-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: calc(var(--design-unit) * 2px);
+}
 
-    .candidate-rank {
-        margin-block-start: 0;
-        text-align: start;
-    }
+.save-note {
+    max-width: 70ch;
+}
 
-    .candidate-actions {
-        margin-block-start: 0;
+/* ~44px touch targets for every control on a phone. */
+@media (max-width: 599px) {
+    .node-picker ::deep fluent-select::part(control),
+    .node-picker-actions ::deep fluent-button::part(control),
+    .candidate-actions ::deep fluent-button::part(control),
+    .panel-actions ::deep fluent-button::part(control),
+    .save-actions ::deep fluent-button::part(control),
+    .node-section ::deep fluent-button::part(control),
+    .candidate-fields ::deep fluent-text-field::part(control),
+    .candidate-fields ::deep fluent-combobox::part(control) {
+        min-height: 44px;
+    }
+}
+
+@media (min-width: 600px) {
+    .node-picker {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
     }
 
     .node-picker ::deep .field {
-        min-width: 0;
-        width: 100%;
+        min-width: 260px;
+    }
+
+    .node-picker-actions ::deep fluent-button {
+        flex: 0 0 auto;
+    }
+
+    .catalog-panel summary {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        gap: calc(var(--design-unit) * 3px);
+    }
+
+    .section-heading {
+        flex-direction: row;
+        align-items: baseline;
+        gap: calc(var(--design-unit) * 3px);
+    }
+
+    .catalog-list {
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }
+
+    .save-actions {
+        flex-direction: row;
+        align-items: center;
+        gap: calc(var(--design-unit) * 3px);
+    }
+
+    .candidate-actions ::deep fluent-button {
+        flex: 0 0 auto;
+    }
+}
+
+/* Desktop: dense evidence rows, heading and format chip on one line, and the
+   save bar pinned so it is always one click away. */
+@media (min-width: 960px) {
+    .page-head {
+        flex-direction: row;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .page-head h1 {
+        font-size: var(--type-ramp-plus-4-font-size);
+        line-height: var(--type-ramp-plus-4-line-height);
+    }
+
+    .node-section,
+    .panel {
+        padding: calc(var(--design-unit) * 4px);
+    }
+
+    .role-head {
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        gap: calc(var(--design-unit) * 3px);
+    }
+
+    .candidate-row {
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: calc(var(--design-unit) * 2px);
+    }
+
+    .candidate-rank {
+        margin-block-start: calc(var(--design-unit) * 5px);
+        text-align: center;
+    }
+
+    .candidate-actions {
+        flex-wrap: wrap;
+        margin-block-start: calc(var(--design-unit) * 4px);
+    }
+
+    .save-bar {
+        position: sticky;
+        z-index: 2;
+        bottom: 0;
+        margin-inline: calc(var(--design-unit) * -2px);
+        padding: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 2px);
+    }
+}
+
+@media (min-width: 1280px) {
+    .roles-grid {
+        grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+        gap: calc(var(--design-unit) * 4px);
     }
 }

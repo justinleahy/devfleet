@@ -13,4 +13,13 @@ public static class CompletionRequirements
     public const string DiffCaptured = "diff-captured";
     public const string OwnershipKnown = "ownership-known";
     public const string ResultSummary = "result-summary";
+    public const string CompletionEvidence = "completion-evidence";
+    public const string TerminalizationReason = "terminalization-reason";
+    public const string QuiescenceAdmission = "quiescence-admission";
+    public const string QuiescenceChildren = "quiescence-children";
+    public const string QuiescenceOperations = "quiescence-operations";
+    public const string QuiescenceProcesses = "quiescence-processes";
+    public const string QuiescenceEvents = "quiescence-events";
+    public const string QuiescenceReservations = "quiescence-reservations";
+    public const string QuiescenceRepository = "quiescence-repository";
 }

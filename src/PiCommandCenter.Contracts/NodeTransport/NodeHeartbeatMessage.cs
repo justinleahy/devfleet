@@ -1,12 +1,13 @@
 namespace PiCommandCenter.Contracts.NodeTransport;
 
 /// <summary>
-/// Transport message: periodic node heartbeat with locally active session ids.
+/// Periodic node heartbeat with active sessions and separate resource and execution snapshots.
 /// </summary>
 public sealed record NodeHeartbeatMessage(
     Guid NodeId,
     IReadOnlyList<string> ActiveSessionIds,
-    NodeResourceSnapshotMessage? Resources = null);
+    NodeResourceSnapshotMessage? Resources = null,
+    NodeExecutionStatusMessage? ExecutionStatus = null);
 
 public sealed record NodeResourceSnapshotMessage(
     DateTimeOffset ObservedAt,

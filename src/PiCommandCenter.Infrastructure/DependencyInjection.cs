@@ -42,13 +42,14 @@ public static class DependencyInjection
             optionsBuilder.AddInterceptors(new SqliteConnectionInitializerInterceptor());
         });
 
-        services.Configure<ProjectCatalogOptions>(
-            configuration.GetSection(ProjectCatalogOptions.SectionName));
-
         services.AddScoped<IProjectCatalog, ProjectCatalog>();
+        services.AddScoped<IWorkspaceBindingCatalog, WorkspaceBindingCatalog>();
         services.AddScoped<IRequestQueue, RequestQueue>();
+        services.AddScoped<IRequestEligibilityEvaluator, RequestEligibilityEvaluator>();
         services.AddScoped<INodeRegistry, NodeRegistry>();
-        services.AddScoped<IRequestClaimService, RequestClaimService>();
+        services.AddScoped<IExecutionAssignmentService, ExecutionAssignmentService>();
+        services.AddScoped<IRequestCancellationService, RequestCancellationService>();
+        services.AddScoped<IAssignmentOperationAuthorizer, AssignmentOperationAuthorizer>();
         services.AddScoped<INodeEventSink, NodeEventSink>();
         services.AddScoped<IAgentSessionStore, AgentSessionStore>();
         services.AddScoped<IFleetStatisticsService, FleetStatisticsService>();

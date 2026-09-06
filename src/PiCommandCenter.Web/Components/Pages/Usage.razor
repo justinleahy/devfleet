@@ -17,6 +17,10 @@
 
     <header class="page-head">
         <h1>Subscription usage</h1>
+        <p class="page-lead">
+            The plan windows each provider reports on one online node. Every figure here is a
+            reading taken on demand: refresh to take a new one.
+        </p>
     </header>
 
     <section aria-labelledby="node-heading">
@@ -39,39 +43,47 @@
         }
         else if (_onlineNodes.Count == 0)
         {
-            <p class="panel-empty">No node is online.</p>
-            <FluentButton Appearance="Appearance.Stealth" OnClick="ReloadNodesAsync" Disabled="@Busy">
-                Reload nodes
-            </FluentButton>
+            <div class="node-picker">
+                <p class="panel-empty">No node is online.</p>
+                <div class="node-actions">
+                    <FluentButton Class="node-action"
+                                  Appearance="Appearance.Stealth"
+                                  OnClick="ReloadNodesAsync"
+                                  Disabled="@Busy">
+                        Reload nodes
+                    </FluentButton>
+                </div>
+            </div>
         }
         else
         {
             <div class="node-picker">
-                <FluentSelect TOption="NodeDto"
-                              Label="Online node"
-                              Items="@_onlineNodes"
-                              OptionText="@(node => node.DisplayName)"
-                              OptionValue="@(node => node.Id.ToString())"
-                              @bind-Value="_selectedNodeId"
-                              @bind-Value:after="OnNodeChangedAsync"
-                              Disabled="@Busy"
-                              Class="field" />
-                <FluentStack Class="node-picker-actions"
-                             Orientation="Orientation.Horizontal"
-                             HorizontalGap="8"
-                             Width="auto">
-                    <FluentButton Appearance="Appearance.Accent"
+                <div class="node-field">
+                    <FluentSelect TOption="NodeDto"
+                                  Label="Online node"
+                                  Items="@_onlineNodes"
+                                  OptionText="@(node => node.DisplayName)"
+                                  OptionValue="@(node => node.Id.ToString())"
+                                  @bind-Value="_selectedNodeId"
+                                  @bind-Value:after="OnNodeChangedAsync"
+                                  Disabled="@Busy"
+                                  Class="node-select" />
+                </div>
+                <div class="node-actions">
+                    <FluentButton Class="node-action"
+                                  Appearance="Appearance.Accent"
                                   OnClick="RefreshUsageAsync"
                                   Loading="@_loadingUsage"
                                   Disabled="@Busy">
                         Refresh
                     </FluentButton>
-                    <FluentButton Appearance="Appearance.Stealth"
+                    <FluentButton Class="node-action"
+                                  Appearance="Appearance.Stealth"
                                   OnClick="ReloadNodesAsync"
                                   Disabled="@Busy">
                         Reload nodes
                     </FluentButton>
-                </FluentStack>
+                </div>
             </div>
         }
     </section>
@@ -106,39 +118,41 @@
         }
         else
         {
-            foreach (var provider in _providers)
-            {
-                <FluentCard>
-                    <article class="panel usage-card" aria-labelledby="@provider.HeadingId">
+            @* One grouped surface with a rule between providers, rather than a card apiece:
+               a fleet with eight signed-in providers still reads as one list. *@
+            <div class="provider-list">
+                @foreach (var provider in _providers)
+                {
+                    <article class="provider" aria-labelledby="@provider.HeadingId">
                         <h3 id="@provider.HeadingId">@provider.Provider</h3>
 
                         @if (provider.Windows.Count > 0)
                         {
-                            <ul class="usage-windows">
+                            <ul class="window-list">
                                 @foreach (var window in provider.Windows)
                                 {
-                                    <li class="usage-window">
-                                        <div class="usage-window-head">
-                                            <span class="usage-window-name">@window.Name</span>
-                                            <span class="usage-window-value">@window.ValueLabel</span>
+                                    <li class="window">
+                                        <span class="window-name">@window.Name</span>
+                                        <span class="window-value">@window.ValueLabel</span>
+                                        <div class="window-bar">
+                                            <FluentProgress Min="0"
+                                                            Max="100"
+                                                            Value="@window.BarValue"
+                                                            aria-label="@($"{provider.Provider}, {window.Name}")"
+                                                            aria-valuetext="@window.ValueLabel" />
                                         </div>
-                                        <FluentProgress Min="0"
-                                                        Max="100"
-                                                        Value="@window.BarValue"
-                                                        aria-label="@($"{provider.Provider}, {window.Name}")"
-                                                        aria-valuetext="@window.ValueLabel" />
-                                        <p class="usage-window-reset">@window.ResetLabel</p>
+                                        <p class="window-reset">@window.ResetLabel</p>
                                     </li>
                                 }
                             </ul>
                         }
                         else
                         {
-                            <p class="usage-none">No usage window reported.</p>
+                            <p class="window-none">No usage window reported.</p>
                         }
                     </article>
-                </FluentCard>
-            }
+                }
+            </div>
         }
     </section>
 </FluentStack>

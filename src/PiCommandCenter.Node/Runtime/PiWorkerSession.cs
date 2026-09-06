@@ -38,12 +38,15 @@ public sealed class PiWorkerSession : IAsyncDisposable
         });
 
     private readonly ConcurrentDictionary<string, TaskCompletionSource<PiEnvelope>> _pending = new();
+    private readonly ConcurrentDictionary<long, Task> _workerCallbacks = new();
     private readonly ConcurrentQueue<string> _stderrTail = new();
     internal const int MaxStderrLines = 200;
     private readonly CancellationTokenSource _disposeCts = new();
+    private Task _stdoutPump = Task.CompletedTask;
 
     private long _lastSequenceSeen;
     private long _nextMessageId;
+    private long _nextWorkerCallbackId;
     private DateTimeOffset? _lastHeartbeatAt;
     private int _disconnectedEmitted;
     private bool _isStreaming;
@@ -110,7 +113,7 @@ public sealed class PiWorkerSession : IAsyncDisposable
                 "A child session start requires a parent session id.", nameof(parentSessionId));
         }
 
-        _ = StartPumps();
+        _stdoutPump = StartPumps();
 
         var payload = new Dictionary<string, object?>
         {
@@ -243,6 +246,11 @@ public sealed class PiWorkerSession : IAsyncDisposable
     /// </summary>
     public async Task CloseAsync(CancellationToken cancellationToken)
     {
+        if (_process.Exited.IsCompleted)
+        {
+            return;
+        }
+
         try
         {
             await RequestAsync("goodbye", null, cancellationToken).ConfigureAwait(false);
@@ -258,6 +266,45 @@ public sealed class PiWorkerSession : IAsyncDisposable
         {
             await _process.KillTreeAsync(CancellationToken.None).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Stops callback dispatch and waits for every already-dispatched worker request. Returns
+    /// false when the bounded drain cannot be proven.
+    /// </summary>
+    public async Task<bool> DrainCallbacksAsync(CancellationToken cancellationToken)
+    {
+        _disposeCts.Cancel();
+        try
+        {
+            await DrainCallbacksCoreAsync()
+                .WaitAsync(_requestTimeout, _timeProvider, cancellationToken)
+                .ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
+        {
+            _logger.LogWarning(
+                ex,
+                "Callback drain for Pi session {SessionId} was not proven within {Timeout}.",
+                SessionId,
+                _requestTimeout);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Callback drain for Pi session {SessionId} failed.",
+                SessionId);
+            return false;
+        }
+    }
+
+    private async Task DrainCallbacksCoreAsync()
+    {
+        await _stdoutPump.ConfigureAwait(false);
+        await Task.WhenAll(_workerCallbacks.Values).ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()
@@ -482,7 +529,7 @@ public sealed class PiWorkerSession : IAsyncDisposable
                 HandleEvent(envelope);
                 break;
             case PiFrameKinds.Request:
-                _ = HandleWorkerRequestAsync(envelope);
+                TrackWorkerRequest(envelope);
                 break;
             case PiFrameKinds.Heartbeat:
                 _lastHeartbeatAt = _timeProvider.GetUtcNow();
@@ -493,6 +540,39 @@ public sealed class PiWorkerSession : IAsyncDisposable
             case PiFrameKinds.Goodbye:
                 _logger.LogInformation("Pi worker {SessionId} sent goodbye.", SessionId);
                 break;
+        }
+    }
+
+    private void TrackWorkerRequest(PiEnvelope envelope)
+    {
+        var callbackId = Interlocked.Increment(ref _nextWorkerCallbackId);
+        var dispatch = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callback = HandleTrackedWorkerRequestAsync(
+            callbackId,
+            envelope,
+            dispatch.Task);
+        if (!_workerCallbacks.TryAdd(callbackId, callback))
+        {
+            throw new InvalidOperationException($"Duplicate worker callback id {callbackId}.");
+        }
+
+        dispatch.SetResult();
+    }
+
+    private async Task HandleTrackedWorkerRequestAsync(
+        long callbackId,
+        PiEnvelope envelope,
+        Task dispatch)
+    {
+        await dispatch.ConfigureAwait(false);
+        try
+        {
+            await HandleWorkerRequestAsync(envelope).ConfigureAwait(false);
+        }
+        finally
+        {
+            _workerCallbacks.TryRemove(callbackId, out _);
         }
     }
 

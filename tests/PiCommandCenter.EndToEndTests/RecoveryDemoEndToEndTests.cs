@@ -16,6 +16,7 @@ using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Projects;
 using PiCommandCenter.Domain.Requests;
+using PiCommandCenter.Domain.Sessions;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Node;
 using PiCommandCenter.Node.Child;
@@ -66,19 +67,22 @@ public sealed class RecoveryDemoEndToEndTests : IClassFixture<EndToEndFixture>, 
             () => inspector.DetectExternalChangesAsync(workspace, baseline.BaseCommit, [lease], CancellationToken.None));
         Assert.Contains("README.md", ex.Paths);
 
-        var nodeId = Guid.NewGuid();
+        var nodeId = _fixture.AuthenticatedNodeId;
         var client = _fixture.CreateClient();
         var hub = await HubAsync();
         _ = await hub.InvokeAsync<NodeDto>("Register", new NodeRegistrationMessage(nodeId, "e2e-external", "1.0.0", "{}"));
 
+        const string sessionId = "session-root-ext";
         Guid projectId;
         Guid requestId;
+        string claimToken;
         using (var scope = _fixture.Factory.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
             var now = DateTimeOffset.UtcNow;
             var project = Project.Register(
-                new NodeId(nodeId), "External-change fixture", workspace, "main",
+                "External-change fixture",
+                "main",
                 enabled: true, maxActiveWriteRequests: 2, maxReadOnlyRequests: 4,
                 maxChildAgentsPerRequest: 1, requireCleanStart: false, createRequestBranch: false,
                 createRequestCommit: false, autoMerge: false, now);
@@ -90,8 +94,49 @@ public sealed class RecoveryDemoEndToEndTests : IClassFixture<EndToEndFixture>, 
             request.Start(now);
             request.BeginPlanning(now);
             request.BeginExecuting(now);
+            var assignedNodeId = new NodeId(nodeId);
+            var binding = WorkspaceBinding.Designate(project.Id, assignedNodeId, workspace, now);
+            Assert.True(binding.ApplyValidationResult(
+                assignedNodeId,
+                binding.ValidationRevision,
+                WorkspaceBindingStatus.Valid,
+                WorkspaceBinding.ValidValidationCode,
+                "Seeded for the recovery scenario.",
+                workspace,
+                now));
+            claimToken = $"recovery-external-{request.Id.Value:N}";
+            var assignment = ExecutionAssignment.Create(
+                request.Id,
+                project.Id,
+                binding.Id,
+                assignedNodeId,
+                binding.CanonicalRepositoryPath!,
+                project.DefaultBranch,
+                binding.ValidationRevision,
+                claimToken,
+                now,
+                TimeSpan.FromMinutes(5));
             db.Projects.Add(project);
+            db.WorkspaceBindings.Add(binding);
             db.WorkRequests.Add(request);
+            db.ExecutionAssignments.Add(assignment);
+            db.AgentSessions.Add(new AgentSessionRow
+            {
+                Id = sessionId,
+                ProjectId = project.Id.Value,
+                RequestId = request.Id.Value,
+                AgentName = "root",
+                Role = "root",
+                Runtime = "pi",
+                Model = "codex/default",
+                Liveness = nameof(AgentLiveness.Starting),
+                Activity = nameof(AgentActivity.Idle),
+                Attention = nameof(AgentAttention.None),
+                WorkState = nameof(AgentWorkState.Queued),
+                StatusReason = "Awaiting registration",
+                StartedAtUtcTicks = now.UtcTicks,
+                Version = 1,
+            });
             await db.SaveChangesAsync();
             projectId = project.Id.Value;
             requestId = request.Id.Value;
@@ -104,7 +149,8 @@ public sealed class RecoveryDemoEndToEndTests : IClassFixture<EndToEndFixture>, 
                 NodeId: nodeId,
                 ProjectId: projectId,
                 RequestId: requestId,
-                SessionId: "session-root-ext",
+                ClaimToken: claimToken,
+                SessionId: sessionId,
                 Sequence: 1,
                 Type: "session.registered",
                 OccurredAt: DateTimeOffset.UtcNow,
@@ -119,7 +165,8 @@ public sealed class RecoveryDemoEndToEndTests : IClassFixture<EndToEndFixture>, 
                 NodeId: nodeId,
                 ProjectId: projectId,
                 RequestId: requestId,
-                SessionId: "session-root-ext",
+                ClaimToken: claimToken,
+                SessionId: sessionId,
                 Sequence: 2,
                 Type: "repository.external_change_detected",
                 OccurredAt: DateTimeOffset.UtcNow,
@@ -133,7 +180,8 @@ public sealed class RecoveryDemoEndToEndTests : IClassFixture<EndToEndFixture>, 
                 NodeId: nodeId,
                 ProjectId: projectId,
                 RequestId: requestId,
-                SessionId: "session-root-ext",
+                ClaimToken: claimToken,
+                SessionId: sessionId,
                 Sequence: 3,
                 Type: "session.snapshot",
                 OccurredAt: DateTimeOffset.UtcNow,
@@ -177,7 +225,7 @@ public sealed class RecoveryDemoEndToEndTests : IClassFixture<EndToEndFixture>, 
         {
             var sqlitePath = Path.Combine(tempRoot, "controlplane.db");
             var spoolPath = Path.Combine(tempRoot, "spool.db");
-            var nodeId = Guid.NewGuid();
+            var nodeId = _fixture.AuthenticatedNodeId;
             File.Create(sqlitePath).Dispose();
 
             NodeEventMessage heartbeat;
@@ -187,30 +235,83 @@ public sealed class RecoveryDemoEndToEndTests : IClassFixture<EndToEndFixture>, 
                 await connection.InvokeAsync<NodeDto>(
                     "Register", new NodeRegistrationMessage(nodeId, "pi-restart", "1.0.0", "{}"));
 
+                const string sessionId = "session-root-f";
                 Guid projectId;
                 Guid requestId;
+                string claimToken;
                 using (var scope = first.Services.CreateScope())
                 {
                     var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
                     var now = DateTimeOffset.UtcNow;
                     var project = Project.Register(
-                        new NodeId(nodeId), "Restart project", Path.Combine(tempRoot, "repo"), "main",
+                        "Restart project",
+                        "main",
                         enabled: true, maxActiveWriteRequests: 1, maxReadOnlyRequests: 2,
                         maxChildAgentsPerRequest: 1, requireCleanStart: false, createRequestBranch: false,
                         createRequestCommit: false, autoMerge: false, now);
                     var request = WorkRequest.Enqueue(
                         project.Id, WorkRequestKind.Development, RequestPriority.Normal, RiskLevel.Standard,
                         "Stay alive", "Agents remain active across restart.", now);
+                    request.Start(now);
+                    var assignedNodeId = new NodeId(nodeId);
+                    var binding = WorkspaceBinding.Designate(project.Id, assignedNodeId, tempRoot, now);
+                    Assert.True(binding.ApplyValidationResult(
+                        assignedNodeId,
+                        binding.ValidationRevision,
+                        WorkspaceBindingStatus.Valid,
+                        WorkspaceBinding.ValidValidationCode,
+                        "Seeded for the restart scenario.",
+                        tempRoot,
+                        now));
+                    claimToken = $"recovery-restart-{request.Id.Value:N}";
+                    var assignment = ExecutionAssignment.Create(
+                        request.Id,
+                        project.Id,
+                        binding.Id,
+                        assignedNodeId,
+                        binding.CanonicalRepositoryPath!,
+                        project.DefaultBranch,
+                        binding.ValidationRevision,
+                        claimToken,
+                        now,
+                        TimeSpan.FromMinutes(5));
                     db.Projects.Add(project);
+                    db.WorkspaceBindings.Add(binding);
                     db.WorkRequests.Add(request);
+                    db.ExecutionAssignments.Add(assignment);
+                    db.AgentSessions.Add(new AgentSessionRow
+                    {
+                        Id = sessionId,
+                        ProjectId = project.Id.Value,
+                        RequestId = request.Id.Value,
+                        AgentName = "root",
+                        Role = "root",
+                        Runtime = "pi",
+                        Model = "codex/default",
+                        Liveness = nameof(AgentLiveness.Online),
+                        Activity = nameof(AgentActivity.Idle),
+                        Attention = nameof(AgentAttention.None),
+                        WorkState = nameof(AgentWorkState.Executing),
+                        StatusReason = "Working before restart",
+                        StartedAtUtcTicks = now.UtcTicks,
+                        Version = 1,
+                    });
                     await db.SaveChangesAsync();
                     projectId = project.Id.Value;
                     requestId = request.Id.Value;
                 }
 
                 heartbeat = new NodeEventMessage(
-                    "evt-f-hb-1", nodeId, projectId, requestId, "session-root-f",
-                    Sequence: 1, "session.heartbeat", DateTimeOffset.UtcNow, "{\"statusReason\":\"still working\"}");
+                    EventId: "evt-f-hb-1",
+                    NodeId: nodeId,
+                    ProjectId: projectId,
+                    RequestId: requestId,
+                    ClaimToken: claimToken,
+                    SessionId: sessionId,
+                    Sequence: 1,
+                    Type: "session.heartbeat",
+                    OccurredAt: DateTimeOffset.UtcNow,
+                    PayloadJson: "{\"statusReason\":\"still working\"}");
 
                 await using (var spool = new SqliteNodeEventSpool(Options.Create(new NodeOptions { EventSpoolPath = spoolPath })))
                 {
@@ -324,7 +425,7 @@ public sealed class RecoveryDemoEndToEndTests : IClassFixture<EndToEndFixture>, 
         var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={sqlitePath}");
-            builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialFile);
+            builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialDirectory);
         });
         using var scope = factory.Services.CreateScope();
         scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>().Database.Migrate();

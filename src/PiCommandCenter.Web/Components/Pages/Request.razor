@@ -29,7 +29,7 @@
 @inject IReservationService ReservationAuthority
 @inject IClock Clock
 @inject IVerificationRunStore VerificationRunStore
-@inject ICompletionGateService CompletionGate
+@inject IAssignmentTerminalizationService CompletionGate
 @inject IProjectionNotifier Notifier
 
 <PageTitle>@(_request?.Title ?? "Request") &middot; DevFleet</PageTitle>
@@ -43,7 +43,7 @@
 }
 else if (_request is null)
 {
-    <FluentStack Orientation="Orientation.Vertical" VerticalGap="16" Width="100%">
+    <div class="state-empty">
         <h1>Request not found</h1>
         <p class="page-lead">
             @if (_loadError is not null)
@@ -57,37 +57,37 @@ else if (_request is null)
         </p>
         <p class="mono hint">@RequestId</p>
         <a class="back-link" href="/">Back to fleet</a>
-    </FluentStack>
+    </div>
 }
 else
 {
     var request = _request;
 
-    <FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+    <div class="request-page">
 
         <header class="page-head">
             <a class="back-link" href="@ProjectHref()">
                 @(_project is null ? "Back to project" : $"Back to {_project.DisplayName}")
             </a>
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="12"
-                         Width="100%">
-                <h1>@request.Title</h1>
-                <FluentSpacer />
-                <FluentButton Appearance="Appearance.Stealth" OnClick="ManualReloadAsync">
-                    Reload
-                </FluentButton>
-            </FluentStack>
-            <div class="badge-row">
-                <FluentBadge Appearance="Appearance.Accent">@request.StatusName</FluentBadge>
-                <FluentBadge Appearance="Appearance.Neutral">@request.PriorityName</FluentBadge>
-                <FluentBadge Appearance="Appearance.Neutral">@request.KindName</FluentBadge>
-                <FluentBadge Appearance="Appearance.Neutral">@request.RiskLevelName</FluentBadge>
-                @if (request.BlockedPhaseName is not null)
-                {
-                    <FluentBadge Appearance="Appearance.Neutral">blocked in @request.BlockedPhaseName</FluentBadge>
-                }
+            <div class="page-head-row">
+                <div class="page-head-copy">
+                    <h1>@request.Title</h1>
+                    <div class="badge-row">
+                        <FluentBadge Appearance="Appearance.Accent">@request.StatusName</FluentBadge>
+                        <FluentBadge Appearance="Appearance.Neutral">@request.PriorityName</FluentBadge>
+                        <FluentBadge Appearance="Appearance.Neutral">@request.KindName</FluentBadge>
+                        <FluentBadge Appearance="Appearance.Neutral">@request.RiskLevelName</FluentBadge>
+                        @if (request.BlockedPhaseName is not null)
+                        {
+                            <FluentBadge Appearance="Appearance.Neutral">blocked in @request.BlockedPhaseName</FluentBadge>
+                        }
+                    </div>
+                </div>
+                <div class="page-head-actions">
+                    <FluentButton Appearance="Appearance.Stealth" OnClick="ManualReloadAsync">
+                        Reload
+                    </FluentButton>
+                </div>
             </div>
             <p class="page-lead">
                 Request state and agent sessions are read from the control-plane projection.
@@ -107,151 +107,329 @@ else
 
         @if (_attention.Count > 0)
         {
-            <section class="signal-stack" aria-labelledby="attention-heading">
-                <FluentStack Orientation="Orientation.Horizontal"
-                             VerticalAlignment="VerticalAlignment.Center"
-                             HorizontalGap="12"
-                             Width="100%">
+            <section class="page-section" aria-labelledby="attention-heading">
+                <div class="section-head">
                     <h2 id="attention-heading">Needs attention</h2>
-                    <FluentSpacer />
-                    <FluentAnchor Href="/attention" Appearance="Appearance.Stealth">
-                        Fleet attention queue
-                    </FluentAnchor>
-                </FluentStack>
-                @foreach (var signal in _attention)
-                {
-                    <AttentionCallout Signal="signal" Now="_snapshot" />
-                }
+                    <div class="section-actions">
+                        <FluentAnchor Href="/attention" Appearance="Appearance.Stealth">
+                            Fleet attention queue
+                        </FluentAnchor>
+                    </div>
+                </div>
+                <div class="signal-stack">
+                    @foreach (var signal in _attention)
+                    {
+                        <AttentionCallout Signal="signal" Now="_snapshot" />
+                    }
+                </div>
             </section>
         }
 
-        <FluentCard>
-            <section class="panel" aria-labelledby="original-heading">
-                <h2 id="original-heading">Original request</h2>
-                <p class="request-prompt">@request.Prompt</p>
-                <dl class="facts">
-                    <dt>Request id</dt>
-                    <dd class="mono">@request.Id</dd>
-                    <dt>Project</dt>
-                    <dd>
-                        @if (_project is not null)
-                        {
-                            <a href="@ProjectHref()">@_project.DisplayName</a>
-                        }
-                        <span class="mono hint">@request.ProjectId</span>
-                    </dd>
-                    <dt>Created</dt>
-                    <dd>@request.CreatedAt.ToString("u")</dd>
-                    <dt>Updated</dt>
-                    <dd>
-                        @request.UpdatedAt.ToString("u")
-                        <span class="hint">(@Relative(request.UpdatedAt, _snapshot))</span>
-                    </dd>
-                    <dt>Version</dt>
-                    <dd>@request.Version</dd>
-                </dl>
-            </section>
-        </FluentCard>
+        <div class="overview-grid">
+            <FluentCard>
+                <section class="panel" aria-labelledby="original-heading">
+                    <h2 id="original-heading">Original request</h2>
+                    <p class="request-prompt">@request.Prompt</p>
+                    <dl class="facts">
+                        <dt>Request id</dt>
+                        <dd class="mono">@request.Id</dd>
+                        <dt>Project</dt>
+                        <dd>
+                            @if (_project is not null)
+                            {
+                                <a href="@ProjectHref()">@_project.DisplayName</a>
+                            }
+                            <span class="mono hint">@request.ProjectId</span>
+                        </dd>
+                        <dt>Created</dt>
+                        <dd>@request.CreatedAt.ToString("u")</dd>
+                        <dt>Updated</dt>
+                        <dd>
+                            @request.UpdatedAt.ToString("u")
+                            <span class="hint">(@Relative(request.UpdatedAt, _snapshot))</span>
+                        </dd>
+                        <dt>Version</dt>
+                        <dd>@request.Version</dd>
+                    </dl>
+                </section>
+            </FluentCard>
 
-        <FluentCard>
-            <section class="panel" aria-labelledby="status-heading">
-                <h2 id="status-heading">Current status</h2>
+            <FluentCard>
+                <section class="panel" aria-labelledby="status-heading">
+                    <h2 id="status-heading">Current status</h2>
 
-                @if (_sessionError is not null)
+                    @if (_sessionError is not null)
+                    {
+                        <FluentMessageBar Intent="MessageIntent.Error"
+                                          Title="Session projection unavailable"
+                                          AllowDismiss="false">
+                            @_sessionError
+                        </FluentMessageBar>
+                    }
+                    else if (_root is null)
+                    {
+                        <p class="panel-empty">
+                            No agent session is registered for this request yet. The request is
+                            @request.StatusName; a session can only exist once the control plane
+                            has created an execution assignment on the designated workspace node
+                            and that node's runtime reports <span class="mono">session.registered</span>.
+                            Scheduling eligibility and the assignment itself are shown under
+                            <a href="#placement-heading">Placement and assignment</a>.
+                        </p>
+                    }
+                    else
+                    {
+                        var root = _root;
+
+                        <dl class="dimensions">
+                            <div class="dimension @(root.Liveness == AgentLiveness.Online ? "is-live" : root.Liveness == AgentLiveness.Exited ? "is-alert" : string.Empty)">
+                                <dt>Liveness</dt>
+                                <dd>@root.Liveness</dd>
+                            </div>
+                            <div class="dimension @(IsWorking(root.Activity) ? "is-live" : string.Empty)">
+                                <dt>Activity</dt>
+                                <dd>@root.Activity</dd>
+                            </div>
+                            <div class="dimension @(root.Attention == AgentAttention.None ? string.Empty : "is-alert")">
+                                <dt>Attention</dt>
+                                <dd>@root.Attention</dd>
+                            </div>
+                            <div class="dimension @(IsFailed(root.WorkState) ? "is-alert" : IsTerminal(root.WorkState) ? string.Empty : "is-live")">
+                                <dt>Work state</dt>
+                                <dd>@root.WorkState</dd>
+                            </div>
+                        </dl>
+
+                        <p class="operation">
+                            <span class="operation-label">Status reason</span>
+                            <span>@(string.IsNullOrWhiteSpace(root.StatusReason) ? "None reported." : root.StatusReason)</span>
+                        </p>
+                        <p class="operation">
+                            <span class="operation-label">Current operation</span>
+                            <span>@(root.CurrentOperation ?? "None reported.")</span>
+                        </p>
+
+                        <dl class="facts">
+                            <dt>Root session</dt>
+                            <dd class="mono">@root.Id</dd>
+                            <dt>Model</dt>
+                            <dd>
+                                <span class="mono">@root.Model</span>
+                                @if (ModelText.RuntimeAside(root.Runtime, root.Model) is { } runtime)
+                                {
+                                    <span class="hint">on @runtime</span>
+                                }
+                            </dd>
+                            <dt>Provider session</dt>
+                            <dd class="mono">@(root.ProviderSessionId ?? "not reported")</dd>
+                            <dt>Process</dt>
+                            <dd>@(root.ProcessId?.ToString() ?? "not reported")</dd>
+                            <dt>Started</dt>
+                            <dd>@root.StartedAt.ToString("u")</dd>
+                            <dt>Last heartbeat</dt>
+                            <dd>
+                                @if (root.LastHeartbeatAt is { } beat)
+                                {
+                                    @beat.ToString("u")
+                                    <span class="hint">(@Relative(beat, _snapshot))</span>
+                                }
+                                else
+                                {
+                                    <span class="hint">no heartbeat received</span>
+                                }
+                            </dd>
+                            <dt>Ended</dt>
+                            <dd>
+                                @if (root.EndedAt is { } ended)
+                                {
+                                    @ended.ToString("u")
+                                }
+                                else
+                                {
+                                    <span class="hint">still open</span>
+                                }
+                            </dd>
+                        </dl>
+                    }
+                </section>
+            </FluentCard>
+        </div>
+
+        <section class="page-section" aria-labelledby="placement-heading">
+            <div class="section-head">
+                <h2 id="placement-heading">Placement and assignment</h2>
+                <span class="section-meta">
+                    @PlacementSummary(request)
+                </span>
+            </div>
+
+            @if (request.SchedulingStatus is { } scheduling)
+            {
+                <FluentCard>
+                    <section class="panel" aria-labelledby="scheduling-heading">
+                        <div class="section-head is-tight">
+                            <h3 id="scheduling-heading">Scheduling status</h3>
+                            <span class="badge-row">
+                                <FluentBadge Appearance="@(scheduling.IsEligible ? Appearance.Accent : Appearance.Neutral)">
+                                    @SchedulingLabel(scheduling.Code)
+                                </FluentBadge>
+                                <FluentBadge Appearance="Appearance.Neutral">@scheduling.Code</FluentBadge>
+                            </span>
+                        </div>
+                        <p class="operation">
+                            <span class="operation-label">Detail</span>
+                            <span>@scheduling.Detail</span>
+                        </p>
+                        <p class="operation">
+                            <span class="operation-label">Action</span>
+                            <span>@scheduling.Action</span>
+                        </p>
+                        <p class="panel-lead">
+                            This request is queued with no execution assignment. The control plane
+                            re-evaluates this decision on every claim attempt by the designated node;
+                            being eligible is permission to be considered, not a claim.
+                        </p>
+                    </section>
+                </FluentCard>
+            }
+
+            @if (request.Assignment is { } assignment)
+            {
+                @if (assignment.State == ExecutionAssignmentState.Finalizing)
                 {
-                    <FluentMessageBar Intent="MessageIntent.Error"
-                                      Title="Session projection unavailable"
+                    <FluentMessageBar Intent="MessageIntent.Warning"
+                                      Title="Assignment is finalizing"
                                       AllowDismiss="false">
-                        @_sessionError
+                        Completion was accepted but ownership has not been released: capacity remains
+                        reserved while quiescing. The assigned node must close admission of new work,
+                        drain mutations, verification, Git operations and supervised processes, and
+                        flush its events before terminal state can be committed.
                     </FluentMessageBar>
                 }
-                else if (_root is null)
+                else if (assignment.State == ExecutionAssignmentState.Cancelling)
                 {
-                    <p class="panel-empty">
-                        No agent session is registered for this request yet. The request is
-                        @request.StatusName; a root session appears here once a node claims the
-                        request and its runtime reports <span class="mono">session.registered</span>.
-                    </p>
+                    <FluentMessageBar Intent="MessageIntent.Warning"
+                                      Title="Assignment is cancelling"
+                                      AllowDismiss="false">
+                        Cancellation was delivered only to the assigned node; capacity remains
+                        reserved while quiescing. Reservations and the writer slot stay held until the
+                        same node proves quiescence, so this request is not claimable elsewhere.
+                    </FluentMessageBar>
                 }
-                else
+                else if (assignment.State == ExecutionAssignmentState.RecoveryRequired)
                 {
-                    var root = _root;
-
-                    <dl class="dimensions">
-                        <div class="dimension @(root.Liveness == AgentLiveness.Online ? "is-live" : root.Liveness == AgentLiveness.Exited ? "is-alert" : string.Empty)">
-                            <dt>Liveness</dt>
-                            <dd>@root.Liveness</dd>
-                        </div>
-                        <div class="dimension @(IsWorking(root.Activity) ? "is-live" : string.Empty)">
-                            <dt>Activity</dt>
-                            <dd>@root.Activity</dd>
-                        </div>
-                        <div class="dimension @(root.Attention == AgentAttention.None ? string.Empty : "is-alert")">
-                            <dt>Attention</dt>
-                            <dd>@root.Attention</dd>
-                        </div>
-                        <div class="dimension @(IsFailed(root.WorkState) ? "is-alert" : IsTerminal(root.WorkState) ? string.Empty : "is-live")">
-                            <dt>Work state</dt>
-                            <dd>@root.WorkState</dd>
-                        </div>
-                    </dl>
-
-                    <p class="operation">
-                        <span class="operation-label">Status reason</span>
-                        <span>@(string.IsNullOrWhiteSpace(root.StatusReason) ? "None reported." : root.StatusReason)</span>
-                    </p>
-                    <p class="operation">
-                        <span class="operation-label">Current operation</span>
-                        <span>@(root.CurrentOperation ?? "None reported.")</span>
-                    </p>
-
-                    <dl class="facts">
-                        <dt>Root session</dt>
-                        <dd class="mono">@root.Id</dd>
-                        <dt>Model</dt>
-                        <dd>
-                            <span class="mono">@root.Model</span>
-                            @if (ModelText.RuntimeAside(root.Runtime, root.Model) is { } runtime)
-                            {
-                                <span class="hint">on @runtime</span>
-                            }
-                        </dd>
-                        <dt>Provider session</dt>
-                        <dd class="mono">@(root.ProviderSessionId ?? "not reported")</dd>
-                        <dt>Process</dt>
-                        <dd>@(root.ProcessId?.ToString() ?? "not reported")</dd>
-                        <dt>Started</dt>
-                        <dd>@root.StartedAt.ToString("u")</dd>
-                        <dt>Last heartbeat</dt>
-                        <dd>
-                            @if (root.LastHeartbeatAt is { } beat)
-                            {
-                                @beat.ToString("u")
-                                <span class="hint">(@Relative(beat, _snapshot))</span>
-                            }
-                            else
-                            {
-                                <span class="hint">no heartbeat received</span>
-                            }
-                        </dd>
-                        <dt>Ended</dt>
-                        <dd>
-                            @if (root.EndedAt is { } ended)
-                            {
-                                @ended.ToString("u")
-                            }
-                            else
-                            {
-                                <span class="hint">still open</span>
-                            }
-                        </dd>
-                    </dl>
+                    <FluentMessageBar Intent="MessageIntent.Warning"
+                                      Title="Assignment requires recovery"
+                                      AllowDismiss="false">
+                        Ownership uncertain; no second writer. The assignment is durable and still
+                        occupies project and node capacity. It can be restored only by explicit
+                        reconciliation from the same authenticated node, or closed by audited
+                        administrator recovery that proves process and repository quiescence.
+                    </FluentMessageBar>
                 }
-            </section>
-        </FluentCard>
 
-        <section aria-labelledby="tree-heading">
-            <h2 id="tree-heading">Agent tree</h2>
+                <FluentCard>
+                    <section class="panel" aria-labelledby="assignment-heading">
+                        <div class="section-head is-tight">
+                            <h3 id="assignment-heading">Execution assignment</h3>
+                            <span class="badge-row">
+                                <FluentBadge Appearance="@(IsAssignmentTerminal(assignment.State) ? Appearance.Neutral : Appearance.Accent)">
+                                    @assignment.State
+                                </FluentBadge>
+                                <FluentBadge Appearance="Appearance.Neutral">
+                                    @(IsAssignmentTerminal(assignment.State) ? "terminal history" : "holds the writer slot")
+                                </FluentBadge>
+                            </span>
+                        </div>
+
+                        <p class="panel-lead">
+                            @(IsAssignmentTerminal(assignment.State)
+                                ? "The assignment reached a terminal state. Its immutable placement snapshot and timestamps are retained as history; a retry is a new linked request, never a reassignment of this one."
+                                : "Placement below is the immutable snapshot taken when the assignment was created. It does not follow later workspace edits, and lease expiry never releases it.")
+                        </p>
+
+                        <dl class="facts">
+                            <dt>Node (snapshot)</dt>
+                            <dd class="mono">@assignment.NodeIdSnapshot</dd>
+                            <dt>Canonical repository path (snapshot)</dt>
+                            <dd class="mono">@assignment.CanonicalRepositoryPathSnapshot</dd>
+                            <dt>Default branch (snapshot)</dt>
+                            <dd class="mono">@assignment.DefaultBranchSnapshot</dd>
+                            <dt>Binding validation revision (snapshot)</dt>
+                            <dd>@assignment.BindingValidationRevisionSnapshot</dd>
+                            <dt>Workspace binding</dt>
+                            <dd class="mono">@assignment.WorkspaceBindingId</dd>
+                            <dt>Assignment state</dt>
+                            <dd>@assignment.State</dd>
+                            <dt>Assigned</dt>
+                            <dd>
+                                @assignment.AssignedAt.ToString("u")
+                                <span class="hint">(@Relative(assignment.AssignedAt, _snapshot))</span>
+                            </dd>
+                            <dt>Lease expires</dt>
+                            <dd>
+                                @assignment.LeaseExpiresAt.ToString("u")
+                                <span class="hint">@LeaseHint(assignment)</span>
+                            </dd>
+                            <dt>Last renewed</dt>
+                            <dd>
+                                @if (assignment.LastRenewedAt is { } renewed)
+                                {
+                                    @renewed.ToString("u")
+                                    <span class="hint">(@Relative(renewed, _snapshot))</span>
+                                }
+                                else
+                                {
+                                    <span class="hint">never renewed</span>
+                                }
+                            </dd>
+                            <dt>Last reconciled</dt>
+                            <dd>
+                                @if (assignment.LastReconciledAt is { } reconciled)
+                                {
+                                    @reconciled.ToString("u")
+                                    <span class="hint">(@Relative(reconciled, _snapshot))</span>
+                                }
+                                else
+                                {
+                                    <span class="hint">never reconciled</span>
+                                }
+                            </dd>
+                            <dt>Terminal</dt>
+                            <dd>
+                                @if (assignment.TerminalAt is { } terminal)
+                                {
+                                    @terminal.ToString("u")
+                                    <span class="hint">(@Relative(terminal, _snapshot))</span>
+                                }
+                                else
+                                {
+                                    <span class="hint">not terminal</span>
+                                }
+                            </dd>
+                        </dl>
+
+                        <p class="hint">
+                            The claim token authorizes only the assigned node and is never projected
+                            to this view.
+                        </p>
+                    </section>
+                </FluentCard>
+            }
+            else if (request.SchedulingStatus is null)
+            {
+                <p class="panel-empty">
+                    No execution assignment exists for this request and no queued scheduling decision
+                    is projected, because the request is @request.StatusName. Assignment placement
+                    appears here once the designated node claims the request.
+                </p>
+            }
+        </section>
+
+        <section class="page-section" aria-labelledby="tree-heading">
+            <div class="section-head">
+                <h2 id="tree-heading">Agent tree</h2>
+            </div>
             @if (_roots.Count == 0)
             {
                 <p class="panel-empty">
@@ -273,18 +451,14 @@ else
             }
         </section>
 
-        <section aria-labelledby="timeline-heading">
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="12"
-                         Width="100%">
+        <section class="page-section" aria-labelledby="timeline-heading">
+            <div class="section-head">
                 <h2 id="timeline-heading">Event timeline</h2>
-                <FluentSpacer />
-                <span class="event-origin" role="status" aria-live="polite">
+                <span class="section-meta" role="status" aria-live="polite">
                     @_events.Count persisted event@(_events.Count == 1 ? string.Empty : "s") &middot;
                     newest first &middot; refreshed @Relative(_snapshot, Clock.UtcNow)
                 </span>
-            </FluentStack>
+            </div>
 
             @if (_events.Count == 0)
             {
@@ -334,17 +508,13 @@ else
             }
         </section>
 
-        <section aria-labelledby="messages-heading">
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="12"
-                         Width="100%">
+        <section class="page-section" aria-labelledby="messages-heading">
+            <div class="section-head">
                 <h2 id="messages-heading">Messages</h2>
-                <FluentSpacer />
-                <span class="event-origin" role="status" aria-live="polite">
+                <span class="section-meta" role="status" aria-live="polite">
                     @MessageSummary()
                 </span>
-            </FluentStack>
+            </div>
 
             @if (_mailError is not null)
             {
@@ -391,17 +561,13 @@ else
             </FluentCard>
         </section>
 
-        <section aria-labelledby="reservations-heading">
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="12"
-                         Width="100%">
+        <section class="page-section" aria-labelledby="reservations-heading">
+            <div class="section-head">
                 <h2 id="reservations-heading">Reservations</h2>
-                <FluentSpacer />
-                <span class="event-origin" role="status" aria-live="polite">
+                <span class="section-meta" role="status" aria-live="polite">
                     @ReservationSummary()
                 </span>
-            </FluentStack>
+            </div>
 
             @if (_reservationError is not null)
             {
@@ -485,185 +651,187 @@ else
             }
         </section>
 
-        <section aria-labelledby="plan-heading">
-            <h2 id="plan-heading">Structured plan</h2>
-            @if (_insights.CurrentPlan is not { } plan)
-            {
-                <p class="panel-empty">
-                    No plan is persisted for this request. The root agent's
-                    <span class="mono">create_plan</span> tool writes a
-                    <span class="mono">request.phase_changed</span> event with phase
-                    <span class="mono">plan</span>; this view renders that event and nothing else.
-                </p>
-            }
-            else
-            {
-                <FluentCard>
-                    <div class="panel">
-                        <p class="panel-lead">
-                            @(plan.IsRevision ? "Revision" : "Initial plan") persisted at
-                            <span class="mono">@plan.OccurredAt.ToString("u")</span>
-                            by @(plan.SessionId is null ? "the request scope" : SessionLabel(plan.SessionId))
-                            &middot; seq @plan.Sequence
+        <div class="split-grid">
+            <section class="page-section" aria-labelledby="plan-heading">
+                <div class="section-head">
+                    <h2 id="plan-heading">Structured plan</h2>
+                </div>
+                @if (_insights.CurrentPlan is not { } plan)
+                {
+                    <p class="panel-empty">
+                        No plan is persisted for this request. The root agent's
+                        <span class="mono">create_plan</span> tool writes a
+                        <span class="mono">request.phase_changed</span> event with phase
+                        <span class="mono">plan</span>; this view renders that event and nothing else.
+                    </p>
+                }
+                else
+                {
+                    <FluentCard>
+                        <div class="panel">
+                            <p class="panel-lead">
+                                @(plan.IsRevision ? "Revision" : "Initial plan") persisted at
+                                <span class="mono">@plan.OccurredAt.ToString("u")</span>
+                                by @(plan.SessionId is null ? "the request scope" : SessionLabel(plan.SessionId))
+                                &middot; seq @plan.Sequence
+                                @if (_insights.PlanRevisions.Count > 1)
+                                {
+                                    <text>&middot; @(_insights.PlanRevisions.Count - 1) earlier version(s)</text>
+                                }
+                            </p>
+
+                            @if (plan.Reason is { Length: > 0 } reason)
+                            {
+                                <p class="operation">
+                                    <span class="operation-label">Reason</span>
+                                    <span>@reason</span>
+                                </p>
+                            }
+
+                            @if (plan.Steps.Count == 0)
+                            {
+                                <p class="panel-empty">
+                                    The plan event carried no <span class="mono">steps</span> array. Its
+                                    payload is shown verbatim rather than summarized.
+                                </p>
+                                <pre class="event-payload">@Payload(plan.PayloadJson)</pre>
+                            }
+                            else
+                            {
+                                <ol class="plan-steps">
+                                    @foreach (var step in plan.Steps)
+                                    {
+                                        <li>@step.Text</li>
+                                    }
+                                </ol>
+                            }
+
                             @if (_insights.PlanRevisions.Count > 1)
                             {
-                                <text>&middot; @(_insights.PlanRevisions.Count - 1) earlier version(s)</text>
+                                <details>
+                                    <summary>Revision history</summary>
+                                    <ul class="audit-list">
+                                        @foreach (var revision in PlanHistory())
+                                        {
+                                            <li>
+                                                <span class="event-type">
+                                                    @(revision.IsRevision ? "plan_revision" : "plan")
+                                                </span>
+                                                <span class="event-origin">
+                                                    seq @revision.Sequence &middot;
+                                                    @revision.OccurredAt.ToString("u") &middot;
+                                                    @revision.Steps.Count step(s)
+                                                    @if (revision.Reason is { Length: > 0 } why)
+                                                    {
+                                                        <text> &middot; @why</text>
+                                                    }
+                                                </span>
+                                            </li>
+                                        }
+                                    </ul>
+                                </details>
                             }
-                        </p>
+                        </div>
+                    </FluentCard>
+                }
+            </section>
 
-                        @if (plan.Reason is { Length: > 0 } reason)
-                        {
-                            <p class="operation">
-                                <span class="operation-label">Reason</span>
-                                <span>@reason</span>
+            <section class="page-section" aria-labelledby="diff-heading">
+                <div class="section-head">
+                    <h2 id="diff-heading">Repository diff</h2>
+                </div>
+
+                @foreach (var external in _insights.ExternalChanges)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Error"
+                                      Title="External repository change detected"
+                                      AllowDismiss="false">
+                        @(external.Paths.Count == 0
+                            ? "The node recorded a change no lease accounts for and listed no paths."
+                            : $"Changed outside every lease: {string.Join(", ", external.Paths)}.")
+                        @external.Detail
+                        Completion stays blocked until a human attributes or reverts the change; the
+                        Command Center never resets, stashes, or cleans the repository.
+                    </FluentMessageBar>
+                }
+
+                @if (_insights.LatestDiff is not { } diff)
+                {
+                    <p class="panel-empty">
+                        No diff snapshot is persisted. The node writes
+                        <span class="mono">repository.changed</span> and
+                        <span class="mono">repository.checkpoint_created</span> events as it captures the
+                        working tree; this view renders those events only.
+                    </p>
+                }
+                else
+                {
+                    <FluentCard>
+                        <div class="panel">
+                            <p class="panel-lead">
+                                <span class="mono">@diff.EventType</span> at
+                                <span class="mono">@diff.OccurredAt.ToString("u")</span>
+                                &middot; seq @diff.Sequence
+                                &middot; @_insights.DiffSnapshots.Count snapshot(s) captured
                             </p>
-                        }
 
-                        @if (plan.Steps.Count == 0)
-                        {
-                            <p class="panel-empty">
-                                The plan event carried no <span class="mono">steps</span> array. Its
-                                payload is shown verbatim rather than summarized.
-                            </p>
-                            <pre class="event-payload">@Payload(plan.PayloadJson)</pre>
-                        }
-                        else
-                        {
-                            <ol class="plan-steps">
-                                @foreach (var step in plan.Steps)
-                                {
-                                    <li>@step.Text</li>
-                                }
-                            </ol>
-                        }
+                            <dl class="facts">
+                                <dt>Branch</dt>
+                                <dd>@(diff.Branch ?? "not recorded")</dd>
+                                <dt>Base commit</dt>
+                                <dd class="mono">@(diff.BaseCommit ?? "not recorded")</dd>
+                                <dt>Head commit</dt>
+                                <dd class="mono">@(diff.HeadCommit ?? "not recorded")</dd>
+                            </dl>
 
-                        @if (_insights.PlanRevisions.Count > 1)
-                        {
-                            <details>
-                                <summary>Revision history</summary>
-                                <ul class="audit-list">
-                                    @foreach (var revision in PlanHistory())
+                            @if (diff.Paths.Count == 0)
+                            {
+                                <p class="panel-empty">
+                                    The snapshot recorded no paths. Its payload is shown verbatim.
+                                </p>
+                                <pre class="event-payload">@Payload(diff.PayloadJson)</pre>
+                            }
+                            else
+                            {
+                                <ul class="file-list">
+                                    @foreach (var path in diff.Paths)
                                     {
-                                        <li>
-                                            <span class="event-type">
-                                                @(revision.IsRevision ? "plan_revision" : "plan")
-                                            </span>
-                                            <span class="event-origin">
-                                                seq @revision.Sequence &middot;
-                                                @revision.OccurredAt.ToString("u") &middot;
-                                                @revision.Steps.Count step(s)
-                                                @if (revision.Reason is { Length: > 0 } why)
-                                                {
-                                                    <text> &middot; @why</text>
-                                                }
+                                        <li class="@(path.Reserved == false ? "file-unattributed" : null)">
+                                            <span class="mono file-path">@path.Path</span>
+                                            @if (path.ChangeKind is { Length: > 0 } kind)
+                                            {
+                                                <FluentBadge Appearance="Appearance.Neutral">@kind</FluentBadge>
+                                            }
+                                            @if (path.LinesAdded is { } added || path.LinesRemoved is { } removed)
+                                            {
+                                                <span class="file-lines">
+                                                    +@(path.LinesAdded?.ToString() ?? "?")
+                                                    /
+                                                    -@(path.LinesRemoved?.ToString() ?? "?")
+                                                </span>
+                                            }
+                                            <span class="file-owner">
+                                                @(path.OwnerSessionId is null
+                                                    ? "ownership not recorded"
+                                                    : SessionLabel(path.OwnerSessionId))
                                             </span>
                                         </li>
                                     }
                                 </ul>
-                            </details>
-                        }
-                    </div>
-                </FluentCard>
-            }
-        </section>
+                            }
+                        </div>
+                    </FluentCard>
+                }
+            </section>
+        </div>
 
-        <section aria-labelledby="diff-heading">
-            <h2 id="diff-heading">Repository diff</h2>
-
-            @foreach (var external in _insights.ExternalChanges)
-            {
-                <FluentMessageBar Intent="MessageIntent.Error"
-                                  Title="External repository change detected"
-                                  AllowDismiss="false">
-                    @(external.Paths.Count == 0
-                        ? "The node recorded a change no lease accounts for and listed no paths."
-                        : $"Changed outside every lease: {string.Join(", ", external.Paths)}.")
-                    @external.Detail
-                    Completion stays blocked until a human attributes or reverts the change; the
-                    Command Center never resets, stashes, or cleans the repository.
-                </FluentMessageBar>
-            }
-
-            @if (_insights.LatestDiff is not { } diff)
-            {
-                <p class="panel-empty">
-                    No diff snapshot is persisted. The node writes
-                    <span class="mono">repository.changed</span> and
-                    <span class="mono">repository.checkpoint_created</span> events as it captures the
-                    working tree; this view renders those events only.
-                </p>
-            }
-            else
-            {
-                <FluentCard>
-                    <div class="panel">
-                        <p class="panel-lead">
-                            <span class="mono">@diff.EventType</span> at
-                            <span class="mono">@diff.OccurredAt.ToString("u")</span>
-                            &middot; seq @diff.Sequence
-                            &middot; @_insights.DiffSnapshots.Count snapshot(s) captured
-                        </p>
-
-                        <dl class="facts">
-                            <dt>Branch</dt>
-                            <dd>@(diff.Branch ?? "not recorded")</dd>
-                            <dt>Base commit</dt>
-                            <dd class="mono">@(diff.BaseCommit ?? "not recorded")</dd>
-                            <dt>Head commit</dt>
-                            <dd class="mono">@(diff.HeadCommit ?? "not recorded")</dd>
-                        </dl>
-
-                        @if (diff.Paths.Count == 0)
-                        {
-                            <p class="panel-empty">
-                                The snapshot recorded no paths. Its payload is shown verbatim.
-                            </p>
-                            <pre class="event-payload">@Payload(diff.PayloadJson)</pre>
-                        }
-                        else
-                        {
-                            <ul class="file-list">
-                                @foreach (var path in diff.Paths)
-                                {
-                                    <li class="@(path.Reserved == false ? "file-unattributed" : null)">
-                                        <span class="mono file-path">@path.Path</span>
-                                        @if (path.ChangeKind is { Length: > 0 } kind)
-                                        {
-                                            <FluentBadge Appearance="Appearance.Neutral">@kind</FluentBadge>
-                                        }
-                                        @if (path.LinesAdded is { } added || path.LinesRemoved is { } removed)
-                                        {
-                                            <span class="file-lines">
-                                                +@(path.LinesAdded?.ToString() ?? "?")
-                                                /
-                                                -@(path.LinesRemoved?.ToString() ?? "?")
-                                            </span>
-                                        }
-                                        <span class="file-owner">
-                                            @(path.OwnerSessionId is null
-                                                ? "ownership not recorded"
-                                                : SessionLabel(path.OwnerSessionId))
-                                        </span>
-                                    </li>
-                                }
-                            </ul>
-                        }
-                    </div>
-                </FluentCard>
-            }
-        </section>
-
-        <section aria-labelledby="verification-heading">
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="12"
-                         Width="100%">
+        <section class="page-section" aria-labelledby="verification-heading">
+            <div class="section-head">
                 <h2 id="verification-heading">Verification</h2>
-                <FluentSpacer />
-                <span class="event-origin" role="status" aria-live="polite">
+                <span class="section-meta" role="status" aria-live="polite">
                     @VerificationSummary()
                 </span>
-            </FluentStack>
+            </div>
 
             @if (_verificationError is not null)
             {
@@ -688,29 +856,27 @@ else
                     {
                         <FluentCard>
                             <section class="panel" aria-label="@($"Verification profile {profile.Key}")">
-                                <FluentStack Orientation="Orientation.Horizontal"
-                                             VerticalAlignment="VerticalAlignment.Center"
-                                             HorizontalGap="8"
-                                             Width="100%">
+                                <div class="section-head is-tight">
                                     <h3>@profile.Key</h3>
-                                    <FluentSpacer />
                                     <FluentBadge Appearance="@(ProfileGreen(profile.Value) ? Appearance.Accent : Appearance.Neutral)">
                                         @(ProfileGreen(profile.Value) ? "all green" : "not green")
                                     </FluentBadge>
-                                </FluentStack>
+                                </div>
 
                                 <ul class="run-list">
                                     @foreach (var run in profile.Value)
                                     {
                                         <li class="run @RunClass(run.Status)">
                                             <span class="run-command mono">@run.CommandId</span>
-                                            <FluentBadge Appearance="@(run.Status == VerificationRunStatus.Passed ? Appearance.Accent : Appearance.Neutral)">
-                                                @run.Status
-                                            </FluentBadge>
-                                            @if (run.Mandatory)
-                                            {
-                                                <FluentBadge Appearance="Appearance.Neutral">mandatory</FluentBadge>
-                                            }
+                                            <span class="badge-row">
+                                                <FluentBadge Appearance="@(run.Status == VerificationRunStatus.Passed ? Appearance.Accent : Appearance.Neutral)">
+                                                    @run.Status
+                                                </FluentBadge>
+                                                @if (run.Mandatory)
+                                                {
+                                                    <FluentBadge Appearance="Appearance.Neutral">mandatory</FluentBadge>
+                                                }
+                                            </span>
                                             <span class="run-facts">
                                                 exit @(run.ExitCode?.ToString() ?? "n/a") &middot;
                                                 @RunDuration(run) &middot;
@@ -734,8 +900,10 @@ else
             }
         </section>
 
-        <section aria-labelledby="result-heading">
-            <h2 id="result-heading">Final result</h2>
+        <section class="page-section" aria-labelledby="result-heading">
+            <div class="section-head">
+                <h2 id="result-heading">Final result</h2>
+            </div>
 
             @if (_resultError is not null)
             {
@@ -781,56 +949,66 @@ else
                             (@Relative(result.CreatedAt, _snapshot)).
                         </p>
 
-                        <h3>Summary</h3>
-                        <p class="request-prompt">@result.SummaryMarkdown</p>
+                        <div class="result-grid">
+                            <div class="result-block">
+                                <h3>Summary</h3>
+                                <p class="request-prompt">@result.SummaryMarkdown</p>
+                            </div>
 
-                        <h3>Changed files (@result.ChangedFiles.Count)</h3>
-                        @if (result.ChangedFiles.Count == 0)
-                        {
-                            <p class="panel-empty">The accepted result recorded no changed file.</p>
-                        }
-                        else
-                        {
-                            <ul class="file-list">
-                                @foreach (var file in result.ChangedFiles)
+                            <div class="result-block">
+                                <h3>Verification summary</h3>
+                                <p class="request-prompt">@result.VerificationSummary</p>
+                            </div>
+
+                            <div class="result-block">
+                                <h3>Changed files (@result.ChangedFiles.Count)</h3>
+                                @if (result.ChangedFiles.Count == 0)
                                 {
-                                    <li><span class="mono file-path">@file</span></li>
+                                    <p class="panel-empty">The accepted result recorded no changed file.</p>
                                 }
-                            </ul>
-                        }
-
-                        <h3>Review findings (@result.ReviewFindings.Count)</h3>
-                        @if (result.ReviewFindings.Count == 0)
-                        {
-                            <p class="panel-empty">The reviewer recorded no finding.</p>
-                        }
-                        else
-                        {
-                            <ul class="finding-list">
-                                @foreach (var finding in result.ReviewFindings)
+                                else
                                 {
-                                    <li class="@(finding.Blocking && !finding.Resolved ? "finding-blocking" : null)">
-                                        <span class="mono">@finding.Id</span>
-                                        <span>@finding.Summary</span>
-                                        <span class="badge-row">
-                                            <FluentBadge Appearance="@(finding.Blocking ? Appearance.Accent : Appearance.Neutral)">
-                                                @(finding.Blocking ? "blocking" : "non-blocking")
-                                            </FluentBadge>
-                                            <FluentBadge Appearance="Appearance.Neutral">
-                                                @(finding.Resolved ? "resolved" : "open")
-                                            </FluentBadge>
-                                            @if (finding.UserOverridden)
-                                            {
-                                                <FluentBadge Appearance="Appearance.Neutral">user override</FluentBadge>
-                                            }
-                                        </span>
-                                    </li>
+                                    <ul class="file-list">
+                                        @foreach (var file in result.ChangedFiles)
+                                        {
+                                            <li><span class="mono file-path">@file</span></li>
+                                        }
+                                    </ul>
                                 }
-                            </ul>
-                        }
+                            </div>
 
-                        <h3>Verification summary</h3>
-                        <p class="request-prompt">@result.VerificationSummary</p>
+                            <div class="result-block">
+                                <h3>Review findings (@result.ReviewFindings.Count)</h3>
+                                @if (result.ReviewFindings.Count == 0)
+                                {
+                                    <p class="panel-empty">The reviewer recorded no finding.</p>
+                                }
+                                else
+                                {
+                                    <ul class="finding-list">
+                                        @foreach (var finding in result.ReviewFindings)
+                                        {
+                                            <li class="@(finding.Blocking && !finding.Resolved ? "finding-blocking" : null)">
+                                                <span class="mono">@finding.Id</span>
+                                                <span>@finding.Summary</span>
+                                                <span class="badge-row">
+                                                    <FluentBadge Appearance="@(finding.Blocking ? Appearance.Accent : Appearance.Neutral)">
+                                                        @(finding.Blocking ? "blocking" : "non-blocking")
+                                                    </FluentBadge>
+                                                    <FluentBadge Appearance="Appearance.Neutral">
+                                                        @(finding.Resolved ? "resolved" : "open")
+                                                    </FluentBadge>
+                                                    @if (finding.UserOverridden)
+                                                    {
+                                                        <FluentBadge Appearance="Appearance.Neutral">user override</FluentBadge>
+                                                    }
+                                                </span>
+                                            </li>
+                                        }
+                                    </ul>
+                                }
+                            </div>
+                        </div>
                     </div>
                 </FluentCard>
             }
@@ -843,7 +1021,7 @@ else
                 </p>
             }
         </section>
-    </FluentStack>
+    </div>
 }
 
 @code {
@@ -1389,6 +1567,68 @@ else
 
         return $"{_verificationRuns.Count} run(s) \u00b7 {green} green \u00b7 {red} red "
             + $"({mandatoryRed} mandatory) \u00b7 refreshed {TimeText.Relative(_snapshot, Clock.UtcNow)}";
+    }
+
+    /// <summary>
+    /// Says which of the two placement facts exist, so the section header is honest before the
+    /// operator reads the cards: a queued request has a scheduling decision and no assignment.
+    /// </summary>
+    private string PlacementSummary(WorkRequestDto request)
+    {
+        if (request.Assignment is { } assignment)
+        {
+            return IsAssignmentTerminal(assignment.State)
+                ? $"assignment {assignment.State} \u00b7 retained placement history \u00b7 "
+                    + $"refreshed {TimeText.Relative(_snapshot, Clock.UtcNow)}"
+                : $"assignment {assignment.State} \u00b7 occupies project and node capacity \u00b7 "
+                    + $"refreshed {TimeText.Relative(_snapshot, Clock.UtcNow)}";
+        }
+
+        return request.SchedulingStatus is { } scheduling
+            ? $"not assigned \u00b7 {(scheduling.IsEligible ? "eligible for assignment" : "not eligible")}"
+                + $" \u00b7 refreshed {TimeText.Relative(_snapshot, Clock.UtcNow)}"
+            : $"no assignment \u00b7 request is {request.StatusName}";
+    }
+
+    /// <summary>
+    /// Operator label for a server-issued scheduling code. The server owns precedence, detail, and
+    /// action text; this only names the code it already chose.
+    /// </summary>
+    private static string SchedulingLabel(string code) => code switch
+    {
+        SchedulingReasonCodes.ProjectDisabled => "Project disabled",
+        SchedulingReasonCodes.WorkspaceBindingMissing => "No workspace",
+        SchedulingReasonCodes.WorkspaceValidationPending => "Validation pending",
+        SchedulingReasonCodes.WorkspaceInvalid => "Workspace invalid",
+        SchedulingReasonCodes.NodeOffline => "Node offline",
+        SchedulingReasonCodes.RuntimeUnavailable => "Runtime unavailable",
+        SchedulingReasonCodes.RuntimeUnknown => "Runtime unknown",
+        SchedulingReasonCodes.NodeCapacityUnavailable => "At capacity",
+        SchedulingReasonCodes.ProjectConcurrencyUnavailable => "Project at limit",
+        SchedulingReasonCodes.Eligible => "Ready",
+        _ => code,
+    };
+
+    private static bool IsAssignmentTerminal(ExecutionAssignmentState state) =>
+        state is ExecutionAssignmentState.Completed
+            or ExecutionAssignmentState.Failed
+            or ExecutionAssignmentState.Cancelled;
+
+    /// <summary>
+    /// Lease expiry is liveness evidence only: it never releases ownership, so an expired lease is
+    /// described rather than presented as a free slot.
+    /// </summary>
+    private string LeaseHint(ExecutionAssignmentProjectionDto assignment)
+    {
+        if (IsAssignmentTerminal(assignment.State))
+        {
+            return $"(recorded lease at terminal time; {Relative(assignment.LeaseExpiresAt, _snapshot)})";
+        }
+
+        return assignment.LeaseExpiresAt <= _snapshot
+            ? $"(expired {TimeText.Deadline(assignment.LeaseExpiresAt, _snapshot)}; expiry never"
+                + " releases ownership or frees capacity)"
+            : $"({TimeText.Deadline(assignment.LeaseExpiresAt, _snapshot)})";
     }
 
     private string ProjectHref() =>

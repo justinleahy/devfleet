@@ -1,7 +1,13 @@
+using System.ComponentModel.DataAnnotations;
+using System.Reflection;
+
 using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Requests;
+using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
+using PiCommandCenter.Domain.Projects;
+using PiCommandCenter.Domain.Requests;
 
 namespace PiCommandCenter.Application.Tests;
 
@@ -53,26 +59,199 @@ public class NodeContractShapeTests
         Assert.Equal(90d, dto.Resources.UptimeSeconds);
     }
 
-
     [Fact]
-    public void RequestClaimDto_exposes_the_lease_a_node_needs_to_renew()
+    public void ExecutionAssignmentDto_exposes_the_durable_assignment_and_request_snapshot()
     {
-        var claimedAt = DateTimeOffset.UtcNow;
-        var dto = new RequestClaimDto(
-            Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "token", claimedAt, claimedAt.AddMinutes(1),
-            "/repos/hub", "main", "Hub request", "Do hub work", "Development", "Standard", true, false);
+        var requestId = WorkRequestId.New();
+        var projectId = ProjectId.New();
+        var workspaceBindingId = WorkspaceBindingId.New();
+        var nodeId = NodeId.New();
+        var assignedAt = DateTimeOffset.UtcNow;
+        var leaseExpiresAt = assignedAt.AddMinutes(1);
+        var dto = new ExecutionAssignmentDto(
+            requestId,
+            projectId,
+            workspaceBindingId,
+            nodeId,
+            "/repos/hub",
+            "main",
+            BindingValidationRevisionSnapshot: 7,
+            ExecutionAssignmentState.RecoveryRequired,
+            "token",
+            assignedAt,
+            leaseExpiresAt,
+            "Hub request",
+            "Do hub work",
+            WorkRequestKind.Development,
+            RiskLevel.Standard,
+            CreateRequestBranch: true,
+            CreateRequestCommit: false);
 
-        Assert.False(string.IsNullOrWhiteSpace(dto.ClaimToken));
-        Assert.True(dto.LeaseExpiresAt > dto.ClaimedAt);
-        Assert.Equal("/repos/hub", dto.RepositoryPath);
-        Assert.Equal("main", dto.DefaultBranch);
-        Assert.Equal("Hub request", dto.Title);
-        Assert.Equal("Do hub work", dto.Prompt);
-        Assert.Equal("Development", dto.Kind);
-        Assert.Equal("Standard", dto.RiskLevel);
+        Assert.Equal(requestId, dto.RequestId);
+        Assert.Equal(projectId, dto.ProjectId);
+        Assert.Equal(workspaceBindingId, dto.WorkspaceBindingId);
+        Assert.Equal(nodeId, dto.NodeIdSnapshot);
+        Assert.Equal("/repos/hub", dto.CanonicalRepositoryPathSnapshot);
+        Assert.Equal("main", dto.DefaultBranchSnapshot);
+        Assert.Equal(7, dto.BindingValidationRevisionSnapshot);
+        Assert.Equal(ExecutionAssignmentState.RecoveryRequired, dto.State);
+        Assert.Equal("token", dto.ClaimToken);
+        Assert.Equal(assignedAt, dto.AssignedAt);
+        Assert.Equal(leaseExpiresAt, dto.LeaseExpiresAt);
+        Assert.Equal("Hub request", dto.RequestTitle);
+        Assert.Equal("Do hub work", dto.RequestPrompt);
+        Assert.Equal(WorkRequestKind.Development, dto.RequestKind);
+        Assert.Equal(RiskLevel.Standard, dto.RequestRiskLevel);
         Assert.True(dto.CreateRequestBranch);
         Assert.False(dto.CreateRequestCommit);
+    }
 
+    [Fact]
+    public void ExecutionAssignmentMessage_carries_the_immutable_execution_snapshot()
+    {
+        var requestId = Guid.NewGuid();
+        var projectId = Guid.NewGuid();
+        var workspaceBindingId = Guid.NewGuid();
+        var nodeId = Guid.NewGuid();
+        var assignedAt = DateTimeOffset.UtcNow;
+        var leaseExpiresAt = assignedAt.AddMinutes(1);
+        var message = new ExecutionAssignmentMessage(
+            requestId,
+            projectId,
+            workspaceBindingId,
+            nodeId,
+            "/repos/hub",
+            "main",
+            BindingValidationRevisionSnapshot: 7,
+            State: "RecoveryRequired",
+            ClaimToken: "token",
+            assignedAt,
+            leaseExpiresAt,
+            "Hub request",
+            "Do hub work",
+            RequestKind: "Development",
+            RequestRiskLevel: "Standard",
+            CreateRequestBranch: true,
+            CreateRequestCommit: false);
+
+        Assert.Equal(requestId, message.RequestId);
+        Assert.Equal(projectId, message.ProjectId);
+        Assert.Equal(workspaceBindingId, message.WorkspaceBindingId);
+        Assert.Equal(nodeId, message.NodeIdSnapshot);
+        Assert.Equal("/repos/hub", message.CanonicalRepositoryPathSnapshot);
+        Assert.Equal("main", message.DefaultBranchSnapshot);
+        Assert.Equal(7, message.BindingValidationRevisionSnapshot);
+        Assert.Equal("RecoveryRequired", message.State);
+        Assert.Equal("token", message.ClaimToken);
+        Assert.Equal(assignedAt, message.AssignedAt);
+        Assert.Equal(leaseExpiresAt, message.LeaseExpiresAt);
+        Assert.Equal("Hub request", message.RequestTitle);
+        Assert.Equal("Do hub work", message.RequestPrompt);
+        Assert.Equal("Development", message.RequestKind);
+        Assert.Equal("Standard", message.RequestRiskLevel);
+        Assert.True(message.CreateRequestBranch);
+        Assert.False(message.CreateRequestCommit);
+    }
+
+    [Fact]
+    public void Execution_assignment_service_exposes_claim_and_renew_operations()
+    {
+        var claimNext = typeof(IExecutionAssignmentService).GetMethod(
+            nameof(IExecutionAssignmentService.ClaimNextAsync))!;
+        var renew = typeof(IExecutionAssignmentService).GetMethod(
+            nameof(IExecutionAssignmentService.RenewAsync))!;
+
+        Assert.Equal(typeof(Task<ExecutionAssignmentDto>), claimNext.ReturnType);
+        Assert.Equal(
+            new[] { typeof(NodeId), typeof(TimeSpan), typeof(CancellationToken) },
+            claimNext.GetParameters().Select(parameter => parameter.ParameterType));
+        Assert.Equal(typeof(Task<DateTimeOffset>), renew.ReturnType);
+        Assert.Equal(
+            new[] { typeof(WorkRequestId), typeof(NodeId), typeof(string), typeof(TimeSpan), typeof(CancellationToken) },
+            renew.GetParameters().Select(parameter => parameter.ParameterType));
+    }
+
+    [Fact]
+    public void Legacy_request_claim_contracts_are_not_exposed()
+    {
+        var applicationAssembly = typeof(ExecutionAssignmentDto).Assembly;
+        var transportAssembly = typeof(ExecutionAssignmentMessage).Assembly;
+
+        Assert.Null(applicationAssembly.GetType("PiCommandCenter.Application.Requests.RequestClaimDto"));
+        Assert.Null(applicationAssembly.GetType("PiCommandCenter.Application.Requests.IRequestClaimService"));
+        Assert.Null(transportAssembly.GetType("PiCommandCenter.Contracts.NodeTransport.RequestClaimMessage"));
+    }
+
+    [Theory]
+    [InlineData(typeof(AcquireReservationMessage))]
+    [InlineData(typeof(ReservationMutationMessage))]
+    [InlineData(typeof(ExpandReservationMessage))]
+    [InlineData(typeof(ReleaseReservationMessage))]
+    [InlineData(typeof(TransferReservationMessage))]
+    [InlineData(typeof(MutationAuthorizationMessage))]
+    [InlineData(typeof(MarkRecoveryMessage))]
+    [InlineData(typeof(ListReservationsMessage))]
+    [InlineData(typeof(SendMailMessage))]
+    [InlineData(typeof(ReplyMailMessage))]
+    [InlineData(typeof(FetchMailInboxMessage))]
+    [InlineData(typeof(FetchMailThreadMessage))]
+    [InlineData(typeof(MarkMailReadMessage))]
+    [InlineData(typeof(AcknowledgeMailMessage))]
+    [InlineData(typeof(AllocateAgentIdentityMessage))]
+    [InlineData(typeof(ReleaseAgentIdentityMessage))]
+    [InlineData(typeof(FindAgentIdentityMessage))]
+    public void Request_scoped_node_operations_require_a_bounded_assignment_fence(Type messageType)
+    {
+        var projectId = messageType.GetProperty("ProjectId")!;
+        var requestId = messageType.GetProperty("RequestId")!;
+        var claimToken = messageType.GetProperty("ClaimToken")!;
+        var constructorParameters = messageType.GetConstructors().Single().GetParameters();
+        var projectIdParameter = constructorParameters.Single(parameter => parameter.Name == "ProjectId");
+        var requestIdParameter = constructorParameters.Single(parameter => parameter.Name == "RequestId");
+        var claimTokenParameter = constructorParameters.Single(parameter => parameter.Name == "ClaimToken");
+
+        Assert.Equal(typeof(Guid), projectId.PropertyType);
+        Assert.Equal(typeof(Guid), requestId.PropertyType);
+        Assert.Equal(typeof(string), claimToken.PropertyType);
+        Assert.NotNull(claimToken.GetCustomAttribute<RequiredAttribute>());
+        Assert.Equal(128, claimToken.GetCustomAttribute<MaxLengthAttribute>()?.Length);
+
+        Assert.False(projectIdParameter.IsOptional);
+        Assert.False(projectIdParameter.HasDefaultValue);
+        Assert.False(requestIdParameter.IsOptional);
+        Assert.False(requestIdParameter.HasDefaultValue);
+        Assert.False(claimTokenParameter.IsOptional);
+        Assert.False(claimTokenParameter.HasDefaultValue);
+    }
+
+    [Theory]
+    [InlineData(typeof(NodeEventMessage))]
+    [InlineData(typeof(VerificationRunMessage))]
+    [InlineData(typeof(BeginTerminalizationMessage))]
+    [InlineData(typeof(ConfirmTerminalizationMessage))]
+    public void Event_verification_and_completion_commands_require_a_bounded_assignment_fence(Type messageType)
+    {
+        var claimToken = messageType.GetProperty("ClaimToken")!;
+        var constructorParameter = messageType
+            .GetConstructors()
+            .Single()
+            .GetParameters()
+            .Single(parameter => parameter.Name == "ClaimToken");
+
+        Assert.Equal(typeof(string), claimToken.PropertyType);
+        Assert.NotNull(claimToken.GetCustomAttribute<RequiredAttribute>());
+        Assert.Equal(128, claimToken.GetCustomAttribute<MaxLengthAttribute>()?.Length);
+        Assert.False(constructorParameter.IsOptional);
+    }
+
+    [Theory]
+    [InlineData(typeof(NodeEventAcknowledgementMessage))]
+    [InlineData(typeof(VerificationRunResultMessage))]
+    [InlineData(typeof(CompletionGateDecisionMessage))]
+    [InlineData(typeof(RequestResultMessage))]
+    public void Node_command_responses_do_not_expose_assignment_claim_tokens(Type messageType)
+    {
+        Assert.Null(messageType.GetProperty("ClaimToken"));
     }
 
     [Fact]

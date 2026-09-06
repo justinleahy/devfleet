@@ -1,3 +1,5 @@
+using PiCommandCenter.Node.Quiescence;
+
 namespace PiCommandCenter.Node.Child;
 
 /// <summary>Outcome of one reserved filesystem operation attempt.</summary>
@@ -25,12 +27,23 @@ public sealed record MutationLease(Guid LeaseId, long FencingToken);
 public sealed class ReservedFileOperations
 {
     private readonly INodeReservationGateway _reservations;
+    private readonly IRequestAdmissionGate _admission;
 
-    public ReservedFileOperations(INodeReservationGateway reservations)
+    public ReservedFileOperations(INodeReservationGateway reservations, IRequestAdmissionGate admission)
     {
         ArgumentNullException.ThrowIfNull(reservations);
+        ArgumentNullException.ThrowIfNull(admission);
         _reservations = reservations;
+        _admission = admission;
     }
+
+    private NodeActivityLease? EnterMutation(Guid requestId, string operation)
+        => _admission.TryEnterOperation(requestId, operation);
+
+    private static FileOperationResult AdmissionClosed()
+        => FileOperationResult.Failure(
+            "admission_closed",
+            "The request is terminalizing; no new mutation work is admitted.");
 
     public async Task<FileOperationResult> ReadTextAsync(
         string repositoryRoot,
@@ -67,6 +80,7 @@ public sealed class ReservedFileOperations
     }
 
     public async Task<FileOperationResult> WriteTextAsync(
+        Guid requestId,
         string repositoryRoot,
         MutationLease lease,
         string sessionId,
@@ -74,6 +88,12 @@ public sealed class ReservedFileOperations
         string content,
         CancellationToken cancellationToken = default)
     {
+        using var activity = EnterMutation(requestId, "reserved_write");
+        if (activity is null)
+        {
+            return AdmissionClosed();
+        }
+
         string path;
         try
         {
@@ -104,6 +124,7 @@ public sealed class ReservedFileOperations
     }
 
     public async Task<FileOperationResult> EditTextAsync(
+        Guid requestId,
         string repositoryRoot,
         MutationLease lease,
         string sessionId,
@@ -112,6 +133,12 @@ public sealed class ReservedFileOperations
         string newText,
         CancellationToken cancellationToken = default)
     {
+        using var activity = EnterMutation(requestId, "reserved_edit");
+        if (activity is null)
+        {
+            return AdmissionClosed();
+        }
+
         string path;
         try
         {
@@ -148,12 +175,19 @@ public sealed class ReservedFileOperations
     }
 
     public async Task<FileOperationResult> DeleteAsync(
+        Guid requestId,
         string repositoryRoot,
         MutationLease lease,
         string sessionId,
         string relativePath,
         CancellationToken cancellationToken = default)
     {
+        using var activity = EnterMutation(requestId, "reserved_delete");
+        if (activity is null)
+        {
+            return AdmissionClosed();
+        }
+
         string path;
         try
         {
@@ -196,6 +230,7 @@ public sealed class ReservedFileOperations
     /// of the move can never mutate the repository.
     /// </summary>
     public async Task<FileOperationResult> MoveAsync(
+        Guid requestId,
         string repositoryRoot,
         MutationLease lease,
         string sessionId,
@@ -203,6 +238,12 @@ public sealed class ReservedFileOperations
         string destinationRelativePath,
         CancellationToken cancellationToken = default)
     {
+        using var activity = EnterMutation(requestId, "reserved_move");
+        if (activity is null)
+        {
+            return AdmissionClosed();
+        }
+
         string source;
         string destination;
         try

@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
+using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Projects;
 using PiCommandCenter.Domain;
 using static PiCommandCenter.Api.ApiProblems;
@@ -7,8 +8,7 @@ using static PiCommandCenter.Api.ApiProblems;
 namespace PiCommandCenter.Api;
 
 /// <summary>
-/// Project endpoints: list, register, get, and validate, mapped relative to the supplied group.
-/// Error mapping follows SPEC section 30: 400 validation, 404 missing, 409 duplicates.
+/// Project metadata and workspace-binding endpoints, mapped relative to the supplied group.
 /// </summary>
 internal static class ProjectsEndpoints
 {
@@ -20,7 +20,9 @@ internal static class ProjectsEndpoints
         group.MapPost("/projects", ([FromBody] RegisterProjectCommand command, IProjectCatalog catalog, CancellationToken cancellationToken) =>
             RegisterAsync(command, catalog, locationPrefix, cancellationToken)).WithTags("Projects");
         group.MapGet("/projects/{projectId:guid}", GetAsync).WithTags("Projects");
-        group.MapPost("/projects/{projectId:guid}/validate", ValidateAsync).WithTags("Projects");
+        group.MapPut("/projects/{projectId:guid}/workspace-binding", DesignateWorkspaceBindingAsync).WithTags("Projects");
+        group.MapPost("/projects/{projectId:guid}/workspace-binding/validate", ValidateWorkspaceBindingAsync).WithTags("Projects");
+        group.MapDelete("/projects/{projectId:guid}/workspace-binding", DeleteWorkspaceBindingAsync).WithTags("Projects");
     }
 
     private static async Task<Ok<ProjectListResponse>> ListAsync(
@@ -31,7 +33,7 @@ internal static class ProjectsEndpoints
         return TypedResults.Ok(new ProjectListResponse(projects));
     }
 
-    private static async Task<Results<Created<ProjectDto>, Conflict<ProblemDetails>, BadRequest<ProblemDetails>>> RegisterAsync(
+    private static async Task<Results<Created<ProjectDto>, BadRequest<ProblemDetails>>> RegisterAsync(
         RegisterProjectCommand command,
         IProjectCatalog catalog,
         string locationPrefix,
@@ -48,13 +50,6 @@ internal static class ProjectsEndpoints
                 StatusCodes.Status400BadRequest,
                 "Validation failed",
                 string.Join(' ', ex.Errors)));
-        }
-        catch (DuplicateProjectException ex)
-        {
-            return TypedResults.Conflict(Problem(
-                StatusCodes.Status409Conflict,
-                "Duplicate project",
-                $"A project is already registered at '{ex.RepositoryPath}'."));
         }
     }
 
@@ -74,35 +69,138 @@ internal static class ProjectsEndpoints
         }
     }
 
-    private static async Task<Results<Ok<ProjectValidationReport>, NotFound<ProblemDetails>>> ValidateAsync(
+    private static async Task<Results<
+        Ok<WorkspaceBindingDto>,
+        NotFound<ProblemDetails>,
+        Conflict<ProblemDetails>,
+        BadRequest<ProblemDetails>>> DesignateWorkspaceBindingAsync(
         Guid projectId,
-        IProjectCatalog catalog,
+        [FromBody] WorkspaceBindingDesignationRequest request,
+        IWorkspaceBindingCatalog catalog,
+        TimeProvider clock,
         CancellationToken cancellationToken)
     {
         try
         {
-            var project = await catalog.GetAsync(new ProjectId(projectId), cancellationToken);
-            var command = new RegisterProjectCommand(
-                project.DisplayName,
-                project.RepositoryPath,
-                project.DefaultBranch,
-                project.Enabled,
-                project.MaxActiveWriteRequests,
-                project.MaxReadOnlyRequests,
-                project.MaxChildAgentsPerRequest,
-                project.RequireCleanStart,
-                project.CreateRequestBranch,
-                project.CreateRequestCommit,
-                project.AutoMerge);
-            var report = await catalog.ValidateAsync(command, cancellationToken);
-            return TypedResults.Ok(report);
+            var binding = await catalog.DesignateAsync(
+                new ProjectId(projectId),
+                new DesignateWorkspaceBindingCommand(new NodeId(request.NodeId), request.RepositoryPath),
+                clock.GetUtcNow(),
+                cancellationToken);
+            return TypedResults.Ok(binding);
         }
         catch (ProjectNotFoundException)
         {
             return TypedResults.NotFound(ProjectNotFound(projectId));
         }
+        catch (NodeNotFoundException ex)
+        {
+            return TypedResults.NotFound(Problem(
+                StatusCodes.Status404NotFound,
+                "Node not found",
+                ex.Message));
+        }
+        catch (WorkspaceBindingConflictException ex)
+        {
+            return TypedResults.Conflict(Problem(
+                StatusCodes.Status409Conflict,
+                "Workspace binding conflict",
+                ex.Message));
+        }
+        catch (WorkspaceBindingInUseException ex)
+        {
+            return TypedResults.Conflict(Problem(
+                StatusCodes.Status409Conflict,
+                "Workspace binding in use",
+                ex.Message));
+        }
+        catch (ArgumentException ex)
+        {
+            return TypedResults.BadRequest(Problem(
+                StatusCodes.Status400BadRequest,
+                "Validation failed",
+                ex.Message));
+        }
+    }
+
+    private static async Task<Results<
+        Ok<WorkspaceBindingDto>,
+        NotFound<ProblemDetails>,
+        Conflict<ProblemDetails>>> ValidateWorkspaceBindingAsync(
+        Guid projectId,
+        IWorkspaceBindingCatalog catalog,
+        TimeProvider clock,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (await catalog.GetAsync(new ProjectId(projectId), cancellationToken) is null)
+            {
+                return TypedResults.Conflict(Problem(
+                    StatusCodes.Status409Conflict,
+                    "Workspace binding missing",
+                    $"Project '{projectId}' does not have a workspace binding."));
+            }
+
+            var binding = await catalog.ValidateAsync(
+                new ProjectId(projectId),
+                clock.GetUtcNow(),
+                cancellationToken);
+            return TypedResults.Ok(binding);
+        }
+        catch (ProjectNotFoundException)
+        {
+            return TypedResults.NotFound(ProjectNotFound(projectId));
+        }
+        catch (WorkspaceBindingConflictException ex)
+        {
+            return TypedResults.Conflict(Problem(
+                StatusCodes.Status409Conflict,
+                "Workspace binding conflict",
+                ex.Message));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return TypedResults.Conflict(Problem(
+                StatusCodes.Status409Conflict,
+                "Workspace binding unavailable",
+                ex.Message));
+        }
+    }
+
+    private static async Task<Results<
+        NoContent,
+        NotFound<ProblemDetails>,
+        Conflict<ProblemDetails>>> DeleteWorkspaceBindingAsync(
+        Guid projectId,
+        IWorkspaceBindingCatalog catalog,
+        TimeProvider clock,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await catalog.DeleteAsync(
+                new ProjectId(projectId),
+                clock.GetUtcNow(),
+                cancellationToken);
+            return TypedResults.NoContent();
+        }
+        catch (ProjectNotFoundException)
+        {
+            return TypedResults.NotFound(ProjectNotFound(projectId));
+        }
+        catch (WorkspaceBindingInUseException ex)
+        {
+            return TypedResults.Conflict(Problem(
+                StatusCodes.Status409Conflict,
+                "Workspace binding in use",
+                ex.Message));
+        }
     }
 }
+
+/// <summary>Body for creating or replacing a project's workspace designation.</summary>
+internal sealed record WorkspaceBindingDesignationRequest(Guid NodeId, string RepositoryPath);
 
 /// <summary>Response envelope for <c>GET {prefix}/projects</c>.</summary>
 internal sealed record ProjectListResponse(IReadOnlyList<ProjectDto> Projects);

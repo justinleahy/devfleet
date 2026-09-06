@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Logging.Abstractions;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Node.Runtime.Muse;
@@ -118,6 +119,41 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
     }
 
     [Fact]
+    public async Task Production_store_routes_cannot_omit_actual_root_readiness()
+    {
+        var worker = Worker();
+        worker.Model = "zai/root-model";
+        worker.AllowedChildRoles = ["reviewer"];
+        worker.RoleRoutes = new(StringComparer.Ordinal)
+        {
+            ["reviewer"] = [new AgentRoleRouteCandidate { Model = "antigravity/default" }],
+        };
+        using var store = new NodeRuntimeRoutingStore(
+            Options.Create(new NodeOptions { Id = Guid.NewGuid() }),
+            Options.Create(worker));
+        var probe = new RootUnavailableReadinessProbe(worker.Model);
+        using var provider = new RuntimeReadinessProvider(
+            Options.Create(new NodeOptions { MaxConcurrentRequests = 1, HeartbeatSeconds = 10 }),
+            Options.Create(worker),
+            store,
+            probe,
+            TimeProvider.System,
+            NullLogger<RuntimeReadinessProvider>.Instance);
+
+        await provider.RefreshAsync(CancellationToken.None);
+        var snapshot = provider.Capture([]);
+
+        Assert.Contains(worker.Model, probe.Observed);
+        Assert.Equal(
+            RuntimeReadinessStatuses.Unavailable,
+            snapshot.Routes.Single(route =>
+                route.Role == "root" && route.CanonicalModel == worker.Model).Readiness);
+        Assert.Equal(
+            RuntimeReadinessStatuses.Ready,
+            snapshot.Routes.Single(route => route.Role == "reviewer").Readiness);
+    }
+
+    [Fact]
     public async Task Discovery_reports_one_catalog_per_authenticated_provider()
     {
         var worker = Worker();
@@ -206,9 +242,28 @@ public sealed class RuntimeRoutingConfigurationTests : IDisposable
         }
     }
 
+    private sealed class RootUnavailableReadinessProbe(string rootModel) : IRuntimeReadinessProbe
+    {
+        public IReadOnlyList<string> Observed { get; private set; } = [];
+
+        public Task<IReadOnlyDictionary<string, string>> ObserveAsync(
+            IReadOnlyCollection<AgentModelSelector> candidates,
+            CancellationToken cancellationToken)
+        {
+            Observed = candidates.Select(candidate => candidate.Value).ToArray();
+            return Task.FromResult<IReadOnlyDictionary<string, string>>(
+                candidates.ToDictionary(
+                    candidate => candidate.Value,
+                    candidate => candidate.Value == rootModel
+                        ? RuntimeReadinessStatuses.Unavailable
+                        : RuntimeReadinessStatuses.Ready,
+                    StringComparer.Ordinal));
+        }
+    }
+
     private sealed class FakeMuseCatalogReader : IMuseModelCatalogReader
     {
         public Task<MuseModelCatalogResult> ReadAsync(CancellationToken cancellationToken)
-            => Task.FromResult(new MuseModelCatalogResult([], null));
+            => Task.FromResult(new MuseModelCatalogResult([], [], null));
     }
 }

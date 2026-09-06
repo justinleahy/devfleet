@@ -4,10 +4,12 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using PiCommandCenter.Application.Git;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Node.Runtime;
+using PiCommandCenter.Node.Quiescence;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -100,11 +102,40 @@ public sealed class PiRuntimeAdapterStartFlowTests
                 MakeRequest(AgentRuntimeMode.Child, "orphan"), CancellationToken.None));
     }
 
+    [Fact]
+    public async Task Terminalized_request_rejects_late_git_checkpoint_until_root_is_drained()
+    {
+        var git = new RecordingGitService();
+        var orchestration = new CheckpointOrchestration();
+        var harness = new Harness(DefaultOptions(), orchestration, git);
+        var request = MakeRequest(
+            AgentRuntimeMode.Root,
+            "do work",
+            createRequestCommit: true);
+        var handle = await harness.Adapter.StartAsync(request, CancellationToken.None);
+        await harness.WaitUntilInputSeenAsync();
+
+        harness.Admission.CloseAdmission(request.RequestId.Value);
+        harness.Admission.CommitTerminalization(request.RequestId.Value);
+        harness.SendWorkerRequest(handle.SessionId, "request.complete");
+        var checkpoint = await orchestration.Result.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(checkpoint.Ok);
+        Assert.Equal("admission_closed", checkpoint.ErrorCode);
+        Assert.Empty(git.Checkpoints);
+        Assert.True(harness.Admission.IsAdmissionClosed(request.RequestId.Value));
+
+        await harness.Adapter.CloseSessionAsync(handle.SessionId, CancellationToken.None);
+
+        Assert.False(harness.Admission.IsAdmissionClosed(request.RequestId.Value));
+    }
+
     private static AgentStartRequest MakeRequest(
         AgentRuntimeMode mode,
         string prompt,
         string? parentSessionId = null,
-        string model = "codex/default")
+        string model = "codex/default",
+        bool createRequestCommit = false)
         => new(
             (mode is AgentRuntimeMode.Root
                 ? PiRuntimeAdapter.RootSessionIdPrefix
@@ -117,7 +148,8 @@ public sealed class PiRuntimeAdapterStartFlowTests
             "/tmp/picc-start-flow",
             prompt,
             mode,
-            model);
+            model,
+            createRequestCommit: createRequestCommit);
 
     private static PiWorkerOptions DefaultOptions() => new()
     {
@@ -150,22 +182,30 @@ public sealed class PiRuntimeAdapterStartFlowTests
         private readonly TaskCompletionSource _inputSeen = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly Task _pump;
 
-        public Harness(PiWorkerOptions options)
+        public Harness(
+            PiWorkerOptions options,
+            IPiOrchestrationRequestHandler? orchestration = null,
+            ITrustedGitService? gitService = null)
         {
             Process = new FakePiProcess();
+            Admission = new RequestAdmissionGate(TimeProvider.System);
             Adapter = new PiRuntimeAdapter(
                 Options.Create(new NodeOptions { Id = Guid.NewGuid(), HeartbeatSeconds = 5 }),
                 Options.Create(options),
                 new FakeFactory(Process),
-                new NoopOrchestration(),
+                orchestration ?? new NoopOrchestration(),
                 TimeProvider.System,
-                NullLogger<PiRuntimeAdapter>.Instance);
+                NullLogger<PiRuntimeAdapter>.Instance,
+                Admission,
+                gitService);
             _pump = PumpFramesAsync();
         }
 
         public PiRuntimeAdapter Adapter { get; }
 
         public FakePiProcess Process { get; }
+
+        public RequestAdmissionGate Admission { get; }
 
         public JsonElement? StartPayload { get; private set; }
 
@@ -178,6 +218,18 @@ public sealed class PiRuntimeAdapterStartFlowTests
             {
                 throw new TimeoutException("session.input with the start prompt never arrived.");
             }
+        }
+
+        public void SendWorkerRequest(string sessionId, string type)
+        {
+            var request = new PiEnvelope(
+                PiProtocol.Version,
+                $"worker-{Guid.NewGuid():N}",
+                PiFrameKinds.Request,
+                sessionId,
+                type,
+                JsonSerializer.SerializeToElement(new { }));
+            Process.WriteStdout(PiProtocol.Encode(request));
         }
 
         private async Task PumpFramesAsync()
@@ -238,6 +290,7 @@ public sealed class PiRuntimeAdapterStartFlowTests
             else if (request.Type is "goodbye")
             {
                 Respond(request, new Dictionary<string, object?> { ["bye"] = true });
+                Process.Exit.TrySetResult(0);
             }
         }
 
@@ -267,6 +320,55 @@ public sealed class PiRuntimeAdapterStartFlowTests
                 JsonElement? payload,
                 CancellationToken cancellationToken)
                 => Task.FromResult(PiToolResponse.Success());
+        }
+    }
+
+    private sealed class CheckpointOrchestration : IPiOrchestrationRequestHandler
+    {
+        public TaskCompletionSource<PiCheckpointResult> Result { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<PiToolResponse> HandleAsync(
+            PiOrchestrationContext context,
+            string requestType,
+            JsonElement? payload,
+            CancellationToken cancellationToken)
+        {
+            if (context.CreateCheckpointAsync is null)
+            {
+                throw new InvalidOperationException("Checkpoint callback was not configured.");
+            }
+
+            var checkpoint = await context.CreateCheckpointAsync(
+                new PiCheckpointRequest(
+                    string.Empty,
+                    "late checkpoint",
+                    ["src/App.cs"]),
+                cancellationToken);
+            Result.TrySetResult(checkpoint);
+            return checkpoint.Ok
+                ? PiToolResponse.Success()
+                : PiToolResponse.Failure(
+                    checkpoint.ErrorCode ?? "checkpoint_failed",
+                    checkpoint.ErrorMessage ?? "Checkpoint failed.");
+        }
+    }
+
+    private sealed class RecordingGitService : ITrustedGitService
+    {
+        public List<CheckpointCommitRequest> Checkpoints { get; } = [];
+
+        public Task<RequestBranchCreated> CreateRequestBranchAsync(
+            RequestBranchRequest request,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+
+        public Task<CheckpointCommitted> CreateCheckpointCommitAsync(
+            CheckpointCommitRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Checkpoints.Add(request);
+            return Task.FromResult(new CheckpointCommitted("commit", request.BranchName));
         }
     }
 

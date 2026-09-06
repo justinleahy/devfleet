@@ -5,9 +5,7 @@ namespace PiCommandCenter.Application.Projects;
 /// </summary>
 public sealed record ProjectDto(
     Guid Id,
-    Guid NodeId,
     string DisplayName,
-    string RepositoryPath,
     string DefaultBranch,
     bool Enabled,
     int MaxActiveWriteRequests,
@@ -19,4 +17,5 @@ public sealed record ProjectDto(
     bool AutoMerge,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    long Version);
+    long Version,
+    WorkspaceBindingDto? Binding);

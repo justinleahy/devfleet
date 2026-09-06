@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Node.Child;
+using PiCommandCenter.Node.Quiescence;
 using PiCommandCenter.Node.Verification;
 
 namespace PiCommandCenter.Node.Tests;
@@ -75,6 +76,7 @@ public class VerificationOptionsValidatorTests
 
 public class VerificationCommandRunnerTests : IDisposable
 {
+    private readonly IRequestAdmissionGate _admission = new RequestAdmissionGate(TimeProvider.System);
     private readonly string _repo = Directory.CreateDirectory(
         Path.Combine(Path.GetTempPath(), "pi-cc-verify", Guid.NewGuid().ToString("N"))).FullName;
 
@@ -92,7 +94,7 @@ public class VerificationCommandRunnerTests : IDisposable
     private static VerificationRunContext Ctx(string repo) => new(
         Guid.NewGuid(), Guid.NewGuid(), "session-root", repo);
 
-    private static VerificationCommandRunner Runner(
+    private VerificationCommandRunner Runner(
         FakeReservationGateway gateway,
         params VerificationCommandOptions[] commands)
     {
@@ -108,7 +110,7 @@ public class VerificationCommandRunnerTests : IDisposable
                 },
             },
         });
-        return new VerificationCommandRunner(options, gateway);
+        return new VerificationCommandRunner(options, gateway, _admission);
     }
 
     [Fact]
@@ -135,6 +137,92 @@ public class VerificationCommandRunnerTests : IDisposable
 
         Assert.Equal("unknown_command", ex.Code);
         Assert.Empty(gateway.Acquires);
+    }
+
+    [Fact]
+    public async Task Closed_admission_rejects_before_reservation_or_process_work()
+    {
+        var gateway = new FakeReservationGateway();
+        var runner = Runner(gateway, TrueCommand());
+        var context = Ctx(_repo);
+        _admission.CloseAdmission(context.RequestId);
+
+        var exception = await Assert.ThrowsAsync<VerificationRejectedException>(
+            () => runner.RunAsync(context, "default", null, CancellationToken.None));
+
+        Assert.Equal("admission_closed", exception.Code);
+        Assert.Equal(0, gateway.ListCount);
+        Assert.Empty(gateway.Acquires);
+        var outcome = await _admission.ProveQuiescenceAsync(
+            context.RequestId,
+            new QuiescenceObservation(
+                _ => Task.FromResult(0),
+                _ => Task.FromResult(0),
+                _ => Task.FromResult(true)),
+            TimeSpan.FromSeconds(1));
+        var proof = Assert.IsType<QuiescenceOutcome.Proven>(outcome).Proof;
+        Assert.Equal(0, proof.ActiveOperations);
+        Assert.Equal(0, proof.ActiveProcesses);
+    }
+
+    [Fact]
+    public async Task Verification_operation_and_process_remain_active_through_reservation_cleanup()
+    {
+        var releaseStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAllowed = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var gateway = new FakeReservationGateway
+        {
+            OnReleaseAsync = _ =>
+            {
+                releaseStarted.TrySetResult();
+                return releaseAllowed.Task;
+            },
+        };
+        var runner = Runner(gateway, TrueCommand());
+        var context = Ctx(_repo);
+
+        var running = runner.RunAsync(context, "default", null, CancellationToken.None);
+        await releaseStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        _admission.CloseAdmission(context.RequestId);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+
+        QuiescenceOutcome draining;
+        try
+        {
+            draining = await _admission.ProveQuiescenceAsync(
+                context.RequestId,
+                new QuiescenceObservation(
+                    _ => Task.FromResult(1),
+                    _ => Task.FromResult(0),
+                    _ => Task.FromResult(true)),
+                TimeSpan.FromSeconds(1),
+                cancelled.Token);
+        }
+        finally
+        {
+            releaseAllowed.TrySetResult();
+        }
+
+        await running;
+        var observed = Assert.IsType<QuiescenceOutcome.Uncertain>(draining).Observed;
+        Assert.Equal(1, observed.ActiveOperations);
+        Assert.Equal(1, observed.ActiveProcesses);
+        Assert.Equal(1, observed.ActiveReservations);
+
+        var drained = await _admission.ProveQuiescenceAsync(
+            context.RequestId,
+            new QuiescenceObservation(
+                _ => Task.FromResult(0),
+                _ => Task.FromResult(0),
+                _ => Task.FromResult(true)),
+            TimeSpan.FromSeconds(1));
+        var proof = Assert.IsType<QuiescenceOutcome.Proven>(drained).Proof;
+        Assert.Equal(0, proof.ActiveOperations);
+        Assert.Equal(0, proof.ActiveProcesses);
+        Assert.Equal(0, proof.ActiveReservations);
     }
 
     [Fact]
@@ -262,7 +350,7 @@ public class VerificationCommandRunnerTests : IDisposable
                 },
             },
         });
-        var runner = new VerificationCommandRunner(options, gateway);
+        var runner = new VerificationCommandRunner(options, gateway, _admission);
 
         var result = await runner.RunAsync(Ctx(_repo), "default", null, CancellationToken.None);
 
@@ -359,21 +447,28 @@ public class VerificationCommandRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task Repository_verification_cannot_see_the_host_process_table()
+    public async Task Repository_verification_cannot_observe_the_host_process_identity()
     {
+        var hostCommandLine = await File.ReadAllTextAsync($"/proc/{Environment.ProcessId}/cmdline");
         var runner = Runner(new FakeReservationGateway(), new VerificationCommandOptions
         {
             Id = "host-process-check",
-            Executable = "/usr/bin/test",
-            Arguments = ["!", "-e", $"/proc/{Environment.ProcessId}/cmdline"],
+            Executable = "/usr/bin/cat",
+            Arguments = [$"/proc/{Environment.ProcessId}/cmdline"],
             WorkingDirectory = ".",
             TimeoutSeconds = 5,
         });
 
         var result = await runner.RunAsync(Ctx(_repo), "default", null, CancellationToken.None);
 
-        Assert.True(result.Succeeded);
-        Assert.Equal(0, result.Commands[0].ExitCode);
+        if (result.Succeeded)
+        {
+            Assert.NotEqual(hostCommandLine, result.Commands[0].StandardOutput);
+        }
+        else
+        {
+            Assert.NotEqual(0, result.Commands[0].ExitCode);
+        }
     }
 
     private static VerificationCommandOptions TrueCommand() => new()

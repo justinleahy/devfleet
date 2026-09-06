@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace PiCommandCenter.Contracts.NodeTransport;
 
 /// <summary>
@@ -8,6 +10,7 @@ public sealed record NodeEventMessage(
     Guid NodeId,
     Guid ProjectId,
     Guid? RequestId,
+    [property: Required, MaxLength(128)] string ClaimToken,
     string? SessionId,
     long Sequence,
     string Type,

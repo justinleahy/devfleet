@@ -26,15 +26,19 @@ public sealed class RuntimeCrashRecovery : IRuntimeCrashRecovery
 
     private readonly INodeReservationGateway _reservations;
     private readonly INodeEventSpool _spool;
+    private readonly INodeAssignmentCredentialSource _assignmentCredentials;
     private readonly TimeProvider _time;
 
     public RuntimeCrashRecovery(
         INodeReservationGateway reservations,
         INodeEventSpool spool,
+        INodeAssignmentCredentialSource assignmentCredentials,
         TimeProvider time)
     {
         _reservations = reservations ?? throw new ArgumentNullException(nameof(reservations));
         _spool = spool ?? throw new ArgumentNullException(nameof(spool));
+        _assignmentCredentials = assignmentCredentials
+            ?? throw new ArgumentNullException(nameof(assignmentCredentials));
         _time = time ?? throw new ArgumentNullException(nameof(time));
     }
 
@@ -47,6 +51,31 @@ public sealed class RuntimeCrashRecovery : IRuntimeCrashRecovery
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(ownerSessionId);
+        NodeAssignmentCredential credential;
+        if (requestId is { } exactRequestId)
+        {
+            if (!_assignmentCredentials.TryGetByRequest(exactRequestId, out var requestCredential)
+                || requestCredential.RequestId != exactRequestId
+                || requestCredential.ProjectId != projectId)
+            {
+                throw new InvalidOperationException(
+                    $"No active assignment credential is available for request {exactRequestId} in project {projectId}.");
+            }
+
+            credential = requestCredential;
+        }
+        else
+        {
+            if (!_assignmentCredentials.TryGetByProject(projectId, out var projectCredential)
+                || projectCredential.ProjectId != projectId)
+            {
+                throw new InvalidOperationException(
+                    $"No active assignment credential is available for project {projectId}.");
+            }
+
+            credential = projectCredential;
+        }
+
         var leases = await _reservations.ListAsync(projectId, includeReleased: false, cancellationToken)
             .ConfigureAwait(false);
 
@@ -75,6 +104,7 @@ public sealed class RuntimeCrashRecovery : IRuntimeCrashRecovery
                     NodeId: nodeId,
                     ProjectId: projectId,
                     RequestId: requestId,
+                    ClaimToken: credential.ClaimToken,
                     SessionId: ownerSessionId,
                     Sequence: 0,
                     Type: EventType,

@@ -1,8 +1,13 @@
+/* Phone-first lease card. Defaults assume a 320px viewport: every fact, scope, and control
+   occupies its own full-width row; the wider breakpoints fold those rows into label/value
+   pairs and inline scope rows for desktop density. */
+
 .lease {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 3px);
-    padding: calc(var(--design-unit) * 4px);
+    padding: calc(var(--design-unit) * 3px);
+    min-width: 0;
     border-inline-start: 3px solid var(--neutral-stroke-divider-rest);
 }
 
@@ -15,10 +20,25 @@
     border-inline-start-color: var(--warning);
 }
 
+/* Head: identity stacked above the badges on a phone, one row from tablet up. */
 .lease-head {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 1px);
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.lease-identity {
+    min-width: 0;
+}
+
+.lease-eyebrow {
+    margin: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
 }
 
 .lease-head h3 {
@@ -26,6 +46,7 @@
     font-size: var(--type-ramp-plus-1-font-size);
     line-height: var(--type-ramp-plus-1-line-height);
     font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
 .badge-row {
@@ -33,13 +54,51 @@
     flex-wrap: wrap;
     align-items: center;
     gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
 }
 
+/* Countdown line: the first thing an operator reads on a phone. */
+.lease-clock {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 2px);
+    margin: 0;
+    padding-block-end: calc(var(--design-unit) * 2px);
+    border-block-end: 1px solid var(--neutral-stroke-divider-rest);
+}
+
+.clock-label {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.clock-value {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.lease-clock.is-overdue .clock-label,
+.lease-clock.is-overdue .clock-value {
+    color: var(--warning);
+}
+
+/* Facts: one column of stacked label/value blocks on a phone. */
 .facts {
     display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 6px);
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 2px);
     margin: 0;
+    min-width: 0;
+}
+
+.fact {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 0.5px);
+    min-width: 0;
 }
 
 .facts dt {
@@ -48,19 +107,28 @@
     line-height: var(--type-ramp-minus-1-line-height);
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    align-self: center;
 }
 
 .facts dd {
     margin: 0;
     min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.facts dd.num,
+.facts dd .stamp {
     font-variant-numeric: tabular-nums;
+}
+
+.facts dd .stamp {
+    white-space: nowrap;
 }
 
 .mono {
     font-family: var(--monospace-font-family, ui-monospace, monospace);
     font-size: var(--type-ramp-minus-1-font-size);
     overflow-wrap: anywhere;
+    word-break: break-word;
 }
 
 .hint {
@@ -72,36 +140,78 @@
     font-weight: 600;
 }
 
+/* Scopes: a grouped, divider-separated list rather than nested cards. */
+.scopes {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
+}
+
+.section-label {
+    margin: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
 .scope-list {
     margin: 0;
     padding: 0;
     list-style: none;
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 1px);
+    border-block-start: 1px solid var(--neutral-stroke-divider-rest);
+    min-width: 0;
 }
 
 .scope {
-    display: flex;
-    align-items: baseline;
-    gap: calc(var(--design-unit) * 3px);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 0.5px);
+    padding: calc(var(--design-unit) * 2px) 0;
+    border-block-end: 1px solid var(--neutral-stroke-divider-rest);
+    min-width: 0;
 }
 
 .scope-kind {
-    min-width: 6ch;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
     text-transform: uppercase;
     letter-spacing: 0.08em;
 }
 
+.scope-path {
+    min-width: 0;
+}
+
+/* Force release: kept visually separate from the read-only body, warning-framed, and
+   explicitly confirmed. Controls stay full width so they are thumb-reachable. */
 .force-release {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 2px);
+    margin-block-start: calc(var(--design-unit) * 1px);
     padding: calc(var(--design-unit) * 3px);
+    background: var(--neutral-fill-secondary-rest);
     border: 1px solid var(--warning);
+    border-inline-start-width: 3px;
     border-radius: calc(var(--control-corner-radius) * 1px);
+    min-width: 0;
+}
+
+.force-release-eyebrow {
+    margin: 0;
+    color: var(--warning);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
 }
 
 .force-release h4 {
@@ -113,7 +223,7 @@
 
 .force-release-lead {
     margin: 0;
-    max-width: 64ch;
+    max-width: 68ch;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
     line-height: var(--type-ramp-minus-1-line-height);
@@ -121,8 +231,85 @@
 
 .force-release ::deep .field {
     width: 100%;
+    min-width: 0;
 }
 
 .force-release ::deep .field-wide {
     display: block;
+}
+
+/* The confirmation is the gate on a destructive action: give it a touch-sized row. */
+.confirm-row {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding-block: calc(var(--design-unit) * 1px);
+}
+
+.force-release-actions {
+    display: flex;
+    flex-direction: column;
+}
+
+.force-release-actions ::deep .force-release-button,
+.force-release-actions ::deep .force-release-button::part(control) {
+    width: 100%;
+    min-height: 44px;
+}
+
+@media (min-width: 600px) {
+    .lease {
+        padding: calc(var(--design-unit) * 4px);
+    }
+
+    /* Facts become compact label/value pairs. */
+    .fact {
+        grid-template-columns: 17ch minmax(0, 1fr);
+        column-gap: calc(var(--design-unit) * 3px);
+        align-items: baseline;
+    }
+
+    /* Scope kind sits inline beside its path. */
+    .scope {
+        grid-template-columns: 11ch minmax(0, 1fr);
+        column-gap: calc(var(--design-unit) * 3px);
+        align-items: baseline;
+    }
+
+    .force-release-actions {
+        align-items: flex-start;
+    }
+
+    .force-release-actions ::deep .force-release-button,
+    .force-release-actions ::deep .force-release-button::part(control) {
+        width: auto;
+        min-width: 24ch;
+    }
+}
+
+@media (min-width: 960px) {
+    /* Heading and badges share one row once there is room for both. */
+    .lease-head {
+        flex-direction: row;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .badge-row {
+        justify-content: flex-end;
+        flex-shrink: 0;
+    }
+}
+
+@media (min-width: 1280px) {
+    /* Desktop density: two label/value pairs per row, prose fact spanning both. */
+    .facts {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        column-gap: calc(var(--design-unit) * 6px);
+    }
+
+    .fact-wide {
+        grid-column: 1 / -1;
+    }
 }

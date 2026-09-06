@@ -4,37 +4,70 @@
 
 <FluentDesignTheme StorageName="theme" />
 
+@* Mobile-first operational shell.
+   The navigation panel is opened and closed by a single checkbox, `#navmenu-toggle`,
+   and CSS alone. FluentNavMenu's `CustomToggle` is what makes that work: it emits
+   `document.getElementById('navmenu-toggle').click()` on every FluentNavLink, so
+   choosing a route closes the panel with no circuit, no layout state, and no script
+   file of our own. The checkbox is also why the panel costs nothing when closed —
+   the rail is simply not rendered, rather than rendered at zero height.
+   `Collapsible` is deliberately left off: it renders a second in-menu expander whose
+   script rewrites the menu's inline width (fighting the fixed desktop rail), and its
+   collapsed state drops every link that has no icon — this app references no Fluent
+   icon package, so a collapsed rail would be empty. *@
+
 <div class="app-shell">
     <FluentLayout>
-        <FluentHeader Height="72">
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="16"
-                         Width="100%">
-                <FluentStack Class="brand-block" Orientation="Orientation.Vertical" VerticalGap="0" Width="auto">
-                    <span class="brand">DevFleet</span>
-                    <span class="brand-sub">Local development fleet control plane</span>
-                </FluentStack>
-                <FluentSpacer />
+        <FluentHeader Height="56" Class="command-bar">
+            @* The input is the control, not a decoration behind a <label>: it lies
+               transparent across the whole 44px square, so the hit target, the
+               keyboard focus ring and the accessible name are all on one element. *@
+            <div class="nav-toggle">
+                <input id="navmenu-toggle"
+                       class="nav-toggle-input"
+                       type="checkbox"
+                       title="Toggle navigation menu"
+                       aria-label="Toggle navigation menu"
+                       aria-controls="shell-nav-menu" />
+                <svg class="nav-toggle-glyph nav-toggle-closed" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                    <path d="M3.25 5.5h13.5M3.25 10h13.5M3.25 14.5h13.5" />
+                </svg>
+                <svg class="nav-toggle-glyph nav-toggle-open" viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+                    <path d="M4.75 4.75 15.25 15.25M15.25 4.75 4.75 15.25" />
+                </svg>
+            </div>
+
+            @* Elastic member of the bar: it absorbs the free space that pushes the
+               account block and sign-out to the end, and truncates first at 320px. *@
+            <div class="brand-block">
+                <span class="brand">DevFleet</span>
+                <span class="brand-sub">Local development fleet control plane</span>
+            </div>
+
+            <div class="bar-diagnostics">
                 <FluentBadge Class="header-badge" Appearance="Appearance.Neutral">Interactive Server</FluentBadge>
                 <FluentBadge Class="header-badge" Appearance="Appearance.Neutral">
                     Protocol v@(PiCommandCenter.Contracts.ProtocolVersion.Current)
                 </FluentBadge>
-                <AuthorizeView>
-                    <Authorized>
-                        <div class="user-block">
-                            <span class="user-label">Signed in</span>
-                            <span class="user-name">@context.User.Identity?.Name</span>
-                        </div>
-                        <LogoutForm />
-                    </Authorized>
-                </AuthorizeView>
-            </FluentStack>
+            </div>
+
+            <AuthorizeView>
+                <Authorized>
+                    <div class="user-block">
+                        <span class="user-label">Signed in</span>
+                        <span class="user-name">@context.User.Identity?.Name</span>
+                    </div>
+                    <LogoutForm />
+                </Authorized>
+            </AuthorizeView>
         </FluentHeader>
 
-        <FluentStack Class="shell" Orientation="Orientation.Horizontal" HorizontalGap="0" Width="100%">
+        <div class="shell">
             <nav class="shell-nav" aria-label="Command center sections">
-                <FluentNavMenu Width="240" Title="Command center sections">
+                <FluentNavMenu Id="shell-nav-menu"
+                               Title="Command center sections"
+                               CustomToggle="true"
+                               Margin="0">
                     <FluentNavLink Href="/" Match="NavLinkMatch.All">Fleet</FluentNavLink>
                     <FluentNavLink Href="/attention" Match="NavLinkMatch.Prefix">Attention</FluentNavLink>
                     <FluentNavLink Href="/routing" Match="NavLinkMatch.Prefix">Routing</FluentNavLink>
@@ -48,17 +81,13 @@
                     @Body
                 </article>
             </FluentBodyContent>
-        </FluentStack>
+        </div>
 
         <FluentFooter Class="shell-footer">
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="12"
-                         Width="100%">
-                <span>DevFleet</span>
-                <FluentSpacer />
-                <span>Projects, request queues, node connectivity, agent sessions, verification runs, and completion results are read from persisted projections.</span>
-            </FluentStack>
+            <div class="footer-facts">
+                <span class="footer-mark">DevFleet</span>
+                <p class="footer-note">Projects, request queues, node connectivity, agent sessions, verification runs, and completion results are read from persisted projections.</p>
+            </div>
         </FluentFooter>
     </FluentLayout>
 </div>

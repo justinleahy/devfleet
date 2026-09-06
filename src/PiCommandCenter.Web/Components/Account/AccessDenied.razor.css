@@ -1,7 +1,20 @@
+/* Rendered inside the entry card, so this file owns only the stack within it.
+   Mobile-first: one column, actions full-bleed and thumb-sized; the actions
+   collapse onto a single line once there is room for one. */
 .denied-head {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 2px);
+}
+
+/* Compact uppercase metadata: names the surface without repeating the heading. */
+.denied-eyebrow {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
 }
 
 .denied-head h1 {
@@ -10,37 +23,107 @@
     line-height: var(--type-ramp-plus-3-line-height);
     font-weight: 600;
     letter-spacing: -0.02em;
+    /* "Access denied" is one long word pair at plus-3; never let it push the
+       320px card wider than the viewport. */
+    overflow-wrap: break-word;
 }
 
 .denied-lead {
+    /* Readable measure on desktop; the entry card is narrower than this on phone,
+       so the value only ever bites at wide widths. */
+    max-width: 66ch;
     margin: 0;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
     line-height: var(--type-ramp-minus-1-line-height);
 }
 
+/* Label/value fact: stacked on phone, one aligned line from 600px up. */
 .denied-identity {
-    margin: 0;
-    font-size: var(--type-ramp-minus-1-font-size);
-    line-height: var(--type-ramp-minus-1-line-height);
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
+    padding: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
+    background-color: var(--neutral-fill-secondary-rest);
+    border-inline-start: calc(var(--stroke-width) * 3px) solid var(--neutral-stroke-strong-rest);
+    border-radius: calc(var(--control-corner-radius) * 1px);
 }
 
+.denied-identity-label {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-2-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.denied-identity-value {
+    min-width: 0;
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    /* An account name is opaque input: wrap it rather than overflow the card. */
+    overflow-wrap: anywhere;
+}
+
+/* Sign-out (the LogoutForm button) and the sign-in link. Column + stretch is what
+   makes the button full width on phone: the button is the flex item, since the
+   form around it is `display: contents`. */
 .denied-actions {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: calc(var(--design-unit) * 4px);
+    flex-direction: column;
+    align-items: stretch;
+    gap: calc(var(--design-unit) * 2px);
 }
 
 .denied-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(var(--design-unit) * 11px);
+    padding: 0 calc(var(--design-unit) * 3px);
     color: var(--accent-foreground-rest);
     font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    font-weight: 600;
     text-decoration: underline;
     text-underline-offset: 0.2em;
+    border-radius: calc(var(--control-corner-radius) * 1px);
+}
+
+.denied-link:hover {
+    color: var(--accent-foreground-hover);
 }
 
 .denied-link:focus-visible {
     outline: calc(var(--focus-stroke-width) * 1px) solid var(--focus-stroke-outer);
     outline-offset: calc(var(--focus-stroke-width) * 1px);
-    border-radius: calc(var(--control-corner-radius) * 1px);
+}
+
+@media (min-width: 600px) {
+    .denied-identity {
+        flex-direction: row;
+        align-items: baseline;
+        gap: calc(var(--design-unit) * 3px);
+    }
+
+    .denied-identity-label {
+        flex: 0 0 auto;
+    }
+
+    /* Enough room for both controls side by side, so stop stretching them. */
+    .denied-actions {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .denied-link {
+        min-height: calc(var(--design-unit) * 8px);
+        padding-inline: calc(var(--design-unit) * 1px);
+    }
 }

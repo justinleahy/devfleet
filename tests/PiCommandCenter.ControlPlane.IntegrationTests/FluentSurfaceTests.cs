@@ -6,6 +6,10 @@ using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.ControlPlane.Security;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Domain;
+using PiCommandCenter.Domain.Nodes;
+using PiCommandCenter.Domain.Projects;
+using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Infrastructure.Persistence;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -14,7 +18,7 @@ namespace PiCommandCenter.ControlPlane.IntegrationTests;
 
 /// <summary>
 /// The Fluent UI Blazor surface as it is actually rendered (prerendered HTML of the Interactive
-/// Server pages): the fleet dashboard and the per-project request composer.
+/// Server pages): the fleet dashboard and the project and request operator pages.
 /// </summary>
 public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
 {
@@ -57,6 +61,129 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
         return html;
     }
 
+    private async Task<BoundRequestSeed> SeedBoundRequestAsync(
+        HttpClient client,
+        string displayName,
+        string requestTitle)
+    {
+        var projectId = await RegisterProjectAsync(client, displayName);
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
+        var project = await db.Projects.SingleAsync(candidate => candidate.Id == new ProjectId(projectId));
+        var now = DateTimeOffset.UtcNow;
+        var nodeId = NodeId.New();
+        var repositoryPath = _fixture.CreateGitRepository();
+        var node = FleetNode.Register(
+            nodeId,
+            $"surface-node-{nodeId.Value:N}",
+            "1.0.0",
+            "{}",
+            now);
+        var binding = WorkspaceBinding.Designate(project.Id, nodeId, repositoryPath, now);
+        Assert.True(binding.ApplyValidationResult(
+            nodeId,
+            binding.ValidationRevision,
+            WorkspaceBindingStatus.Valid,
+            WorkspaceBinding.ValidValidationCode,
+            "Workspace validated for the operator surface.",
+            repositoryPath,
+            now));
+        var request = WorkRequest.Enqueue(
+            project.Id,
+            WorkRequestKind.Development,
+            RequestPriority.Normal,
+            RiskLevel.Standard,
+            requestTitle,
+            "Exercise the operator placement surface.",
+            now);
+
+        db.FleetNodes.Add(node);
+        db.WorkspaceBindings.Add(binding);
+        db.WorkRequests.Add(request);
+        await db.SaveChangesAsync();
+
+        return new BoundRequestSeed(
+            projectId,
+            request.Id.Value,
+            nodeId.Value,
+            binding.Id.Value,
+            repositoryPath,
+            binding.ValidationRevision);
+    }
+
+    private static void AdvanceToVerifying(WorkRequest request, DateTimeOffset at)
+    {
+        request.BeginPlanning(at);
+        request.BeginExecuting(at);
+        request.BeginReviewing(at);
+        request.BeginVerifying(at);
+    }
+
+    private async Task<AssignmentSeed> SeedAssignmentAsync(
+        HttpClient client,
+        string displayName,
+        string requestTitle,
+        ExecutionAssignmentState state)
+    {
+        var bound = await SeedBoundRequestAsync(client, displayName, requestTitle);
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
+        var project = await db.Projects.SingleAsync(candidate => candidate.Id == new ProjectId(bound.ProjectId));
+        var request = await db.WorkRequests.SingleAsync(
+            candidate => candidate.Id == new WorkRequestId(bound.RequestId));
+        var binding = await db.WorkspaceBindings.SingleAsync(
+            candidate => candidate.Id == new WorkspaceBindingId(bound.BindingId));
+        var now = DateTimeOffset.UtcNow;
+        var claimToken = $"surface-claim-{Guid.NewGuid():N}";
+
+        request.Start(now);
+        var assignment = ExecutionAssignment.Create(
+            request.Id,
+            project.Id,
+            binding.Id,
+            new NodeId(bound.NodeId),
+            bound.RepositoryPath,
+            project.DefaultBranch,
+            bound.BindingValidationRevision,
+            claimToken,
+            now,
+            TimeSpan.FromMinutes(5));
+
+        switch (state)
+        {
+            case ExecutionAssignmentState.Finalizing:
+                AdvanceToVerifying(request, now);
+                assignment.MarkRunning(now);
+                assignment.BeginFinalizing(now);
+                break;
+            case ExecutionAssignmentState.RecoveryRequired:
+                request.BeginPlanning(now);
+                request.BeginExecuting(now);
+                assignment.MarkRunning(now);
+                assignment.MarkRecoveryRequired(now);
+                break;
+            case ExecutionAssignmentState.Completed:
+                AdvanceToVerifying(request, now);
+                request.Complete(now);
+                assignment.MarkRunning(now);
+                assignment.BeginFinalizing(now);
+                assignment.Complete(now);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(state), state, "Unsupported surface seed state.");
+        }
+
+        db.ExecutionAssignments.Add(assignment);
+        await db.SaveChangesAsync();
+        return new AssignmentSeed(bound, claimToken, assignment.TerminalAt);
+    }
+
+    private static void AssertClaimTokenIsNotRendered(string html, AssignmentSeed seed)
+    {
+        Assert.DoesNotContain(seed.ClaimToken, html, StringComparison.Ordinal);
+        Assert.DoesNotContain("claimToken", html, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task Dashboard_renders_the_fleet_metrics_and_project_cards()
     {
@@ -65,11 +192,12 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
 
         var html = await GetHtmlAsync(client, "/");
 
-        Assert.Contains("Fleet dashboard", html);
+        Assert.Contains("Fleet", html);
         Assert.Contains("Active projects", html);
         Assert.Contains("Active agents", html);
         Assert.Contains("Queued requests", html);
         Assert.Contains("Needs attention", html);
+        Assert.Contains("Nodes", html);
         Assert.Contains("Projects", html);
         Assert.Contains("Card project", html);
         Assert.Contains($"/projects/{projectId}", html);
@@ -77,30 +205,71 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
         Assert.Contains("Register project", html);
     }
 
+    private async Task<string> EmptyDashboardHtmlAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "pi-cc-empty-dashboard", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var sqlitePath = Path.Combine(root, "controlplane.db");
+            using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            {
+                builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={sqlitePath}");
+                builder.UseSetting("Projects:ApprovedRoots:0", _fixture.ApprovedRoot);
+                builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialDirectory);
+            });
+
+            using (var scope = factory.Services.CreateScope())
+            {
+                var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
+                await db.Database.MigrateAsync();
+            }
+
+            using var client = _fixture.CreateAuthenticatedClient(factory);
+            return await GetHtmlAsync(client, "/");
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
     [Fact]
     public async Task Dashboard_shows_the_empty_state_before_anything_is_registered()
     {
-        var client = _fixture.CreateClient();
+        var html = await EmptyDashboardHtmlAsync();
 
-        var html = await GetHtmlAsync(client, "/");
-
-        Assert.Contains("Fleet dashboard", html);
+        Assert.Contains("Fleet", html);
+        Assert.Contains("Nodes", html);
+        Assert.Contains("Projects", html);
         Assert.Contains("No projects registered", html);
+        Assert.Contains("No node has registered yet.", html);
     }
 
     [Fact]
     public async Task Dashboard_renders_fleet_resource_labels_and_values_from_the_latest_heartbeat()
     {
-        var nodeId = Guid.NewGuid();
-        await using var connection = _fixture.CreateNodeHubConnection();
+        await using var connection =
+            _fixture.CreateNodeHubConnection(_fixture.AuthenticatedNodeId);
         await connection.StartAsync();
         await connection.InvokeAsync<NodeDto>(
-            "Register", new NodeRegistrationMessage(nodeId, "pi-resource-ui", "1.0.0", "{}"));
+            "Register",
+            new NodeRegistrationMessage(
+                _fixture.AuthenticatedNodeId,
+                "pi-resource-ui",
+                "1.0.0",
+                "{}"));
         var observedAt = new DateTimeOffset(2026, 9, 5, 12, 0, 0, TimeSpan.Zero);
         await connection.InvokeAsync<NodeDto>(
             "Heartbeat",
             new NodeHeartbeatMessage(
-                nodeId,
+                _fixture.AuthenticatedNodeId,
                 [],
                 new NodeResourceSnapshotMessage(
                     observedAt,
@@ -129,26 +298,31 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
     }
 
     [Fact]
-    public async Task Project_page_renders_the_metadata_and_request_composer()
+    public async Task Unbound_project_keeps_the_composer_and_explains_why_queued_work_waits()
     {
         var client = _fixture.CreateClient();
-        var projectId = await RegisterProjectAsync(client, "Composer project");
+        var projectId = await RegisterProjectAsync(client, "Unbound composer");
+        var response = await client.PostAsJsonAsync(
+            $"/api/projects/{projectId}/requests",
+            new
+            {
+                kind = 0,
+                priority = 2,
+                riskLevel = 1,
+                title = "queue before designation",
+                prompt = "Keep this request eligible for later scheduling",
+            },
+            Json);
+        Assert.True(response.IsSuccessStatusCode);
 
         var html = await GetHtmlAsync(client, $"/projects/{projectId}");
 
-        Assert.Contains("Composer project", html);
-        Assert.Contains("Repository path", html);
-        Assert.Contains("Default branch", html);
-        Assert.Contains("Node status", html);
-        Assert.Contains("New request", html);
-        Assert.Contains("Queue", html);
-        // The composer fields.
-        Assert.Contains("Title", html);
-        Assert.Contains("Prompt", html);
+        Assert.Contains("Unbound", html);
+        Assert.Contains("Queueing still works", html);
         Assert.Contains("Queue request", html);
-        // Empty queue states ship with the page.
-        Assert.Contains("Nothing queued.", html);
-        Assert.Contains("No active request.", html);
+        Assert.Contains("queue before designation", html);
+        Assert.Contains("No workspace is designated for this project.", html);
+        Assert.Contains("Designate a workspace.", html);
     }
 
     [Fact]
@@ -174,6 +348,123 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
         Assert.True(normal >= 0, "normal request missing from project page");
         Assert.True(urgent < normal, "queue rows must render priority descending");
         Assert.Contains("Queued", html);
+    }
+
+    [Fact]
+    public async Task Valid_binding_keeps_its_editor_actions_and_shows_the_queued_request_waiting_reason()
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedBoundRequestAsync(client, "Bound editor", "waiting for offline node");
+
+        var html = await GetHtmlAsync(client, $"/projects/{seed.ProjectId}");
+
+        Assert.Contains(seed.RepositoryPath, html);
+        Assert.Contains("Valid", html);
+        Assert.Contains($"revision {seed.BindingValidationRevision}", html);
+        Assert.Contains("Repository path on that node", html);
+        Assert.Contains("Update designation", html);
+        Assert.Contains("Revalidate workspace", html);
+        Assert.Contains("Remove designation", html);
+        Assert.Contains("waiting for offline node", html);
+        Assert.Contains("Node offline", html);
+        Assert.Contains("The designated node is offline or its heartbeat is stale.", html);
+        Assert.Contains("Reconnect the designated node.", html);
+    }
+
+    [Fact]
+    public async Task Finalizing_request_shows_its_immutable_placement_and_reserved_capacity_warning()
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedAssignmentAsync(
+            client,
+            "Finalizing project",
+            "finalizing operator request",
+            ExecutionAssignmentState.Finalizing);
+
+        var html = await GetHtmlAsync(client, $"/requests/{seed.Request.RequestId}");
+
+        Assert.Contains("Assignment is finalizing", html);
+        Assert.Contains("capacity remains", html);
+        Assert.Contains("reserved while quiescing", html);
+        Assert.Contains("immutable snapshot taken when the assignment was created", html);
+        Assert.Contains("Node (snapshot)", html);
+        Assert.Contains(seed.Request.NodeId.ToString(), html);
+        Assert.Contains("Canonical repository path (snapshot)", html);
+        Assert.Contains(seed.Request.RepositoryPath, html);
+        Assert.Contains("Binding validation revision (snapshot)", html);
+        Assert.Contains(seed.Request.BindingValidationRevision.ToString(), html);
+        AssertClaimTokenIsNotRendered(html, seed);
+    }
+
+    [Fact]
+    public async Task Recovery_required_request_warns_that_ownership_is_uncertain_and_forbids_a_second_writer()
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedAssignmentAsync(
+            client,
+            "Recovery project",
+            "recovery operator request",
+            ExecutionAssignmentState.RecoveryRequired);
+
+        var html = await GetHtmlAsync(client, $"/requests/{seed.Request.RequestId}");
+
+        Assert.Contains("Assignment requires recovery", html);
+        Assert.Contains("Ownership uncertain", html);
+        Assert.Contains("no second writer", html);
+        Assert.Contains("occupies project and node capacity", html);
+        AssertClaimTokenIsNotRendered(html, seed);
+    }
+
+    [Fact]
+    public async Task Terminal_request_retains_the_original_assignment_history_after_the_binding_changes()
+    {
+        var client = _fixture.CreateClient();
+        var seed = await SeedAssignmentAsync(
+            client,
+            "Terminal history project",
+            "completed operator request",
+            ExecutionAssignmentState.Completed);
+        var replacementNodeId = NodeId.New();
+        var replacementPath = _fixture.CreateGitRepository();
+
+        using (var scope = _fixture.Factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
+            var binding = await db.WorkspaceBindings.SingleAsync(
+                candidate => candidate.Id == new WorkspaceBindingId(seed.Request.BindingId));
+            var now = DateTimeOffset.UtcNow;
+            db.FleetNodes.Add(FleetNode.Register(
+                replacementNodeId,
+                $"replacement-surface-node-{replacementNodeId.Value:N}",
+                "1.0.0",
+                "{}",
+                now));
+            binding.Redesignate(replacementNodeId, replacementPath, now);
+            Assert.True(binding.ApplyValidationResult(
+                replacementNodeId,
+                binding.ValidationRevision,
+                WorkspaceBindingStatus.Valid,
+                WorkspaceBinding.ValidValidationCode,
+                "Replacement workspace validated.",
+                replacementPath,
+                now));
+            await db.SaveChangesAsync();
+        }
+
+        var html = await GetHtmlAsync(client, $"/requests/{seed.Request.RequestId}");
+
+        Assert.Contains("Completed", html);
+        Assert.Contains("terminal history", html);
+        Assert.Contains("immutable placement snapshot and timestamps are retained as history", html);
+        Assert.Contains(seed.Request.NodeId.ToString(), html);
+        Assert.Contains(seed.Request.RepositoryPath, html);
+        Assert.Contains("Binding validation revision (snapshot)", html);
+        Assert.Contains(seed.Request.BindingValidationRevision.ToString(), html);
+        Assert.DoesNotContain(replacementNodeId.Value.ToString(), html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(replacementPath, html, StringComparison.Ordinal);
+        Assert.NotNull(seed.TerminalAt);
+        Assert.Contains(seed.TerminalAt.Value.ToString("u"), html);
+        AssertClaimTokenIsNotRendered(html, seed);
     }
 
     [Fact]
@@ -258,7 +549,7 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
             {
                 builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={sqlitePath}");
                 builder.UseSetting("Projects:ApprovedRoots:0", _fixture.ApprovedRoot);
-                builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialFile);
+                builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialDirectory);
             });
 
             var projectId = Guid.NewGuid();
@@ -343,4 +634,18 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
         Assert.Contains("&lt; 0.0001", html);
         Assert.DoesNotContain("0.0000", html);
     }
+
+    private sealed record BoundRequestSeed(
+        Guid ProjectId,
+        Guid RequestId,
+        Guid NodeId,
+        Guid BindingId,
+        string RepositoryPath,
+        long BindingValidationRevision);
+
+    private sealed record AssignmentSeed(
+        BoundRequestSeed Request,
+        string ClaimToken,
+        DateTimeOffset? TerminalAt);
+
 }

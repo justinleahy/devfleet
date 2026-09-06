@@ -22,6 +22,10 @@ public static class ControlPlaneAuthExtensions
         services.Configure<AdminOptions>(configuration.GetSection(AdminOptions.SectionName));
         services.Configure<NodeAuthenticationOptions>(configuration.GetSection(NodeAuthenticationOptions.SectionName));
 
+        var nodeAuthentication = new NodeAuthenticationOptions();
+        configuration.GetSection(NodeAuthenticationOptions.SectionName).Bind(nodeAuthentication);
+        services.AddSingleton(new NodeCredentialRegistry(nodeAuthentication, environment));
+
         var keysPath = configuration["DataProtection:KeysDirectory"];
         ArgumentException.ThrowIfNullOrWhiteSpace(keysPath);
         var keysDirectory = Path.GetFullPath(PrivateFileAccess.ExpandPath(keysPath));
@@ -29,12 +33,6 @@ public static class ControlPlaneAuthExtensions
         services.AddDataProtection()
             .SetApplicationName("PiCommandCenter.ControlPlane")
             .PersistKeysToFileSystem(new DirectoryInfo(keysDirectory));
-
-        services.AddSingleton(sp =>
-        {
-            var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<NodeAuthenticationOptions>>().Value;
-            return AuthMaterialLoader.LoadNodeToken(options, environment);
-        });
 
         services.AddIdentityCore<IdentityUser>(options =>
             {
@@ -99,7 +97,7 @@ public static class ControlPlaneAuthExtensions
     public static void UseTestAuthFiles(
         this IWebHostBuilder builder,
         string passwordFile,
-        string credentialFile,
+        string credentialDirectory,
         string username = "admin",
         string? dataProtectionKeysDirectory = null)
     {
@@ -109,7 +107,7 @@ public static class ControlPlaneAuthExtensions
         builder.UseEnvironment("Testing");
         builder.UseSetting("Admin:Username", username);
         builder.UseSetting("Admin:PasswordFile", passwordFile);
-        builder.UseSetting("NodeAuthentication:CredentialFile", credentialFile);
+        builder.UseSetting("NodeAuthentication:CredentialDirectory", credentialDirectory);
         builder.UseSetting("NodeAuthentication:Header", NodeAuthenticationOptions.DefaultHeader);
         builder.UseSetting("NodeAuthentication:Scheme", NodeAuthenticationOptions.DefaultScheme);
         builder.UseSetting(

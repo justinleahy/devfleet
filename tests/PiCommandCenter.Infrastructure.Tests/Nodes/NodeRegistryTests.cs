@@ -1,7 +1,10 @@
 using Microsoft.EntityFrameworkCore;
+using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
+using PiCommandCenter.Domain.Projects;
+using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Infrastructure.Nodes;
 using PiCommandCenter.Infrastructure.Persistence;
 
@@ -154,6 +157,63 @@ public class NodeRegistryTests : IDisposable
     }
 
     [Fact]
+    public async Task Node_readiness_mutations_publish_bound_project_and_queued_request_invalidations_after_saving()
+    {
+        await using var db = CreateContext();
+        var notifier = new ProjectionNotifier();
+        var registry = new NodeRegistry(_clock, db, notifier);
+        var nodeId = TestNodes.NewNodeId();
+        await registry.RegisterAsync(
+            new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"),
+            _clock.GetUtcNow());
+        var project = AddProject(db);
+        AddValidBinding(db, project, nodeId);
+        var firstQueued = AddRequest(db, project);
+        var secondQueued = AddRequest(db, project);
+        var started = AddRequest(db, project);
+        started.Start(_clock.GetUtcNow());
+        await db.SaveChangesAsync();
+        var changes = new List<ProjectionChange>();
+        var persistedStatuses = new List<NodeStatus>();
+        using var subscription = notifier.Subscribe(change =>
+        {
+            changes.Add(change);
+            if (change == ProjectionChange.Project(project.Id.Value))
+            {
+                using var snapshot = CreateContext();
+                persistedStatuses.Add(snapshot.FleetNodes
+                    .AsNoTracking()
+                    .Where(node => node.Id == nodeId)
+                    .Select(node => node.Status)
+                    .Single());
+            }
+        });
+
+        var heartbeatAt = _clock.GetUtcNow().AddMinutes(1);
+        await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(
+                nodeId,
+                [],
+                ExecutionStatus: SampleExecutionStatus(heartbeatAt, "routing-v1")),
+            heartbeatAt);
+
+        AssertEligibilityChanges(changes, project, firstQueued, secondQueued);
+        changes.Clear();
+
+        await registry.MarkStaleOfflineAsync(nodeId, heartbeatAt.AddMinutes(1));
+
+        AssertEligibilityChanges(changes, project, firstQueued, secondQueued);
+        changes.Clear();
+
+        await registry.RegisterAsync(
+            new RegisterNodeCommand(nodeId, "pi-01", "1.2.4", "{}"),
+            heartbeatAt.AddMinutes(2));
+
+        AssertEligibilityChanges(changes, project, firstQueued, secondQueued);
+        Assert.Equal([NodeStatus.Online, NodeStatus.Offline, NodeStatus.Online], persistedStatuses);
+    }
+
+    [Fact]
     public async Task Get_returns_null_for_an_unknown_node_and_List_orders_by_display_name()
     {
         await using var db = CreateContext();
@@ -166,6 +226,180 @@ public class NodeRegistryTests : IDisposable
 
         var nodes = await registry.ListAsync();
         Assert.Equal(["alpha", "zeta"], nodes.Select(n => n.DisplayName).ToList());
+    }
+
+    [Fact]
+    public async Task Heartbeat_round_trips_execution_status()
+    {
+        await using var db = CreateContext();
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var nodeId = TestNodes.NewNodeId();
+        await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), _clock.GetUtcNow());
+        var observedAt = _clock.GetUtcNow().AddMinutes(1);
+        var status = SampleExecutionStatus(observedAt, "routing-v1") with
+        {
+            Routes =
+            [
+                new("root", "codex/default", "ready", "native_auth_probe", observedAt, "routing-v1"),
+                new("reviewer", "claude-code/default", "unavailable", "native_auth_probe", observedAt, "routing-v1"),
+                new("verifier", "muse/default", "unknown", "unsupported_native_observation", observedAt, "routing-v1"),
+            ],
+        };
+
+        var projected = await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(nodeId, [], ExecutionStatus: status),
+            observedAt);
+        AssertEqualExecutionStatus(status, projected.ExecutionStatus);
+
+        db.ChangeTracker.Clear();
+        await using var reload = CreateContext();
+        var reloaded = new NodeRegistry(_clock, reload, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var persisted = await reloaded.GetAsync(nodeId);
+
+        Assert.NotNull(persisted);
+        AssertEqualExecutionStatus(status, persisted.ExecutionStatus);
+    }
+
+    [Fact]
+    public async Task Heartbeat_replaces_and_clears_execution_status()
+    {
+        await using var db = CreateContext();
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var nodeId = TestNodes.NewNodeId();
+        var registeredAt = _clock.GetUtcNow();
+        await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), registeredAt);
+        var first = SampleExecutionStatus(registeredAt.AddMinutes(1), "routing-v1");
+        var second = SampleExecutionStatus(
+            registeredAt.AddMinutes(2),
+            "routing-v2",
+            [Guid.NewGuid(), Guid.NewGuid()],
+            readiness: "unavailable");
+
+        await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(nodeId, [], ExecutionStatus: first),
+            registeredAt.AddMinutes(1));
+        await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(nodeId, [], ExecutionStatus: second),
+            registeredAt.AddMinutes(2));
+
+        db.ChangeTracker.Clear();
+        var replaced = await registry.GetAsync(nodeId);
+        Assert.NotNull(replaced);
+        AssertEqualExecutionStatus(second, replaced.ExecutionStatus);
+
+        await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(nodeId, [], ExecutionStatus: null),
+            registeredAt.AddMinutes(3));
+
+        db.ChangeTracker.Clear();
+        var cleared = await registry.GetAsync(nodeId);
+        Assert.NotNull(cleared);
+        Assert.Null(cleared.ExecutionStatus);
+    }
+
+    [Fact]
+    public async Task Heartbeat_rejects_invalid_execution_status_without_overwriting_snapshots()
+    {
+        await using var db = CreateContext();
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var nodeId = TestNodes.NewNodeId();
+        var observedAt = _clock.GetUtcNow();
+        await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), observedAt);
+        var resources = SampleResources(observedAt);
+        var current = SampleExecutionStatus(observedAt, "routing-v1");
+        await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(nodeId, [], resources, current),
+            observedAt);
+        var route = current.Routes.Single();
+        var otherAssignmentId = Guid.NewGuid();
+        var invalidStatuses = new NodeExecutionStatusDto[]
+        {
+            current with { ObservedAt = observedAt.ToOffset(TimeSpan.FromHours(1)) },
+            current with { AvailableRequestSlots = -1 },
+            current with
+            {
+                ActiveAssignmentIds = Enumerable.Range(0, 201).Select(_ => Guid.NewGuid()).ToArray(),
+            },
+            current with { ActiveAssignmentIds = [Guid.Empty] },
+            current with { ActiveAssignmentIds = [otherAssignmentId, otherAssignmentId] },
+            current with { ActiveAssignmentIds = null! },
+            current with { RoutingRevision = "" },
+            current with { RoutingRevision = new string('r', 129) },
+            current with
+            {
+                Routes = Enumerable.Range(0, 201)
+                    .Select(index => route with { CanonicalModel = $"codex/model-{index}" })
+                    .ToArray(),
+            },
+            current with { Routes = null! },
+            current with { Routes = [null!] },
+            current with { Routes = [route with { Role = "" }] },
+            current with { Routes = [route with { Role = " reviewer " }] },
+            current with { Routes = [route with { Role = new string('r', 129) }] },
+            current with { Routes = [route with { CanonicalModel = "" }] },
+            current with { Routes = [route with { CanonicalModel = " codex/default " }] },
+            current with
+            {
+                Routes = [route with { CanonicalModel = $"codex/{new string('m', 123)}" }],
+            },
+            current with { Routes = [route with { Readiness = "Ready" }] },
+            current with { Routes = [route with { EvidenceSource = " " }] },
+            current with { Routes = [route with { EvidenceSource = " native_auth_probe " }] },
+            current with { Routes = [route with { EvidenceSource = new string('e', 129) }] },
+            current with
+            {
+                Routes = [route with { ObservedAt = observedAt.ToOffset(TimeSpan.FromHours(-1)) }],
+            },
+            current with { Routes = [route with { RoutingRevision = "routing-v2" }] },
+            current with { Routes = [route, route with { Readiness = "unknown" }] },
+        };
+
+        foreach (var invalid in invalidStatuses)
+        {
+            await Assert.ThrowsAsync<ArgumentException>(() => registry.HeartbeatAsync(
+                new NodeHeartbeatCommand(
+                    nodeId,
+                    [],
+                    SampleResources(observedAt.AddMinutes(1), cpu: 99d),
+                    invalid),
+                observedAt.AddMinutes(1)));
+        }
+
+        db.ChangeTracker.Clear();
+        var unchanged = await registry.GetAsync(nodeId);
+        Assert.NotNull(unchanged);
+        Assert.Equal(observedAt, unchanged.LastHeartbeatAt);
+        Assert.Equal(2, unchanged.Version);
+        AssertEqualResources(resources, unchanged.Resources);
+        AssertEqualExecutionStatus(current, unchanged.ExecutionStatus);
+    }
+
+    [Fact]
+    public async Task Corrupt_stored_execution_status_projects_null_without_hiding_resources()
+    {
+        await using var db = CreateContext();
+        var registry = new NodeRegistry(_clock, db, new PiCommandCenter.Application.Live.ProjectionNotifier());
+        var nodeId = TestNodes.NewNodeId();
+        var observedAt = _clock.GetUtcNow();
+        await registry.RegisterAsync(new RegisterNodeCommand(nodeId, "pi-01", "1.2.3", "{}"), observedAt);
+        var resources = SampleResources(observedAt);
+        await registry.HeartbeatAsync(
+            new NodeHeartbeatCommand(
+                nodeId,
+                [],
+                resources,
+                SampleExecutionStatus(observedAt, "routing-v1")),
+            observedAt);
+        const string corruptJson = "{not-json";
+        db.ChangeTracker.Clear();
+        db.Database.ExecuteSql(
+            $"UPDATE FleetNodes SET ExecutionStatusJson = {corruptJson} WHERE Id = {nodeId.Value}");
+
+        var projected = await registry.GetAsync(nodeId);
+
+        Assert.NotNull(projected);
+        Assert.Null(projected.ExecutionStatus);
+        AssertEqualResources(resources, projected.Resources);
     }
 
     [Fact]
@@ -304,6 +538,109 @@ public class NodeRegistryTests : IDisposable
         Assert.Equal(1, dto.Version);
     }
 
+    private Project AddProject(ControlPlaneDbContext db)
+    {
+        var project = Project.Register(
+            "Project " + Guid.NewGuid().ToString("N")[..6],
+            "main",
+            enabled: true,
+            maxActiveWriteRequests: 2,
+            maxReadOnlyRequests: 4,
+            maxChildAgentsPerRequest: 1,
+            requireCleanStart: false,
+            createRequestBranch: false,
+            createRequestCommit: false,
+            autoMerge: false,
+            _clock.GetUtcNow());
+        db.Projects.Add(project);
+        return project;
+    }
+
+    private void AddValidBinding(ControlPlaneDbContext db, Project project, NodeId nodeId)
+    {
+        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        var binding = WorkspaceBinding.Designate(project.Id, nodeId, path, _clock.GetUtcNow());
+        binding.ApplyValidationResult(
+            nodeId,
+            binding.ValidationRevision,
+            WorkspaceBindingStatus.Valid,
+            WorkspaceBinding.ValidValidationCode,
+            "Workspace validation succeeded.",
+            path,
+            _clock.GetUtcNow());
+        db.WorkspaceBindings.Add(binding);
+    }
+
+    private WorkRequest AddRequest(ControlPlaneDbContext db, Project project)
+    {
+        var request = WorkRequest.Enqueue(
+            project.Id,
+            WorkRequestKind.Development,
+            RequestPriority.Normal,
+            RiskLevel.Standard,
+            "Request " + Guid.NewGuid().ToString("N")[..6],
+            "Do the thing",
+            _clock.GetUtcNow());
+        db.WorkRequests.Add(request);
+        return request;
+    }
+
+    private static void AssertEligibilityChanges(
+        IReadOnlyCollection<ProjectionChange> changes,
+        Project project,
+        params WorkRequest[] queuedRequests)
+    {
+        Assert.Equal(queuedRequests.Length + 2, changes.Count);
+        Assert.Equal(1, changes.Count(change => change == ProjectionChange.Fleet()));
+        Assert.Equal(
+            1,
+            changes.Count(change => change == ProjectionChange.Project(project.Id.Value)));
+        foreach (var request in queuedRequests)
+        {
+            Assert.Equal(
+                1,
+                changes.Count(change => change == ProjectionChange.Request(
+                    project.Id.Value,
+                    request.Id.Value)));
+        }
+    }
+
+    private static NodeExecutionStatusDto SampleExecutionStatus(
+        DateTimeOffset observedAt,
+        string routingRevision,
+        IReadOnlyList<Guid>? assignmentIds = null,
+        string readiness = "ready") =>
+        new(
+            observedAt,
+            AvailableRequestSlots: 2,
+            assignmentIds ?? [Guid.NewGuid()],
+            routingRevision,
+            [
+                new RuntimeRouteReadinessDto(
+                    "root",
+                    "codex/default",
+                    readiness,
+                    "unsupported_native_observation",
+                    observedAt,
+                    routingRevision),
+            ]);
+
+    private static void AssertEqualExecutionStatus(
+        NodeExecutionStatusDto expected,
+        NodeExecutionStatusDto? actual)
+    {
+        Assert.NotNull(actual);
+        Assert.Equal(expected.ObservedAt, actual.ObservedAt);
+        Assert.Equal(expected.AvailableRequestSlots, actual.AvailableRequestSlots);
+        Assert.Equal(expected.ActiveAssignmentIds.ToArray(), actual.ActiveAssignmentIds.ToArray());
+        Assert.Equal(expected.RoutingRevision, actual.RoutingRevision);
+        Assert.Equal(expected.Routes.Count, actual.Routes.Count);
+        for (var index = 0; index < expected.Routes.Count; index++)
+        {
+            Assert.Equal(expected.Routes[index], actual.Routes[index]);
+        }
+    }
+
     private static NodeResourceSnapshotDto SampleResources(DateTimeOffset observedAt, double cpu = 12.5) =>
         new(
             observedAt,
@@ -327,6 +664,7 @@ public class NodeRegistryTests : IDisposable
         Assert.Equal(expected.LoadAverageOneMinute, actual.LoadAverageOneMinute);
         Assert.Equal(expected.UptimeSeconds, actual.UptimeSeconds);
     }
+
     private async Task SeedRegistered(ControlPlaneDbContext db, NodeId nodeId)
     {
         db.FleetNodes.Add(FleetNode.Register(nodeId, "pi-01", "1.2.3", "{}", _clock.GetUtcNow()));

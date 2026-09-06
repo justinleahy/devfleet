@@ -16,27 +16,22 @@
 <FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
 
     <header class="page-head">
-        <FluentStack Class="page-head-row"
-                     Orientation="Orientation.Horizontal"
-                     VerticalAlignment="VerticalAlignment.Bottom"
-                     HorizontalGap="16"
-                     Width="100%">
-            <FluentStack Class="page-head-copy" Orientation="Orientation.Vertical" VerticalGap="4" Width="auto">
-                <h1>Fleet statistics</h1>
-                <p class="page-lead">
-                    Persisted totals for every agent session the fleet has recorded. Token counters are
-                    the figures each runtime itself reported when a turn finished; a counter no runtime
-                    reported reads <em>Unavailable</em> rather than zero.
-                </p>
-            </FluentStack>
-            <FluentSpacer />
+        <div class="page-head-copy">
+            <h1>Fleet statistics</h1>
+            <p class="page-lead">
+                Persisted totals for every agent session the fleet has recorded. Token counters are
+                the figures each runtime itself reported when a turn finished; a counter no runtime
+                reported reads <em>Unavailable</em> rather than zero.
+            </p>
+        </div>
+        <div class="page-head-actions">
             <FluentButton Class="page-head-action"
                           Appearance="Appearance.Stealth"
                           OnClick="ReloadAsync"
                           Disabled="@_busy">
                 Reload
             </FluentButton>
-        </FluentStack>
+        </div>
     </header>
 
     @* One chain: a failed read is never followed by figures that would read as current. *@
@@ -61,7 +56,7 @@
         <section aria-labelledby="summary-heading">
             <h2 id="summary-heading">Summary</h2>
 
-            <dl class="metric-row">
+            <dl class="metric-grid">
                 <div class="metric">
                     <dt>Tracked agents</dt>
                     <dd>@Number(stats.TrackedAgents)</dd>

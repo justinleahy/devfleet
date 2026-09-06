@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Application.Transport;
 using PiCommandCenter.Infrastructure.Persistence;
 using PiCommandCenter.Infrastructure.Transport;
@@ -122,7 +123,7 @@ public class NodeEventSinkTests : IDisposable
         await using var db = CreateContext();
         var nodeId = TestNodes.NewNodeId();
         TestNodes.SeedNode(db, nodeId, _clock);
-        var project = TestNodes.SeedProject(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
         var request = TestNodes.SeedRequest(db, project, _clock);
         request.Start(_clock.GetUtcNow());
         await TestNodes.SaveAsync(db);
@@ -147,7 +148,7 @@ public class NodeEventSinkTests : IDisposable
         await using var db = CreateContext();
         var nodeId = TestNodes.NewNodeId();
         TestNodes.SeedNode(db, nodeId, _clock);
-        var project = TestNodes.SeedProject(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
         var request = TestNodes.SeedRequest(db, project, _clock);
         request.Start(_clock.GetUtcNow());
         await TestNodes.SaveAsync(db);
@@ -161,28 +162,132 @@ public class NodeEventSinkTests : IDisposable
         Assert.Equal(WorkRequestStatus.Verifying, (await db.WorkRequests.FindAsync(request.Id))!.Status);
     }
 
-    [Fact]
-    public async Task Request_completed_is_idempotent_and_does_not_regress()
+    [Theory]
+    [InlineData("request.completed")]
+    [InlineData("request.failed")]
+    [InlineData("request.cancelled")]
+    public async Task Terminal_events_are_history_only_and_never_terminalize_the_request(string type)
     {
         await using var db = CreateContext();
         var nodeId = TestNodes.NewNodeId();
         TestNodes.SeedNode(db, nodeId, _clock);
-        var project = TestNodes.SeedProject(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
         var request = TestNodes.SeedRequest(db, project, _clock);
         request.Start(_clock.GetUtcNow());
         await TestNodes.SaveAsync(db);
 
         var sink = new NodeEventSink(_clock, db, _notifier);
-        var complete = Evt(request.Id.Value, project.Id.Value, nodeId.Value, "request.completed", """{"summaryMarkdown":"done"}""");
-        await sink.AppendAsync(new EventBatch([complete]));
-        Assert.Equal(WorkRequestStatus.Completed, (await db.WorkRequests.FindAsync(request.Id))!.Status);
+        var terminal = Evt(request.Id.Value, project.Id.Value, nodeId.Value, type, """{"reason":"test"}""");
+        await sink.AppendAsync(new EventBatch([terminal]));
 
-        await sink.AppendAsync(new EventBatch([complete]));
+        // The event is durably recorded but status stays nonterminal: only the
+        // terminalization authority may terminalize a request.
+        Assert.Equal(1, db.SessionEvents.Count());
+        Assert.Equal(WorkRequestStatus.Starting, (await db.WorkRequests.FindAsync(request.Id))!.Status);
+
+        await sink.AppendAsync(new EventBatch([terminal]));
+        Assert.Equal(1, db.SessionEvents.Count());
+        Assert.Equal(WorkRequestStatus.Starting, (await db.WorkRequests.FindAsync(request.Id))!.Status);
+    }
+
+    [Fact]
+    public async Task Terminal_completion_tail_is_persisted_without_changing_the_session_projection()
+    {
+        await using var db = CreateContext();
+        var nodeId = TestNodes.NewNodeId();
+        TestNodes.SeedNode(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
+        var request = TestNodes.SeedRequest(db, project, _clock);
+        await TestNodes.SaveAsync(db);
+
+        var sink = new NodeEventSink(_clock, db, _notifier);
         await sink.AppendAsync(new EventBatch(
         [
-            Evt(request.Id.Value, project.Id.Value, nodeId.Value, "request.phase_changed", """{"phase":"plan"}"""),
+            Evt(request.Id.Value, project.Id.Value, nodeId.Value, "session.registered", "{}", sequence: 1),
         ]));
-        Assert.Equal(WorkRequestStatus.Completed, (await db.WorkRequests.FindAsync(request.Id))!.Status);
+        await sink.AppendAsync(new EventBatch(
+        [
+            Evt(request.Id.Value, project.Id.Value, nodeId.Value, "tool.started", """{"tool":"write"}""", sequence: 2),
+        ]));
+        await sink.AppendAsync(new EventBatch(
+        [
+            Evt(request.Id.Value, project.Id.Value, nodeId.Value, "session.closed", "{}", sequence: 3),
+        ]));
+        var terminal = await db.AgentSessions.AsNoTracking().SingleAsync();
+        var terminalProjection = (
+            terminal.ProviderSessionId,
+            terminal.Liveness,
+            terminal.Activity,
+            terminal.Attention,
+            terminal.WorkState,
+            terminal.StatusReason,
+            terminal.CurrentOperation,
+            terminal.ProcessId,
+            terminal.LastHeartbeatAtUtcTicks,
+            terminal.EndedAtUtcTicks,
+            terminal.LastSequence,
+            terminal.Version);
+        var tail = new[]
+        {
+            Evt(request.Id.Value, project.Id.Value, nodeId.Value, "tool.completed", "{}", sequence: 4),
+            Evt(request.Id.Value, project.Id.Value, nodeId.Value, "turn.completed", "{}", sequence: 5),
+        };
+
+        var acknowledgement = await sink.AppendAsync(new EventBatch(tail));
+
+        var afterTail = await db.AgentSessions.AsNoTracking().SingleAsync();
+        Assert.Equal(tail.Select(@event => @event.EventId), acknowledgement.EventIds);
+        Assert.Equal(5, await db.SessionEvents.CountAsync());
+        Assert.Equal(
+            terminalProjection,
+            (
+                afterTail.ProviderSessionId,
+                afterTail.Liveness,
+                afterTail.Activity,
+                afterTail.Attention,
+                afterTail.WorkState,
+                afterTail.StatusReason,
+                afterTail.CurrentOperation,
+                afterTail.ProcessId,
+                afterTail.LastHeartbeatAtUtcTicks,
+                afterTail.EndedAtUtcTicks,
+                afterTail.LastSequence,
+                afterTail.Version));
+    }
+
+    [Fact]
+    public async Task Terminal_session_still_rejects_non_tail_mutations()
+    {
+        await using var db = CreateContext();
+        var nodeId = TestNodes.NewNodeId();
+        TestNodes.SeedNode(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
+        var request = TestNodes.SeedRequest(db, project, _clock);
+        await TestNodes.SaveAsync(db);
+
+        var sink = new NodeEventSink(_clock, db, _notifier);
+        await sink.AppendAsync(new EventBatch(
+        [
+            Evt(request.Id.Value, project.Id.Value, nodeId.Value, "session.registered", "{}", sequence: 1),
+        ]));
+        await sink.AppendAsync(new EventBatch(
+        [
+            Evt(request.Id.Value, project.Id.Value, nodeId.Value, "session.closed", "{}", sequence: 2),
+        ]));
+        var forbidden = Evt(
+            request.Id.Value,
+            project.Id.Value,
+            nodeId.Value,
+            "tool.started",
+            """{"tool":"write"}""",
+            sequence: 3);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => sink.AppendAsync(new EventBatch([forbidden])));
+
+        Assert.Contains("cannot apply 'tool.started'", error.Message, StringComparison.Ordinal);
+        await using var verify = CreateContext();
+        Assert.DoesNotContain(verify.SessionEvents, @event => @event.EventId == forbidden.EventId);
     }
 
     [Fact]
@@ -191,7 +296,7 @@ public class NodeEventSinkTests : IDisposable
         await using var db = CreateContext();
         var nodeId = TestNodes.NewNodeId();
         TestNodes.SeedNode(db, nodeId, _clock);
-        var project = TestNodes.SeedProject(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
         var request = TestNodes.SeedRequest(db, project, _clock);
         request.Start(_clock.GetUtcNow());
         request.BeginPlanning(_clock.GetUtcNow());
@@ -213,7 +318,7 @@ public class NodeEventSinkTests : IDisposable
         await using var db = CreateContext();
         var nodeId = TestNodes.NewNodeId();
         TestNodes.SeedNode(db, nodeId, _clock);
-        var project = TestNodes.SeedProject(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
         var request = TestNodes.SeedRequest(db, project, _clock);
         await TestNodes.SaveAsync(db);
 
@@ -245,7 +350,7 @@ public class NodeEventSinkTests : IDisposable
         await using var db = CreateContext();
         var nodeId = TestNodes.NewNodeId();
         TestNodes.SeedNode(db, nodeId, _clock);
-        var project = TestNodes.SeedProject(db, nodeId, _clock);
+        var project = TestNodes.SeedProject(db, _clock);
         var request = TestNodes.SeedRequest(db, project, _clock);
         await TestNodes.SaveAsync(db);
 
@@ -260,14 +365,20 @@ public class NodeEventSinkTests : IDisposable
         Assert.Empty(observed);
     }
 
-    private NodeEventDto Evt(Guid requestId, Guid projectId, Guid nodeId, string type, string payload) =>
+    private NodeEventDto Evt(
+        Guid requestId,
+        Guid projectId,
+        Guid nodeId,
+        string type,
+        string payload,
+        long sequence = 1) =>
         new(
             Guid.NewGuid().ToString("N"),
             nodeId,
             projectId,
             requestId,
             "session-root",
-            1,
+            sequence,
             type,
             TestNodes.Start,
             payload);

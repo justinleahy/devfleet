@@ -1,3 +1,5 @@
+using System.ComponentModel.DataAnnotations;
+
 namespace PiCommandCenter.Contracts.NodeTransport;
 
 /// <summary>
@@ -18,6 +20,7 @@ public static class MailImportance
 public sealed record SendMailMessage(
     Guid ProjectId,
     Guid RequestId,
+    [property: Required, MaxLength(128)] string ClaimToken,
     string ThreadId,
     string? SenderSessionId,
     IReadOnlyList<string> Recipients,
@@ -37,6 +40,8 @@ public sealed record SendMailMessage(
 /// </summary>
 public sealed record ReplyMailMessage(
     Guid ProjectId,
+    Guid RequestId,
+    [property: Required, MaxLength(128)] string ClaimToken,
     string ThreadId,
     string SenderSessionId,
     string BodyMarkdown,
@@ -62,16 +67,36 @@ public sealed record AgentMailMessage(
 public sealed record MailInboxMessage(IReadOnlyList<AgentMailMessage> Messages);
 
 /// <summary>Transport request: fetch the unread inbox for one recipient session.</summary>
-public sealed record FetchMailInboxMessage(Guid ProjectId, string RecipientSessionId, int MaxCount);
+public sealed record FetchMailInboxMessage(
+    Guid ProjectId,
+    Guid RequestId,
+    [property: Required, MaxLength(128)] string ClaimToken,
+    string RecipientSessionId,
+    int MaxCount);
 
 /// <summary>Transport request: fetch one thread for one recipient session.</summary>
-public sealed record FetchMailThreadMessage(Guid ProjectId, string RecipientSessionId, string ThreadId);
+public sealed record FetchMailThreadMessage(
+    Guid ProjectId,
+    Guid RequestId,
+    [property: Required, MaxLength(128)] string ClaimToken,
+    string RecipientSessionId,
+    string ThreadId);
 
 /// <summary>Transport request: mark one delivered message read for one recipient session.</summary>
-public sealed record MarkMailReadMessage(string RecipientSessionId, string MessageId);
+public sealed record MarkMailReadMessage(
+    Guid ProjectId,
+    Guid RequestId,
+    [property: Required, MaxLength(128)] string ClaimToken,
+    string RecipientSessionId,
+    string MessageId);
 
 /// <summary>Transport request: acknowledge one delivered message for one recipient session.</summary>
-public sealed record AcknowledgeMailMessage(string RecipientSessionId, string MessageId);
+public sealed record AcknowledgeMailMessage(
+    Guid ProjectId,
+    Guid RequestId,
+    [property: Required, MaxLength(128)] string ClaimToken,
+    string RecipientSessionId,
+    string MessageId);
 
 /// <summary>Transport response: post-condition state after a read/ack mutation.</summary>
 public sealed record MailReceiptMessage(string MessageId, string RecipientSessionId, DateTimeOffset? ReadAtUtc, DateTimeOffset? AcknowledgedAtUtc);

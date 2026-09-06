@@ -1,4 +1,5 @@
 using PiCommandCenter.Node.Child;
+using PiCommandCenter.Node.Quiescence;
 
 namespace PiCommandCenter.Node.Tests;
 
@@ -13,6 +14,7 @@ public class ReservedFileOperationsTests : IDisposable
 {
     private readonly string _repoRoot = Directory.CreateDirectory(Path.Combine(
         Path.GetTempPath(), "pi-cc-reserved-ops", Guid.NewGuid().ToString("N"))).FullName;
+    private static readonly Guid RequestId = Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
     public void Dispose()
     {
@@ -78,7 +80,8 @@ public class ReservedFileOperationsTests : IDisposable
     private (ReservedFileOperations Ops, FakeReservationGateway Gateway) CreateOps()
     {
         var gateway = new FakeReservationGateway();
-        return (new ReservedFileOperations(gateway), gateway);
+        var admission = new RequestAdmissionGate(TimeProvider.System);
+        return (new ReservedFileOperations(gateway, admission), gateway);
     }
 
     private string WriteRepoFile(string relativePath, string content)
@@ -94,7 +97,7 @@ public class ReservedFileOperationsTests : IDisposable
     {
         var (ops, gateway) = CreateOps();
 
-        var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", "src/App/New.cs", "hello");
+        var result = await ops.WriteTextAsync(RequestId, _repoRoot, Lease(), "session-a", "src/App/New.cs", "hello");
 
         Assert.True(result.Ok, result.ErrorMessage);
         Assert.Equal([("src/App/New.cs", "write")], gateway.Authorizations);
@@ -109,7 +112,7 @@ public class ReservedFileOperationsTests : IDisposable
         gateway.OnAuthorize = (_, _) => new MutationAuthorizationResult(
             false, new GatewayError("conflict", "lease does not cover the target"));
 
-        var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", "src/App/Existing.cs", "overwritten");
+        var result = await ops.WriteTextAsync(RequestId, _repoRoot, Lease(), "session-a", "src/App/Existing.cs", "overwritten");
 
         Assert.False(result.Ok);
         Assert.Equal("conflict", result.ErrorCode);
@@ -122,12 +125,12 @@ public class ReservedFileOperationsTests : IDisposable
         var (ops, _) = CreateOps();
         WriteRepoFile("docs/README.md", "alpha beta gamma");
 
-        var miss = await ops.EditTextAsync(_repoRoot, Lease(), "session-a", "docs/README.md", "delta", "x");
+        var miss = await ops.EditTextAsync(RequestId, _repoRoot, Lease(), "session-a", "docs/README.md", "delta", "x");
         Assert.False(miss.Ok);
         Assert.Equal("edit_target_not_found", miss.ErrorCode);
         Assert.Equal("alpha beta gamma", File.ReadAllText(Path.Combine(_repoRoot, "docs/README.md")));
 
-        var hit = await ops.EditTextAsync(_repoRoot, Lease(), "session-a", "docs/README.md", "beta", "BETA");
+        var hit = await ops.EditTextAsync(RequestId, _repoRoot, Lease(), "session-a", "docs/README.md", "beta", "BETA");
         Assert.True(hit.Ok, hit.ErrorMessage);
         Assert.Equal("alpha BETA gamma", File.ReadAllText(Path.Combine(_repoRoot, "docs/README.md")));
     }
@@ -138,7 +141,7 @@ public class ReservedFileOperationsTests : IDisposable
         var (ops, gateway) = CreateOps();
         WriteRepoFile("src/old/Thing.cs", "payload");
 
-        var result = await ops.MoveAsync(_repoRoot, Lease(), "session-a", "src/old/Thing.cs", "src/new/Thing.cs");
+        var result = await ops.MoveAsync(RequestId, _repoRoot, Lease(), "session-a", "src/old/Thing.cs", "src/new/Thing.cs");
 
         Assert.True(result.Ok, result.ErrorMessage);
         Assert.Equal(
@@ -152,7 +155,7 @@ public class ReservedFileOperationsTests : IDisposable
         gateway.OnAuthorize = (target, _) => target == "src/locked/Destination.cs"
             ? new MutationAuthorizationResult(false, new GatewayError("not_covered", "denied"))
             : null;
-        var denied = await ops.MoveAsync(_repoRoot, Lease(), "session-a", "src/new/Thing.cs", "src/locked/Destination.cs");
+        var denied = await ops.MoveAsync(RequestId, _repoRoot, Lease(), "session-a", "src/new/Thing.cs", "src/locked/Destination.cs");
         Assert.False(denied.Ok);
         Assert.Equal("payload", File.ReadAllText(Path.Combine(_repoRoot, "src/new/Thing.cs")));
         Assert.False(File.Exists(Path.Combine(_repoRoot, "src/locked/Destination.cs")));
@@ -166,13 +169,13 @@ public class ReservedFileOperationsTests : IDisposable
         gateway.OnAuthorize = (_, _) => new MutationAuthorizationResult(
             false, new GatewayError("stale_fencing_token", "token expired"));
 
-        var denied = await ops.DeleteAsync(_repoRoot, Lease(), "session-a", "src/Temp.cs");
+        var denied = await ops.DeleteAsync(RequestId, _repoRoot, Lease(), "session-a", "src/Temp.cs");
         Assert.False(denied.Ok);
         Assert.Equal("stale_fencing_token", denied.ErrorCode);
         Assert.True(File.Exists(path));
 
         gateway.OnAuthorize = null;
-        var allowed = await ops.DeleteAsync(_repoRoot, Lease(), "session-a", "src/Temp.cs");
+        var allowed = await ops.DeleteAsync(RequestId, _repoRoot, Lease(), "session-a", "src/Temp.cs");
         Assert.True(allowed.Ok, allowed.ErrorMessage);
         Assert.False(File.Exists(path));
     }
@@ -201,7 +204,7 @@ public class ReservedFileOperationsTests : IDisposable
     {
         var (ops, gateway) = CreateOps();
 
-        var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", relativePath, "boom");
+        var result = await ops.WriteTextAsync(RequestId, _repoRoot, Lease(), "session-a", relativePath, "boom");
 
         Assert.False(result.Ok);
         Assert.Empty(gateway.Authorizations);
@@ -219,7 +222,7 @@ public class ReservedFileOperationsTests : IDisposable
             var linkPath = Path.Combine(_repoRoot, "src", "escape.cs");
             File.CreateSymbolicLink(linkPath, Path.Combine(outside.FullName, "victim.txt"));
 
-            var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", "src/escape.cs", "boom");
+            var result = await ops.WriteTextAsync(RequestId, _repoRoot, Lease(), "session-a", "src/escape.cs", "boom");
 
             Assert.False(result.Ok);
             Assert.False(File.Exists(Path.Combine(outside.FullName, "victim.txt")));
@@ -238,7 +241,7 @@ public class ReservedFileOperationsTests : IDisposable
         var linkPath = Path.Combine(_repoRoot, "alias.cs");
         File.CreateSymbolicLink(linkPath, Path.Combine(_repoRoot, "src", "real.cs"));
 
-        var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", "alias.cs", "boom");
+        var result = await ops.WriteTextAsync(RequestId, _repoRoot, Lease(), "session-a", "alias.cs", "boom");
 
         Assert.Equal("path_symlink_alias", result.ErrorCode);
         Assert.Empty(gateway.Authorizations);
@@ -258,7 +261,7 @@ public class ReservedFileOperationsTests : IDisposable
                 Path.Combine(_repoRoot, "src", "dangling.cs"),
                 Path.Combine(outside.FullName, "not-there.txt"));
 
-            var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", "src/dangling.cs", "boom");
+            var result = await ops.WriteTextAsync(RequestId, _repoRoot, Lease(), "session-a", "src/dangling.cs", "boom");
 
             Assert.False(result.Ok);
             Assert.Empty(gateway.Authorizations);
@@ -276,7 +279,7 @@ public class ReservedFileOperationsTests : IDisposable
         var (ops, gateway) = CreateOps();
         Directory.CreateDirectory(Path.Combine(_repoRoot, "src", "deep"));
 
-        var result = await ops.WriteTextAsync(_repoRoot, Lease(), "session-a", "src/deep/new.cs", "created");
+        var result = await ops.WriteTextAsync(RequestId, _repoRoot, Lease(), "session-a", "src/deep/new.cs", "created");
 
         Assert.True(result.Ok, result.ErrorMessage);
         Assert.Equal([("src/deep/new.cs", "write")], gateway.Authorizations);

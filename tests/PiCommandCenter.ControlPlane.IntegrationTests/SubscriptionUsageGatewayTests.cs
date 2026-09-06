@@ -19,7 +19,7 @@ public sealed class SubscriptionUsageGatewayTests : IClassFixture<ControlPlaneFi
     [Fact]
     public async Task Gateway_invokes_subscription_usage_handler_on_registered_node()
     {
-        var nodeId = Guid.NewGuid();
+        var nodeId = _fixture.AuthenticatedNodeId;
         var observedAt = new DateTimeOffset(2026, 9, 5, 12, 0, 0, TimeSpan.Zero);
         var snapshot = new NodeSubscriptionUsageMessage(
             nodeId,

@@ -36,11 +36,13 @@ public sealed class SqliteNodeEventSpool : INodeEventSpool
             await using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                INSERT INTO PendingEvents (EventId, PayloadJson, OccurredAtUtcTicks, InsertedAtUtcTicks)
-                VALUES ($eventId, $payloadJson, $occurredAtUtcTicks, $insertedAtUtcTicks)
+                INSERT INTO PendingEvents (EventId, RequestId, PayloadJson, OccurredAtUtcTicks, InsertedAtUtcTicks)
+                VALUES ($eventId, $requestId, $payloadJson, $occurredAtUtcTicks, $insertedAtUtcTicks)
                 ON CONFLICT(EventId) DO NOTHING;
                 """;
             command.Parameters.AddWithValue("$eventId", message.EventId);
+            command.Parameters.AddWithValue(
+                "$requestId", message.RequestId is { } rid ? rid.ToString("D") : (object)DBNull.Value);
             command.Parameters.AddWithValue("$payloadJson", payloadJson);
             command.Parameters.AddWithValue("$occurredAtUtcTicks", occurredAtUtcTicks);
             command.Parameters.AddWithValue("$insertedAtUtcTicks", insertedAtUtcTicks);
@@ -106,6 +108,21 @@ public sealed class SqliteNodeEventSpool : INodeEventSpool
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<int> CountPendingForRequestAsync(Guid requestId, CancellationToken cancellationToken)
+    {
+        return await WithConnectionAsync(async connection =>
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                SELECT COUNT(*) FROM PendingEvents WHERE RequestId = $requestId;
+                """;
+            command.Parameters.AddWithValue("$requestId", requestId.ToString("D"));
+            var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+            return Convert.ToInt32(result, System.Globalization.CultureInfo.InvariantCulture);
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
     private int _disposed;
 
     private async Task WithConnectionAsync(
@@ -167,12 +184,42 @@ public sealed class SqliteNodeEventSpool : INodeEventSpool
                 """
                 CREATE TABLE IF NOT EXISTS PendingEvents (
                     EventId TEXT PRIMARY KEY,
+                    RequestId TEXT NULL,
                     PayloadJson TEXT NOT NULL,
                     OccurredAtUtcTicks INTEGER NOT NULL,
                     InsertedAtUtcTicks INTEGER NOT NULL
                 );
                 """;
             await create.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        // Databases created before the request-scoped barrier lack the column; add it and
+        // backfill from the serialized payload so in-flight events stay attributable.
+        await using (var alter = connection.CreateCommand())
+        {
+            alter.CommandText =
+                """
+                ALTER TABLE PendingEvents ADD COLUMN RequestId TEXT NULL;
+                """;
+            try
+            {
+                await alter.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (SqliteException)
+            {
+                // Column already exists.
+            }
+        }
+
+        await using (var backfill = connection.CreateCommand())
+        {
+            backfill.CommandText =
+                """
+                UPDATE PendingEvents
+                SET RequestId = json_extract(PayloadJson, '$.requestId')
+                WHERE RequestId IS NULL AND json_extract(PayloadJson, '$.requestId') IS NOT NULL;
+                """;
+            await backfill.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         _connection = connection;

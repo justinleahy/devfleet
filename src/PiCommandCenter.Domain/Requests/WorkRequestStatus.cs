@@ -15,4 +15,5 @@ public enum WorkRequestStatus
     Completed = 7,
     Failed = 8,
     Cancelled = 9,
+    Cancelling = 10,
 }

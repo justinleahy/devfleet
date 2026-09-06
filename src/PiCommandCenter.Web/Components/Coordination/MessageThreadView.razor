@@ -10,7 +10,10 @@
 
 <article class="thread">
     <header class="thread-head">
-        <h3>@Subject</h3>
+        <div class="thread-title">
+            <h3>@Subject</h3>
+            <span class="thread-id mono">@ThreadId</span>
+        </div>
         <div class="badge-row">
             @if (IsPrimary)
             {
@@ -28,7 +31,6 @@
                 <FluentBadge Appearance="Appearance.Accent">@_pendingAck awaiting acknowledgement</FluentBadge>
             }
         </div>
-        <span class="thread-id mono">@ThreadId</span>
     </header>
 
     <ol class="message-list">
@@ -36,27 +38,34 @@
         {
             <li class="message @(IsUnread(message) ? "is-unread" : null) @(message.IsFromHuman ? "is-human" : null)">
                 <div class="message-head">
-                    <span class="message-sender">
-                        @(message.IsFromHuman ? "Human operator" : SessionLabel(message.SenderSessionId!))
+                    <span class="message-who">
+                        <span class="message-role">
+                            @(message.IsFromHuman ? "human guidance" : "agent")
+                        </span>
+                        <span class="message-sender">
+                            @(message.IsFromHuman ? "Human operator" : SessionLabel(message.SenderSessionId!))
+                        </span>
                     </span>
-                    @if (message.IsFromHuman)
-                    {
-                        <FluentBadge Appearance="Appearance.Accent">human guidance</FluentBadge>
-                    }
-                    @if (message.Importance == MessageImportance.High)
-                    {
-                        <FluentBadge Appearance="Appearance.Accent">high</FluentBadge>
-                    }
-                    @if (message.AcknowledgementRequired)
-                    {
-                        <FluentBadge Appearance="Appearance.Neutral">acknowledgement required</FluentBadge>
-                    }
                     <span class="message-time">
                         <span class="visually-hidden">Sent at</span>
-                        @message.CreatedAtUtc.ToString("u")
+                        <span class="message-stamp">@message.CreatedAtUtc.ToString("u")</span>
                         <span class="hint">(@TimeText.Relative(message.CreatedAtUtc, Now))</span>
                     </span>
                 </div>
+
+                @if (message.Importance == MessageImportance.High || message.AcknowledgementRequired)
+                {
+                    <div class="badge-row message-badges">
+                        @if (message.Importance == MessageImportance.High)
+                        {
+                            <FluentBadge Appearance="Appearance.Accent">high</FluentBadge>
+                        }
+                        @if (message.AcknowledgementRequired)
+                        {
+                            <FluentBadge Appearance="Appearance.Neutral">acknowledgement required</FluentBadge>
+                        }
+                    </div>
+                }
 
                 @if (!string.Equals(message.Subject, Subject, StringComparison.Ordinal))
                 {
@@ -66,7 +75,7 @@
                 <p class="message-body">@message.BodyMarkdown</p>
 
                 <div class="message-foot">
-                    <span class="mono hint">@message.Id</span>
+                    <span class="message-id mono hint">@message.Id</span>
                     @if (message.Recipients.Count == 0)
                     {
                         <span class="hint">no recipient rows persisted</span>

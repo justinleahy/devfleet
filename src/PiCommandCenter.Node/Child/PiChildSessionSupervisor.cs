@@ -44,16 +44,20 @@ public static class ChildAgentStatus
 /// <see cref="ReservedFileOperations"/> after the reservation authority authorizes the lease
 /// and fencing token.
 /// </summary>
-public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, IAsyncDisposable
+public sealed class PiChildSessionSupervisor
+    : IPiOrchestrationRequestHandler, IRootSessionTerminalizer, IAsyncDisposable
 {
     private readonly PiWorkerOptions _workerOptions;
     private readonly INodeRuntimeRoutingStore _routing;
     private readonly Lazy<IAgentRuntimeRegistry> _runtimes;
+    private readonly Lazy<IRootSessionSupervisor> _rootSessions;
+    private readonly Lazy<INodeAssignmentTerminalizationOrchestrator> _assignmentTerminalization;
     private readonly IPiOrchestrationRequestHandler _inner;
     private readonly INodeReservationGateway _reservations;
     private readonly INodeMailGateway _mail;
     private readonly IAgentIdentityRegistry _identities;
     private readonly INodeEventSpool _spool;
+    private readonly INodeAssignmentCredentialSource _assignmentCredentials;
     private readonly IVerificationCommandRunner _verification;
     private readonly IRepositoryInspector _repository;
     private readonly IRuntimeCrashRecovery _crashRecovery;
@@ -61,6 +65,13 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
     private readonly RequestWorkspaceTracker _workspace;
     private readonly ReservedFileOperations _fileOperations;
     private readonly TimeProvider _timeProvider;
+    private readonly Quiescence.IRequestAdmissionGate _admission;
+    /// <summary>Bound on the post-Begin drain before completion is reported as uncertain.</summary>
+    private static readonly TimeSpan QuiescenceProofTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>Per-child activity leases held until the child turns terminal.</summary>
+    private readonly ConcurrentDictionary<string, Quiescence.NodeActivityLease> _childActivity =
+        new(StringComparer.Ordinal);
     private readonly ILogger<PiChildSessionSupervisor> _logger;
     private readonly CancellationTokenSource _disposeCts = new();
     private int _disposed;
@@ -81,14 +92,18 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         INodeMailGateway mail,
         IAgentIdentityRegistry identities,
         INodeEventSpool spool,
+        INodeAssignmentCredentialSource assignmentCredentials,
         TimeProvider timeProvider,
         ILogger<PiChildSessionSupervisor> logger,
         Lazy<IAgentRuntimeRegistry> runtimes,
+        Lazy<IRootSessionSupervisor> rootSessions,
+        Lazy<INodeAssignmentTerminalizationOrchestrator> assignmentTerminalization,
         IVerificationCommandRunner verification,
         IRepositoryInspector repository,
         IRuntimeCrashRecovery crashRecovery,
         INodeCompletionGateway completion,
-        RequestWorkspaceTracker workspace)
+        RequestWorkspaceTracker workspace,
+        Quiescence.IRequestAdmissionGate admission)
     {
         ArgumentNullException.ThrowIfNull(workerOptions);
         ArgumentNullException.ThrowIfNull(routing);
@@ -97,14 +112,18 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         ArgumentNullException.ThrowIfNull(mail);
         ArgumentNullException.ThrowIfNull(identities);
         ArgumentNullException.ThrowIfNull(spool);
+        ArgumentNullException.ThrowIfNull(assignmentCredentials);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(runtimes);
+        ArgumentNullException.ThrowIfNull(rootSessions);
+        ArgumentNullException.ThrowIfNull(assignmentTerminalization);
         ArgumentNullException.ThrowIfNull(verification);
         ArgumentNullException.ThrowIfNull(repository);
         ArgumentNullException.ThrowIfNull(crashRecovery);
         ArgumentNullException.ThrowIfNull(completion);
         ArgumentNullException.ThrowIfNull(workspace);
+        ArgumentNullException.ThrowIfNull(admission);
         _workerOptions = workerOptions.Value;
         _routing = routing;
         _inner = inner;
@@ -112,10 +131,14 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         _mail = mail;
         _identities = identities;
         _spool = spool;
-        _fileOperations = new ReservedFileOperations(reservations);
+        _assignmentCredentials = assignmentCredentials;
+        _admission = admission;
+        _fileOperations = new ReservedFileOperations(reservations, admission);
         _timeProvider = timeProvider;
         _logger = logger;
         _runtimes = runtimes;
+        _rootSessions = rootSessions;
+        _assignmentTerminalization = assignmentTerminalization;
         _verification = verification;
         _repository = repository;
         _crashRecovery = crashRecovery;
@@ -136,8 +159,22 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         JsonElement? payload,
         CancellationToken cancellationToken)
     {
+        Quiescence.NodeActivityLease? activity = null;
         try
         {
+            if (requestType is not ("request.complete" or "submit_completion")
+                && Guid.TryParse(context.RequestId, out var requestId))
+            {
+                activity = _admission.TryEnterOperation(
+                    requestId,
+                    $"pi-tool:{requestType}");
+                if (activity is null)
+                {
+                    return AdmissionClosed();
+                }
+            }
+
+            using var admittedActivity = activity;
             return requestType switch
             {
                 "agent.spawn" or "spawn_agent" => await SpawnAsync(context, payload, single: true, cancellationToken),
@@ -179,20 +216,20 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                     WorkspaceReadOperations.List(context.RepositoryRoot ?? "", payload.GetStringProperty("path"))),
                 "reserved_write" => await RunSinglePathMutationAsync(
                     context, payload,
-                    (ops, root, lease, sessionId, path, cancellationToken) => ops.WriteTextAsync(
-                        root, lease, sessionId, path, payload.GetStringProperty("content") ?? string.Empty, cancellationToken),
+                    (ops, requestId, root, lease, sessionId, path, cancellationToken) => ops.WriteTextAsync(
+                        requestId, root, lease, sessionId, path, payload.GetStringProperty("content") ?? string.Empty, cancellationToken),
                     cancellationToken),
                 "reserved_edit" => await RunSinglePathMutationAsync(
                     context, payload,
-                    (ops, root, lease, sessionId, path, cancellationToken) => ops.EditTextAsync(
-                        root, lease, sessionId, path,
+                    (ops, requestId, root, lease, sessionId, path, cancellationToken) => ops.EditTextAsync(
+                        requestId, root, lease, sessionId, path,
                         payload.GetStringProperty("oldText") ?? string.Empty,
                         payload.GetStringProperty("newText") ?? string.Empty,
                         cancellationToken),
                     cancellationToken),
                 "reserved_delete" => await RunSinglePathMutationAsync(
                     context, payload,
-                    (ops, root, lease, sessionId, path, cancellationToken) => ops.DeleteAsync(root, lease, sessionId, path, cancellationToken),
+                    (ops, requestId, root, lease, sessionId, path, cancellationToken) => ops.DeleteAsync(requestId, root, lease, sessionId, path, cancellationToken),
                     cancellationToken),
                 "reserved_move" => await ReservedMoveAsync(context, payload, cancellationToken),
                 _ => await _inner.HandleAsync(context, requestType, payload, cancellationToken),
@@ -210,6 +247,11 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             return PiToolResponse.Failure("child_supervisor_error", ex.Message);
         }
     }
+
+    private static PiToolResponse AdmissionClosed()
+        => PiToolResponse.Failure(
+            "admission_closed",
+            "The request is terminalizing; no new work is admitted.");
 
     private async Task<PiToolResponse> InspectDiffAsync(
         PiOrchestrationContext context,
@@ -320,6 +362,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                         ? VerificationRunStatus.Passed
                         : VerificationRunStatus.Failed;
             await _completion.RecordVerificationRunAsync(
+                context.SessionId,
                 new VerificationRunDto(
                     Guid.Empty,
                     requestId,
@@ -375,6 +418,14 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             || !Guid.TryParse(context.ProjectId, out var projectId))
         {
             return PiToolResponse.Failure("request_identity_unknown", "The session is not bound to a request.");
+        }
+
+        using var terminalization = _admission.TryEnterTerminalization(
+            requestId,
+            $"terminalize:{context.SessionId}");
+        if (terminalization is null)
+        {
+            return AdmissionClosed();
         }
 
         var summary = payload.GetStringProperty("summaryMarkdown")
@@ -444,12 +495,14 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             verificationSummary,
             requestBranch,
             checkpointCommitId);
-        var decision = await _completion.EvaluateCompletionAsync(
-            projectId, requestId, context.SessionId, evidence, cancellationToken)
+        var decision = await BeginTerminalizationAsync(
+            projectId, requestId, context.SessionId,
+            TerminalizationIntent.Complete, evidence, reason: null, cancellationToken)
             .ConfigureAwait(false);
 
         if (!decision.Accepted)
         {
+            // Rejected before the state move: admission stays open and nothing drains.
             await context.EmitAsync(
                 "request.completion_rejected",
                 new Dictionary<string, object?>
@@ -464,6 +517,57 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             });
         }
 
+        // The authority accepted Begin: admission closes irreversibly and every admitted
+        // child, operation, and process must drain before the confirmation is attested.
+        _admission.CloseAdmission(requestId);
+        terminalization.Dispose();
+        var outcome = await _admission.ProveQuiescenceAsync(
+            requestId,
+            BuildQuiescenceObservation(
+                projectId, requestId, context.SessionId, context.RepositoryRoot),
+            QuiescenceProofTimeout,
+            cancellationToken).ConfigureAwait(false);
+
+        if (outcome is not Quiescence.QuiescenceOutcome.Proven proven)
+        {
+            // Uncertainty is never confirmed: ownership stays with the authority, local
+            // admission state is retained, and no terminal event is emitted.
+            var uncertain = (Quiescence.QuiescenceOutcome.Uncertain)outcome;
+            _logger.LogWarning(
+                "Quiescence for request {RequestId} could not be proven ({Reason}); "
+                + "confirmation withheld. Observed: {@Observed}",
+                requestId, uncertain.Reason, uncertain.Observed);
+            return PiToolResponse.Failure(
+                "quiescence_uncertain",
+                $"The assignment could not be proven quiescent ({uncertain.Reason}); "
+                + "completion was not confirmed.");
+        }
+
+        var proof = ToApplicationProof(proven.Proof);
+        decision = await _completion.ConfirmTerminalizationAsync(
+            projectId, requestId, context.SessionId,
+            TerminalizationIntent.Complete, evidence, reason: null, proof, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!decision.Accepted)
+        {
+            // The authority rejected the exact proof; admission state is retained so the
+            // terminalization can be retried, and no terminal event is emitted.
+            await context.EmitAsync(
+                "request.completion_rejected",
+                new Dictionary<string, object?>
+                {
+                    ["missingRequirements"] = decision.MissingRequirements,
+                },
+                cancellationToken).ConfigureAwait(false);
+            return PiToolResponse.Success(new Dictionary<string, object?>
+            {
+                ["accepted"] = false,
+                ["missingRequirements"] = decision.MissingRequirements,
+            });
+        }
+
+        _admission.CommitTerminalization(requestId);
         await context.EmitAsync(
             "request.completed",
             new Dictionary<string, object?> { ["summaryMarkdown"] = summary },
@@ -475,6 +579,200 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             ["result"] = decision.Result,
         });
     }
+
+    public Task<RootTerminalizationOutcome> CancelAsync(
+        ExecutionAssignmentMessage assignment,
+        string rootSessionId,
+        string reason,
+        CancellationToken cancellationToken)
+        => TerminalizeRootAsync(
+            assignment,
+            rootSessionId,
+            reason,
+            TerminalizationIntent.Cancel,
+            cancellationToken);
+
+    public Task<RootTerminalizationOutcome> FailAsync(
+        ExecutionAssignmentMessage assignment,
+        string rootSessionId,
+        string reason,
+        CancellationToken cancellationToken)
+        => TerminalizeRootAsync(
+            assignment,
+            rootSessionId,
+            reason,
+            TerminalizationIntent.Fail,
+            cancellationToken);
+
+    private async Task<RootTerminalizationOutcome> TerminalizeRootAsync(
+        ExecutionAssignmentMessage assignment,
+        string rootSessionId,
+        string reason,
+        TerminalizationIntent intent,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        using var terminalization = _admission.TryEnterTerminalization(
+            assignment.RequestId,
+            $"terminalize:{rootSessionId}");
+        if (terminalization is null)
+        {
+            return RootTerminalizationOutcome.Rejected;
+        }
+
+        var decision = await BeginTerminalizationAsync(
+            assignment.ProjectId,
+            assignment.RequestId,
+            rootSessionId,
+            intent,
+            evidence: null,
+            reason,
+            cancellationToken).ConfigureAwait(false);
+        if (!decision.Accepted)
+        {
+            return RootTerminalizationOutcome.Rejected;
+        }
+
+        _admission.CloseAdmission(assignment.RequestId);
+        terminalization.Dispose();
+
+        var stopTasks = new List<Task>();
+        foreach (var child in _childrenBySession.Values)
+        {
+            if (!child.IsTerminal
+                && Guid.TryParse(child.RequestId, out var childRequestId)
+                && childRequestId == assignment.RequestId)
+            {
+                stopTasks.Add(CancelSessionAsync(child.SessionId, reason));
+            }
+        }
+
+        if (intent == TerminalizationIntent.Cancel)
+        {
+            stopTasks.Add(_rootSessions.Value.CancelSessionAsync(rootSessionId, reason));
+        }
+
+        await Task.WhenAll(stopTasks).ConfigureAwait(false);
+
+        var outcome = await _admission.ProveQuiescenceAsync(
+            assignment.RequestId,
+            BuildQuiescenceObservation(
+                assignment.ProjectId,
+                assignment.RequestId,
+                rootSessionId,
+                assignment.CanonicalRepositoryPathSnapshot),
+            QuiescenceProofTimeout,
+            cancellationToken).ConfigureAwait(false);
+        if (outcome is not Quiescence.QuiescenceOutcome.Proven proven)
+        {
+            var uncertain = (Quiescence.QuiescenceOutcome.Uncertain)outcome;
+            _logger.LogWarning(
+                "{Intent} quiescence for request {RequestId} could not be proven ({Reason}); "
+                + "confirmation withheld. Observed: {@Observed}",
+                intent,
+                assignment.RequestId,
+                uncertain.Reason,
+                uncertain.Observed);
+            return RootTerminalizationOutcome.Uncertain;
+        }
+
+        decision = await _completion.ConfirmTerminalizationAsync(
+            assignment.ProjectId,
+            assignment.RequestId,
+            rootSessionId,
+            intent,
+            evidence: null,
+            reason,
+            ToApplicationProof(proven.Proof),
+            cancellationToken).ConfigureAwait(false);
+        if (!decision.Accepted)
+        {
+            return RootTerminalizationOutcome.Rejected;
+        }
+
+        _admission.CommitTerminalization(assignment.RequestId);
+        return RootTerminalizationOutcome.Accepted;
+    }
+
+    private Task<CompletionGateDecision> BeginTerminalizationAsync(
+        Guid projectId,
+        Guid requestId,
+        string rootSessionId,
+        TerminalizationIntent intent,
+        CompletionEvidence? evidence,
+        string? reason,
+        CancellationToken cancellationToken)
+        => _assignmentTerminalization.Value.BeginTerminalizationAsync(
+            requestId,
+            intent,
+            token => _completion.BeginTerminalizationAsync(
+                projectId,
+                requestId,
+                rootSessionId,
+                intent,
+                evidence,
+                reason,
+                token),
+            cancellationToken);
+
+    /// <summary>
+    /// External observations the admission gate cannot perform itself: request-owned active
+    /// reservations, request-scoped pending spool events, and repository inspection.
+    /// </summary>
+    private Quiescence.QuiescenceObservation BuildQuiescenceObservation(
+        Guid projectId,
+        Guid requestId,
+        string rootSessionId,
+        string? repositoryRoot)
+    {
+        var owners = new HashSet<string>(StringComparer.Ordinal) { rootSessionId };
+        foreach (var child in _childrenBySession.Values)
+        {
+            if (Guid.TryParse(child.RequestId, out var childRequestId)
+                && childRequestId == requestId)
+            {
+                owners.Add(child.SessionId);
+            }
+        }
+
+        return new Quiescence.QuiescenceObservation(
+            async ct =>
+            {
+                var leases = await _reservations.ListAsync(projectId, includeReleased: false, ct)
+                    .ConfigureAwait(false);
+                return leases.Count(lease =>
+                    !string.Equals(lease.State, "Released", StringComparison.Ordinal)
+                    && owners.Contains(lease.OwnerSessionId));
+            },
+            ct => _spool.CountPendingForRequestAsync(requestId, ct),
+            async ct =>
+            {
+                if (string.IsNullOrEmpty(repositoryRoot)
+                    || !_workspace.TryGetBaseline(requestId, out var baseline))
+                {
+                    return true;
+                }
+
+                var leases = await _reservations.ListAsync(projectId, includeReleased: false, ct)
+                    .ConfigureAwait(false);
+                await _repository.DetectExternalChangesAsync(
+                    repositoryRoot, baseline.BaseCommit, leases, ct).ConfigureAwait(false);
+                return true;
+            });
+    }
+
+    private static AssignmentQuiescenceProof ToApplicationProof(
+        Quiescence.AssignmentQuiescenceProof proof)
+        => new(
+            proof.AdmissionClosed,
+            proof.ActiveChildren,
+            proof.ActiveOperations,
+            proof.ActiveProcesses,
+            proof.PendingEvents,
+            proof.ActiveReservations,
+            proof.RepositoryInspected,
+            proof.ObservedAt);
 
     private static IReadOnlyList<ReviewFinding> ParseFindings(JsonElement? payload)
     {
@@ -536,6 +834,13 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         if (parseError is not null)
         {
             return PiToolResponse.Failure(parseError.Code, parseError.Message);
+        }
+
+        if (Guid.TryParse(context.RequestId, out var spawnRequestId)
+            && _admission.IsAdmissionClosed(spawnRequestId))
+        {
+            return PiToolResponse.Failure(
+                "admission_closed", "The request is terminalizing; no new child work is admitted.");
         }
 
         var children = _childrenByRequest.GetOrAdd(context.RequestId, _ => new(StringComparer.Ordinal));
@@ -676,10 +981,23 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 $"An agent named '{agentName}' already exists for this request.");
         }
 
+        var childActivity = _admission.TryAdmitChild(Guid.Parse(context.RequestId), sessionId);
+        if (childActivity is null)
+        {
+            children.TryRemove(agentName, out _);
+            _childrenBySession.TryRemove(sessionId, out _);
+            await _identities.ReleaseAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            return SpawnFailure(
+                "admission_closed", "The request is terminalizing; no new child work is admitted.");
+        }
+
+        _childActivity[sessionId] = childActivity;
+
         if (!_childrenBySession.TryAdd(sessionId, child))
         {
             children.TryRemove(agentName, out _);
             await _identities.ReleaseAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            UntrackChild(sessionId);
             return SpawnFailure("duplicate_agent_name", "Child session id collision; retry the spawn.");
         }
 
@@ -732,6 +1050,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             children.TryRemove(agentName, out _);
             _childrenBySession.TryRemove(sessionId, out _);
             await _identities.ReleaseAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            UntrackChild(sessionId);
             await AppendChildEventAsync(
                 child,
                 "child.failed",
@@ -776,6 +1095,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             children.TryRemove(agentName, out _);
             _childrenBySession.TryRemove(sessionId, out _);
             await _identities.ReleaseAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
+            UntrackChild(sessionId);
             if (leaseResult?.Lease is { } failedLease)
             {
                 await _reservations.ReleaseAsync(
@@ -1337,7 +1657,6 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
         var resolvedLease = lease!;
 
-
         var (root, ops) = RequireRepository(context);
         var result = await ops.ReadTextAsync(root, resolvedLease, context.SessionId, path!, cancellationToken)
             .ConfigureAwait(false);
@@ -1356,7 +1675,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
     private async Task<PiToolResponse> RunSinglePathMutationAsync(
         PiOrchestrationContext context,
         JsonElement? payload,
-        Func<ReservedFileOperations, string, MutationLease, string, string, CancellationToken, Task<FileOperationResult>> run,
+        Func<ReservedFileOperations, Guid, string, MutationLease, string, string, CancellationToken, Task<FileOperationResult>> run,
         CancellationToken cancellationToken)
     {
         var lease = ParseLease(payload, out var error);
@@ -1373,9 +1692,13 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
 
         var resolvedLease = lease!;
 
+        if (!Guid.TryParse(context.RequestId, out var mutationRequestId))
+        {
+            return PiToolResponse.Failure("request_identity_unknown", "The session is not bound to a request.");
+        }
 
         var (root, ops) = RequireRepository(context);
-        var result = await run(ops, root, resolvedLease, context.SessionId, path!, cancellationToken)
+        var result = await run(ops, mutationRequestId, root, resolvedLease, context.SessionId, path!, cancellationToken)
             .ConfigureAwait(false);
         return FileResponse(result);
     }
@@ -1406,9 +1729,14 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         var resolvedLease = lease!;
 
 
+        if (!Guid.TryParse(context.RequestId, out var moveRequestId))
+        {
+            return PiToolResponse.Failure("request_identity_unknown", "The session is not bound to a request.");
+        }
+
         var (root, ops) = RequireRepository(context);
         var result = await ops.MoveAsync(
-            root, resolvedLease, context.SessionId, source!, destination!, cancellationToken)
+            moveRequestId, root, resolvedLease, context.SessionId, source!, destination!, cancellationToken)
             .ConfigureAwait(false);
         return FileResponse(result);
     }
@@ -1500,6 +1828,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         catch (OperationCanceledException) when (_disposeCts.IsCancellationRequested)
         {
             child.Terminal.TrySetResult(new ChildTerminal(ChildAgentStatus.Cancelled, "node_shutdown"));
+            UntrackChild(child.SessionId);
         }
         catch (Exception ex)
         {
@@ -1562,6 +1891,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
             ChildAgentStatus.Blocked => "child.blocked",
             _ => "child.cancelled",
         };
+        UntrackChild(child.SessionId);
 
         await AppendChildEventAsync(
             child,
@@ -1576,6 +1906,15 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
                 ["reason"] = reason,
             },
             CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>Ends the child's admission-gate activity exactly once, if it was tracked.</summary>
+    private void UntrackChild(string sessionId)
+    {
+        if (_childActivity.TryRemove(sessionId, out var activity))
+        {
+            activity.Dispose();
+        }
     }
 
     /// <summary>
@@ -1672,6 +2011,16 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         IReadOnlyDictionary<string, object?> payload,
         CancellationToken cancellationToken)
     {
+        var requestId = Guid.Parse(child.RequestId);
+        var projectId = Guid.Parse(child.ProjectId);
+        if (!_assignmentCredentials.TryGetByRequest(requestId, out var credential)
+            || credential.RequestId != requestId
+            || credential.ProjectId != projectId)
+        {
+            throw new InvalidOperationException(
+                $"No active assignment credential is available for request {requestId} in project {projectId}.");
+        }
+
         var sequence = child.AllocateSequence();
         var normalized = new Dictionary<string, object?>(payload)
         {
@@ -1685,8 +2034,9 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         var message = new NodeEventMessage(
             EventId: $"{child.SessionId}-{sequence}-{type}",
             NodeId: Guid.Parse(child.NodeId),
-            ProjectId: Guid.Parse(child.ProjectId),
-            RequestId: Guid.Parse(child.RequestId),
+            ProjectId: projectId,
+            RequestId: requestId,
+            ClaimToken: credential.ClaimToken,
             SessionId: child.SessionId,
             Sequence: sequence,
             Type: type,
@@ -1947,6 +2297,7 @@ public sealed class PiChildSessionSupervisor : IPiOrchestrationRequestHandler, I
         {
             child.Terminal.TrySetResult(new ChildTerminal(ChildAgentStatus.Cancelled, "node_shutdown"));
             await child.CloseAsync().ConfigureAwait(false);
+            UntrackChild(child.SessionId);
             await ReleaseChildAsync(child).ConfigureAwait(false);
         }
 

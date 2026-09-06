@@ -14,11 +14,10 @@ using PiCommandCenter.Node.Repository;
 namespace PiCommandCenter.Node;
 
 /// <summary>
-/// Root session supervisor: for each claimed request it starts exactly one restricted Pi worker
-/// root session, appends <c>session.registered</c> plus every normalized adapter event to the
-/// durable local spool, and exposes the active session id for heartbeats. The supervisor never
-/// marks a request complete and has no direct workspace mutation path; completions come only
-/// from real runtime activity through the Control Plane reducer.
+/// Root session supervisor: for each execution assignment it starts exactly one restricted Pi worker
+/// root session and appends its normalized lifecycle to the durable local spool. Observed root
+/// failures are routed through the shared terminalization proof; event projection never directly
+/// terminalizes the request, and completions still come only from real runtime activity.
 /// </summary>
 public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisposable
 {
@@ -29,6 +28,7 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
     private readonly IRepositoryInspector _repository;
     private readonly RequestWorkspaceTracker _workspace;
     private readonly IRuntimeCrashRecovery _crashRecovery;
+    private readonly IRootSessionTerminalizer _terminalizer;
     private readonly NodeOptions _nodeOptions;
     private readonly ILogger<PiRootSessionSupervisor> _logger;
     private readonly Application.Git.ITrustedGitService? _gitService;
@@ -44,6 +44,7 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
         IRepositoryInspector repository,
         RequestWorkspaceTracker workspace,
         IRuntimeCrashRecovery crashRecovery,
+        IRootSessionTerminalizer terminalizer,
         TimeProvider timeProvider,
         ILogger<PiRootSessionSupervisor> logger,
         Application.Git.ITrustedGitService? gitService = null)
@@ -55,6 +56,7 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
         _repository = repository ?? throw new ArgumentNullException(nameof(repository));
         _workspace = workspace ?? throw new ArgumentNullException(nameof(workspace));
         _crashRecovery = crashRecovery ?? throw new ArgumentNullException(nameof(crashRecovery));
+        _terminalizer = terminalizer ?? throw new ArgumentNullException(nameof(terminalizer));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _options = options.Value;
@@ -68,19 +70,26 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
     public Guid? FindRequestId(string sessionId)
         => _sessions.Values.FirstOrDefault(
             candidate => string.Equals(candidate.SessionId, sessionId, StringComparison.Ordinal))
-            ?.Claim.RequestId;
+            ?.Assignment.RequestId;
 
-    /// <summary>Starts one restricted root session for the claimed assignment and persists its lifecycle.</summary>
-    public async Task<string> StartForClaimAsync(
-        RequestClaimMessage claim,
+    /// <summary>Starts one restricted root session for the execution assignment and persists its lifecycle.</summary>
+    public async Task<string> StartForAssignmentAsync(
+        ExecutionAssignmentMessage assignment,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(claim);
+        ArgumentNullException.ThrowIfNull(assignment);
+        ArgumentException.ThrowIfNullOrWhiteSpace(assignment.ClaimToken);
+        if (assignment.ClaimToken.Length > NodeAssignmentCredential.MaxClaimTokenLength)
+        {
+            throw new ArgumentException(
+                $"Claim token must not exceed {NodeAssignmentCredential.MaxClaimTokenLength} characters.",
+                nameof(assignment.ClaimToken));
+        }
         RepositoryBaseline baseline;
         try
         {
             baseline = await _repository.CaptureBaselineAsync(
-                claim.RepositoryPath,
+                assignment.CanonicalRepositoryPathSnapshot,
                 _nodeOptions.RequireCleanStart,
                 _nodeOptions.AllowUntrackedFiles,
                 cancellationToken).ConfigureAwait(false);
@@ -92,41 +101,41 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
                 ex);
         }
 
-        _workspace.SetBaseline(claim.RequestId, baseline);
-        if (!Directory.Exists(claim.RepositoryPath))
+        _workspace.SetBaseline(assignment.RequestId, baseline);
+        if (!Directory.Exists(assignment.CanonicalRepositoryPathSnapshot))
         {
             throw new InvalidOperationException(
-                $"Claimed repository path '{claim.RepositoryPath}' does not exist; refusing to start a root session.");
+                $"Assigned repository path '{assignment.CanonicalRepositoryPathSnapshot}' does not exist; refusing to start a root session.");
         }
 
-        var sessionId = $"pi-root-{claim.RequestId:N}-{Guid.NewGuid():N}";
+        var sessionId = $"pi-root-{assignment.RequestId:N}-{Guid.NewGuid():N}";
         var model = AgentModelSelector.Parse(_options.Model);
         var startRequest = new AgentStartRequest(
             sessionId,
-            new Domain.ProjectId(claim.ProjectId),
-            new Domain.Requests.WorkRequestId(claim.RequestId),
+            new Domain.ProjectId(assignment.ProjectId),
+            new Domain.Requests.WorkRequestId(assignment.RequestId),
             parentSessionId: null,
             agentName: "root",
             role: "root",
-            workingDirectory: claim.RepositoryPath,
-            prompt: BuildPrompt(claim),
+            workingDirectory: assignment.CanonicalRepositoryPathSnapshot,
+            prompt: BuildPrompt(assignment),
             AgentRuntimeMode.Root,
             model.Value,
-            createRequestCommit: claim.CreateRequestCommit);
+            createRequestCommit: assignment.CreateRequestCommit);
 
         // Supervisor-owned request branch, created exactly once before the worker starts so the
         // agent works on the request branch. No branch, no checkpoint policy: without the flag
         // the request stays on its configured branch and checkpoint tools refuse.
         string? requestBranch = null;
         string? baseCommitId = null;
-        if (claim.CreateRequestBranch && _gitService is not null)
+        if (assignment.CreateRequestBranch && _gitService is not null)
         {
-            var branchName = Git.PiRequestGit.RequestBranchName(claim.RequestId);
+            var branchName = Git.PiRequestGit.RequestBranchName(assignment.RequestId);
             var created = await _gitService.CreateRequestBranchAsync(
                 new Application.Git.RequestBranchRequest(
-                    claim.RequestId,
-                    claim.RepositoryPath,
-                    claim.DefaultBranch,
+                    assignment.RequestId,
+                    assignment.CanonicalRepositoryPathSnapshot,
+                    assignment.DefaultBranchSnapshot,
                     branchName),
                 cancellationToken).ConfigureAwait(false);
             requestBranch = created.BranchName;
@@ -134,12 +143,12 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
         }
 
         var handle = await _adapter.StartAsync(startRequest, cancellationToken).ConfigureAwait(false);
-        var active = new ActiveRootSession(sessionId, claim);
-        if (!_sessions.TryAdd(claim.RequestId, active))
+        var active = new ActiveRootSession(sessionId, assignment);
+        if (!_sessions.TryAdd(assignment.RequestId, active))
         {
             await _adapter.CloseSessionAsync(sessionId, CancellationToken.None).ConfigureAwait(false);
             throw new InvalidOperationException(
-                $"Request {claim.RequestId} already has a running root session.");
+                $"Request {assignment.RequestId} already has a running root session.");
         }
 
         // session.registered first, then every adapter event, in order, durably.
@@ -157,14 +166,14 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
                 ["role"] = "root",
                 ["mode"] = AgentRuntimeMode.Root.ToString(),
                 ["model"] = model.Value,
-                ["repositoryPath"] = claim.RepositoryPath,
-                ["defaultBranch"] = claim.DefaultBranch,
-                ["requestTitle"] = claim.Title,
-                ["requestKind"] = claim.Kind,
-                ["riskLevel"] = claim.RiskLevel,
+                ["repositoryPath"] = assignment.CanonicalRepositoryPathSnapshot,
+                ["defaultBranch"] = assignment.DefaultBranchSnapshot,
+                ["requestTitle"] = assignment.RequestTitle,
+                ["requestKind"] = assignment.RequestKind,
+                ["riskLevel"] = assignment.RequestRiskLevel,
                 ["requestBranch"] = requestBranch,
                 ["baseCommitId"] = baseCommitId,
-                ["createRequestCommit"] = claim.CreateRequestCommit,
+                ["createRequestCommit"] = assignment.CreateRequestCommit,
             },
             cancellationToken).ConfigureAwait(false);
         await AppendAsync(
@@ -181,7 +190,9 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
 
         _ = RunWatchLoopAsync(active);
         _logger.LogInformation(
-            "Root session {SessionId} started for request {RequestId}.", sessionId, claim.RequestId);
+            "Root session {SessionId} started for request {RequestId}.",
+            sessionId,
+            assignment.RequestId);
         return sessionId;
     }
 
@@ -248,12 +259,12 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
                 sessionId);
         }
 
-        await TerminateForRequestAsync(active.Claim.RequestId, reason, "session.cancelled")
+        await TerminateForRequestAsync(active.Assignment.RequestId, reason, "session.cancelled")
             .ConfigureAwait(false);
         return true;
     }
 
-    /// <summary>Stops the root session for a request (claim lost, node shutdown) and closes its stream.</summary>
+    /// <summary>Stops the root session for a request when its assignment is lost or the node shuts down.</summary>
     public Task StopForRequestAsync(Guid requestId, string reason)
         => TerminateForRequestAsync(requestId, reason, "session.closed");
 
@@ -318,14 +329,15 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
                 if (sessionEvent.Type == "session.failed")
                 {
                     var reason = sessionEvent.Payload.TryGetValue("reason", out var value)
-                        ? value?.ToString() ?? "session.failed"
-                        : "session.failed";
+                        && !string.IsNullOrWhiteSpace(value?.ToString())
+                            ? value.ToString()!
+                            : "session.failed";
                     try
                     {
                         await _crashRecovery.MarkOwnedLeasesRecoveryRequiredAsync(
-                            active.Claim.NodeId,
-                            active.Claim.ProjectId,
-                            active.Claim.RequestId,
+                            active.Assignment.NodeIdSnapshot,
+                            active.Assignment.ProjectId,
+                            active.Assignment.RequestId,
                             active.SessionId,
                             reason,
                             CancellationToken.None).ConfigureAwait(false);
@@ -336,6 +348,20 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
                             recoveryEx,
                             "Failed to mark leases recovery-required after root crash {SessionId}.",
                             active.SessionId);
+                    }
+
+                    var outcome = await _terminalizer.FailAsync(
+                        active.Assignment,
+                        active.SessionId,
+                        reason,
+                        CancellationToken.None).ConfigureAwait(false);
+                    if (outcome != RootTerminalizationOutcome.Accepted)
+                    {
+                        _logger.LogWarning(
+                            "Root failure for request {RequestId} was {Outcome}; "
+                            + "assignment ownership was retained.",
+                            active.Assignment.RequestId,
+                            outcome);
                     }
                 }
             }
@@ -350,7 +376,22 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
         }
         finally
         {
-            _sessions.TryRemove(active.Claim.RequestId, out _);
+            try
+            {
+                await _adapter.CloseSessionAsync(active.SessionId, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to drain stopped root session {SessionId}; terminal fence was retained.",
+                    active.SessionId);
+            }
+            finally
+            {
+                _sessions.TryRemove(active.Assignment.RequestId, out _);
+            }
         }
     }
 
@@ -364,9 +405,10 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
     {
         var message = new NodeEventMessage(
             EventId: $"{sessionId}-{sequence}-{type}",
-            NodeId: active.Claim.NodeId,
-            ProjectId: active.Claim.ProjectId,
-            RequestId: active.Claim.RequestId,
+            NodeId: active.Assignment.NodeIdSnapshot,
+            ProjectId: active.Assignment.ProjectId,
+            RequestId: active.Assignment.RequestId,
+            ClaimToken: active.Assignment.ClaimToken,
             SessionId: sessionId,
             Sequence: active.AssignSequence(sequence),
             Type: type,
@@ -377,12 +419,14 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
         await _spool.AppendAsync(message, cancellationToken).ConfigureAwait(false);
         _logger.LogDebug(
             "Spooled event {Type} (seq {Sequence}) for request {RequestId}.",
-            type, message.Sequence, active.Claim.RequestId);
+            type, message.Sequence, active.Assignment.RequestId);
     }
 
-    private static string BuildPrompt(RequestClaimMessage claim)
+    private static string BuildPrompt(ExecutionAssignmentMessage assignment)
     {
-        var prompt = string.IsNullOrWhiteSpace(claim.Prompt) ? claim.Title : claim.Prompt;
+        var prompt = string.IsNullOrWhiteSpace(assignment.RequestPrompt)
+            ? assignment.RequestTitle
+            : assignment.RequestPrompt;
         return string.IsNullOrWhiteSpace(prompt)
             ? "Inspect the repository and create the plan for this work request."
             : prompt;
@@ -402,14 +446,16 @@ public sealed class PiRootSessionSupervisor : IRootSessionSupervisor, IAsyncDisp
         _disposeCts.Dispose();
     }
 
-    /// <summary>One running root session: identity, claim, and the supervisor-side sequence gate.</summary>
-    private sealed class ActiveRootSession(string sessionId, RequestClaimMessage claim)
+    /// <summary>One running root session: identity, assignment, and supervisor-side sequence gate.</summary>
+    private sealed class ActiveRootSession(
+        string sessionId,
+        ExecutionAssignmentMessage assignment)
     {
         private long _lastSequence = -1;
 
         public string SessionId { get; } = sessionId;
 
-        public RequestClaimMessage Claim { get; } = claim;
+        public ExecutionAssignmentMessage Assignment { get; } = assignment;
 
         /// <summary>
         /// Guarantees a strictly increasing sequence in the spool even when worker sequences are

@@ -1,6 +1,6 @@
 # DevFleet
 
-Project-centric command center for orchestrated local development on a Fedora workstation: Blazor UI, ASP.NET Core control plane, .NET node worker, and a TypeScript Pi worker. Official `claude`, `agy`, and `muse` binaries stay unmodified; their credentials stay in those products.
+Fleet-oriented command center for orchestrated local development on Fedora workstations: a Blazor UI and ASP.NET Core control plane coordinate .NET nodes and a TypeScript Pi worker. Official `claude`, `agy`, and `muse` binaries stay unmodified; their credentials stay in those products.
 
 Details: [docs/architecture.md](docs/architecture.md), [docs/protocols.md](docs/protocols.md), [docs/security.md](docs/security.md). Product rules: [SPEC.md](SPEC.md).
 
@@ -29,6 +29,14 @@ node --version     # v26+
 - `deploy/systemd/` — user units
 - `tests/` — unit, integration, end-to-end
 
+## Project placement model
+
+A **Project** is fleet-owned metadata and policy. It has no `NodeId` or repository path, so registration works with no node or checkout. In the initial phase each Project has zero or one **WorkspaceBinding**, which designates one node-local checkout. The selected authenticated node validates the binding's current revision on its own filesystem under its node-side `Projects:ApprovedRoots`; editing the node, path, or validation inputs makes the binding pending again.
+
+Requests can be enqueued while a Project is unbound or its node is offline and remain `Queued` with a scheduling reason. When the designated binding becomes eligible, the control plane atomically creates a durable **ExecutionAssignment** containing the request's immutable node, path, branch, and binding-revision snapshot. Only the connection authenticated as that assigned node, with the assignment token, may act for the request, and every child stays on that node and workspace.
+
+The initial phase has no repository mobility or transparent failover. A Project has an effective limit of one nonterminal development assignment, including finalizing, cancelling, and recovery-required work. Disconnect or lease expiry does not transfer ownership or free the writer slot; completion, failure, and cancellation release it only after assignment-bound quiescence is proved or audited recovery resolves the uncertainty.
+
 ## First-time setup
 
 Secrets are created **only** by the setup script.
@@ -46,8 +54,9 @@ Defaults:
 | Admin username | `admin` (`Admin:Username`) |
 | `Admin:PasswordFile` | `$HOME/.local/share/devfleet/admin.password.hash` (`0600`, password hash) |
 | `NodeAuthentication:CredentialFile` | `$HOME/.local/share/devfleet/node.token` (`0600`) |
+| Node `Projects:ApprovedRoots` | `~/Developer` (binding-validation allowlist; `~` expands in the node process) |
 
-`scripts/setup-local.sh` writes owner-only `~/.local/share/devfleet/pi-command-center.env` with host paths for the persistent database, node spool, auth material, Data Protection keys, installed Pi worker and usage sidecar, resolved provider executables, the Claude credential path, and a service `PATH` including `~/.local/bin`. [deploy/pi-command-center.env.example](deploy/pi-command-center.env.example) documents its shape. Typed JSON examples: [deploy/appsettings.ControlPlane.example.json](deploy/appsettings.ControlPlane.example.json), [deploy/appsettings.Node.example.json](deploy/appsettings.Node.example.json).
+`scripts/setup-local.sh` writes owner-only `~/.local/share/devfleet/pi-command-center.env` with host paths for the persistent database, node assignment/event spool, auth material, Data Protection keys, node-local approved binding roots, installed Pi worker and usage sidecar, resolved provider executables, the Claude credential path, and a service `PATH` including `~/.local/bin`. [deploy/pi-command-center.env.example](deploy/pi-command-center.env.example) documents its shape. Typed JSON examples: [deploy/appsettings.ControlPlane.example.json](deploy/appsettings.ControlPlane.example.json), [deploy/appsettings.Node.example.json](deploy/appsettings.Node.example.json).
 
 Install JS deps once:
 
@@ -70,7 +79,7 @@ If a session starts without provider auth, the UI shows blocked + input required
 Configure models through Pi’s own agent data under `Pi:AgentDataDirectory` (default `~/.local/share/devfleet/pi-agent`). Do not put provider API keys in SQLite or `appsettings`. `Pi:WorkerPath` points at the installed worker under `~/.local/lib/devfleet` in production.
 ## Migrations
 
-The Control Plane applies EF Core migrations on startup (`MigrateAsync` in `src/PiCommandCenter.ControlPlane/Program.cs`). There is no separate migrate command for normal operation. Database file: `ConnectionStrings:ControlPlane` (SQLite).
+The Control Plane applies EF Core migrations on startup (`MigrateAsync` in `src/PiCommandCenter.ControlPlane/Program.cs`). There is no separate migrate command for normal operation. `ConnectionStrings:ControlPlane` selects the SQLite database that retains fleet Project metadata, WorkspaceBindings, request queues and history, and durable ExecutionAssignments. Assignment history survives terminalization, disconnect, and lease expiry. The node journals assignment identity and unacknowledged events at `Node:EventSpoolPath` for reconciliation before new claims after restart.
 
 ## Loopback run
 
@@ -82,7 +91,7 @@ export PI_CC_PORT="${PI_CC_PORT:-5057}"
 ./scripts/demo.sh
 ```
 
-`--smoke` uses a temporary data directory, never launches providers, and does **not** count as a completed demonstration.
+`--smoke` uses a temporary data directory, starts only the Control Plane, registers one metadata-only Project, never launches providers, and does **not** count as a completed demonstration.
 
 Open `http://127.0.0.1:5057/login`, sign in as `admin` with the password from `$PI_CC_DATA/admin.password`. Health: `curl -fsS http://127.0.0.1:5057/health`.
 
@@ -98,7 +107,7 @@ dotnet run --project src/PiCommandCenter.ControlPlane/PiCommandCenter.ControlPla
 dotnet run --project src/PiCommandCenter.Node/PiCommandCenter.Node.csproj --no-launch-profile
 ```
 
-Pass `Admin__PasswordFile`, `NodeAuthentication__CredentialFile`, and `Node__ControlPlaneUrl` via environment or `--environment` files. Missing auth material outside `Testing` stops the process with a message pointing at `scripts/setup-local.sh`.
+Pass `Admin__PasswordFile`, `NodeAuthentication__CredentialFile`, and `Node__ControlPlaneUrl` via environment or `--environment` files. Configure `Projects__ApprovedRoots__0` in the **node** environment; the Control Plane does not inspect those paths during Project registration. Missing auth material outside `Testing` stops the process with a message pointing at `scripts/setup-local.sh`.
 
 ## Private-LAN access
 
@@ -113,7 +122,7 @@ reverse proxy in front before exposing DevFleet beyond that boundary.
 
 ## Production: systemd user daemon
 
-systemd user units are the **only** production deployment. There is no Docker or Compose stack. Binaries live under the protected install root `~/.local/lib/devfleet`; live state lives under `~/.local/share/devfleet`. Default bind is loopback. Set `DEVFLEET_BIND_ADDRESS` to a specific LAN address when installing to publish there. Provider CLIs and credential stores stay host-native (`claude`, `agy`, `muse`, `~/.pi/agent`, `~/.claude`, `~/.gemini`, `~/.config/muse`); units allow those writable project and provider paths. No container mounts.
+systemd user units are the **only** production deployment. There is no Docker or Compose stack. Binaries live under the protected install root `~/.local/lib/devfleet`; live state lives under `~/.local/share/devfleet`. Default bind is loopback. Set `DEVFLEET_BIND_ADDRESS` to a specific LAN address when installing to publish there. Provider CLIs and credential stores stay host-native (`claude`, `agy`, `muse`, `~/.pi/agent`, `~/.claude`, `~/.gemini`, `~/.config/muse`); node units allow their designated WorkspaceBinding and provider paths. No container mounts.
 
 ```bash
 # Omit DEVFLEET_BIND_ADDRESS for loopback-only deployment.
@@ -150,7 +159,7 @@ Forced setup also rotates the node credential, so both services must restart.
 
 ## Demo
 
-The first SPEC demonstration is **web UI only**. `scripts/demo.sh` starts loopback hosts and registers `demo/health-details-fixture`. It does not complete a request.
+The first SPEC demonstration is **web UI only**. In its default and `--smoke` modes, `scripts/demo.sh` starts only the loopback Control Plane and registers fleet Project metadata for `demo/health-details-fixture`; the Project has no WorkspaceBinding, so requests remain queued. With `RUN_REAL_*` enabled, the script also starts the authenticated node, designates that node and fixture path as the sole WorkspaceBinding, and explicitly requests node-local validation. The script does not complete a request.
 
 ```bash
 PI_CC_PORT=5057 ./scripts/demo.sh
@@ -158,7 +167,7 @@ PI_CC_PORT=5057 ./scripts/demo.sh
 
 Sign in, open the printed `/projects/{id}` page, and **Queue request** with the canonical prompt in [demo/FIRST-DEMO.md](demo/FIRST-DEMO.md) (health/details API + tests + README, split writers, independent review).
 
-`--smoke` is quota-free and exits after registration. Without `RUN_REAL_*`, the node stays stopped so UI-queued work cannot spend provider quota. Setting all three opt-ins starts the node; queue the request in the web UI and let the completion gate/UI report the outcome. `--smoke` ignores `RUN_REAL_*`.
+`--smoke` is quota-free and exits after metadata-only Project registration. Default mode leaves the Control Plane running with the node stopped and the Project unbound, so UI-queued work cannot spend provider quota. Setting a `RUN_REAL_*` opt-in starts the node; after it registers, the script designates the binding with that node's configured ID and the prepared fixture path, then requests validation. Once eligible, the next claim creates a durable ExecutionAssignment for that same node and workspace. Queue the request in the web UI and let the completion gate/UI report the outcome. `--smoke` ignores `RUN_REAL_*`.
 
 ## Tests
 
@@ -184,7 +193,7 @@ RUN_REAL_PI_TESTS=1 RUN_REAL_CLAUDE_TESTS=1 RUN_REAL_ANTIGRAVITY_TESTS=1 dotnet 
 |---|---|
 | `ConnectionStrings:ControlPlane` | SQLite |
 | `ControlPlane:BaseUrl` | Browser/API base (example `http://127.0.0.1:5057`) |
-| `Projects:ApprovedRoots` | Allowed registration prefixes |
+| `Projects:ApprovedRoots` (**Node configuration only**) | Node-local allowed WorkspaceBinding prefixes; used by the selected node during revisioned validation, never by Project registration |
 | `Admin:Username` / `Admin:PasswordFile` | Cookie admin |
 | `NodeAuthentication:CredentialFile` / `Header` / `Scheme` | Node hub |
 | `Node:ControlPlaneUrl`, `Id`, `DisplayName`, `HeartbeatSeconds`, `ClaimLeaseSeconds`, `EventSpoolPath`, `RequireCleanStart`, `AllowUntrackedFiles` | Node worker |

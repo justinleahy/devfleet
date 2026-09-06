@@ -104,9 +104,9 @@ The Command Center must never read, copy, store, relay, or transform provider su
 
 ### 3.6 One canonical project workspace
 
-A project has one registered repository path on the node. All managed agents for that project use that path.
+A Project is fleet-owned and contains no node identity or repository path. In the initial phase it may have zero or one designated WorkspaceBinding, which records one node-local canonical repository path after that node validates it.
 
-The system may create ordinary Git branches and request-level commits, but it must not create additional working trees.
+All managed agents for a request use the immutable node and path snapshot in that request's ExecutionAssignment. The system may create ordinary Git branches and request-level commits in that workspace, but it must not create additional working trees, infer that another clone is equivalent, move work between repositories, or fail over to another node.
 
 ### 3.7 Git state is supervisor-owned
 
@@ -132,9 +132,9 @@ The PoC must prove the following end-to-end flow:
 
 ```text
 1. User opens web interface.
-2. User selects a registered project.
-3. User queues a development request.
-4. Project runner claims the request.
+2. User selects a fleet-owned project.
+3. User queues a development request, whether or not a workspace is currently bound.
+4. The Control Plane atomically assigns the request when the designated workspace and its node are eligible.
 5. Root Pi orchestrator starts.
 6. Root Pi creates a plan.
 7. Root Pi delegates work to child agents.
@@ -155,11 +155,12 @@ The PoC is successful only when all criteria below are demonstrated.
 
 ### 5.1 Project and queue
 
-- At least two local Git projects can be registered.
-- A request can be created from the browser for either project.
+- At least two fleet-owned Projects can be registered without a node or repository path.
+- A Project may have zero or one designated WorkspaceBinding in the initial phase.
+- A request can be created from the browser for either Project while it is unbound and remains queued with a scheduling reason.
 - Requests are persisted and shown in project order.
-- Only one write request per project is active in the PoC.
-- Read-only requests may run concurrently if configured.
+- Only one development ExecutionAssignment per Project may be nonterminal, including `Finalizing`, `Cancelling`, and `RecoveryRequired`, regardless of a larger configured write limit.
+- Read-only requests may run concurrently if configured and no recovery policy requires a stricter limit.
 
 ### 5.2 Root orchestration
 
@@ -200,18 +201,19 @@ The PoC is successful only when all criteria below are demonstrated.
 
 ### 5.6 Completion
 
-- The request cannot become completed until mandatory stages pass.
+- Completion, failure, and cancellation do not release assignment ownership until admission is closed and all root, child, mutation, verification, Git, event-spool, reservation, and supervised-process activity is proven quiescent.
 - Final changed files are known.
 - Verification results are persisted.
 - Blocking review findings are resolved or explicitly overridden by the user.
-- Active reservations are released.
+- Active reservations are released before successful completion.
 - A request-level result summary is displayed.
 
 ### 5.7 Durability
 
-- Control-plane restart does not lose projects, requests, sessions, messages, reservations, or historical events.
-- The node reconnects after a control-plane restart.
+- Control-plane restart does not lose Projects, WorkspaceBindings, ExecutionAssignments, requests, sessions, messages, reservations, or historical events.
+- The assigned node reconnects and reconciles its durable assignment inventory before claiming new work.
 - Events created while disconnected are replayed without duplication.
+- Assignment history, including its immutable node and workspace snapshot, remains visible after terminalization and later binding changes.
 
 
 ### 5.8 Node resources
@@ -234,7 +236,7 @@ The PoC is successful only when all criteria below are demonstrated.
 
 - One user.
 - One Fedora workstation node.
-- Multiple registered local projects.
+- Multiple fleet-owned Projects, each with zero or one designated node-local WorkspaceBinding.
 - ASP.NET Core control plane.
 - Blazor web interface.
 - SQLite persistence.
@@ -247,7 +249,7 @@ The PoC is successful only when all criteria below are demonstrated.
 - Muse Code adapter in read-only mode.
 - Internal mail-like coordination service.
 - Strict reservation service.
-- Shared canonical project repository.
+- One designated canonical project workspace per bound Project.
 - Request-level branch and commit support controlled by the supervisor.
 - Basic verification command profiles.
 - Cancellation and human guidance.
@@ -290,9 +292,12 @@ The PoC is successful only when all criteria below are demonstrated.
 | Term | Meaning |
 |---|---|
 | Control Plane | ASP.NET Core service that stores authoritative application state and serves the web UI/API. |
-| Node | .NET worker service installed on an execution machine. It owns project runners and agent processes. |
-| Project | A registered source repository and its policies. |
-| Project Runner | Logical node component that owns one project's queue, workspace state, and execution policy. |
+| Node | .NET worker service installed on an execution machine. It validates its local WorkspaceBindings and supervises only work assigned to its authenticated identity. |
+| Project | Fleet-owned source-project identity and policy aggregate; it contains no NodeId or repository path. |
+| WorkspaceBinding | Zero-or-one designated, revisioned association between a Project, one Node, and one node-local canonical repository path. |
+| ExecutionAssignment | Durable request-specific authorization and immutable placement snapshot assigning one Work Request to one WorkspaceBinding and Node. |
+| Eligibility | Claim-time decision that project policy, current binding validation, authenticated node identity, liveness, runtime readiness, and capacity all permit assignment. |
+| Waiting Reason | Stable scheduling code explaining why an unassigned queued request is not currently eligible. |
 | Work Request | User-submitted unit of development work. |
 | Root Session | Pi session that plans and orchestrates one request. |
 | Child Session | Delegated agent session running through Pi, Claude Code, Antigravity, Muse Code, or another runtime. |
@@ -302,7 +307,7 @@ The PoC is successful only when all criteria below are demonstrated.
 | Fencing Token | Monotonically increasing lease epoch required for mutation. |
 | Request Thread | Mail-like discussion thread associated with a work request. |
 | Completion Gate | Supervisor validation that determines whether a request may become completed. |
-| Canonical Workspace | The one shared repository path registered for a project. |
+| Canonical Workspace | The node-local repository path in a validated WorkspaceBinding; an ExecutionAssignment snapshots it for all sessions of that request. |
 
 ---
 
@@ -332,7 +337,7 @@ The PoC is successful only when all criteria below are demonstrated.
 ┌────────────────────────────────────────────────────────────┐
 │                    .NET Node Service                       │
 │                                                            │
-│ Project runners           Runtime adapters                 │
+│ Assignment supervisors    Runtime adapters                 │
 │ Process supervision       Repository manager               │
 │ Local event spool         Hook gateway                     │
 │ Verification runner       Health and heartbeat             │
@@ -351,7 +356,7 @@ The PoC is successful only when all criteria below are demonstrated.
             │                              │
             └──────────────┬───────────────┘
                            ▼
-                 Canonical Project Workspace
+                 Assigned Canonical Workspace
                  + strict reservation gateway
 ```
 
@@ -388,6 +393,8 @@ The browser never launches or communicates directly with agent processes.
 | Concern | Authoritative component |
 |---|---|
 | Projects and requests | Control Plane |
+| WorkspaceBinding designation and validation state | Control Plane records state; the bound Node validates its own path |
+| ExecutionAssignment placement, state, and history | Control Plane |
 | Current request state | Control Plane reducer |
 | Session process lifecycle | Node |
 | Root Pi context and messages | Pi worker |
@@ -408,14 +415,12 @@ No component may silently replace another component's authority.
 
 ## 10. Project Model
 
-A project registration contains:
+A Project registration contains fleet identity and policy only:
 
 ```json
 {
   "id": "agent-command-center",
   "displayName": "Agent Command Center",
-  "nodeId": "fedora-workstation",
-  "repositoryPath": "/home/user/Developer/agent-command-center",
   "defaultBranch": "main",
   "enabled": true,
   "maxActiveWriteRequests": 1,
@@ -428,24 +433,52 @@ A project registration contains:
 }
 ```
 
-### 10.1 Project validation
+A Project has no `NodeId`, repository path, or repository URL. Registration requires neither a known Node nor a WorkspaceBinding. It validates names, enum values, branch syntax, and numeric policy bounds only; it must not touch a filesystem, invoke Git, infer a Node identity, or require execution placement. An enabled Project can immediately be listed, opened, and accept queued requests.
 
-When a project is registered, the node must verify:
+`maxActiveWriteRequests` remains a policy field, but the effective development-request limit in the initial shared-workspace phase is one even if configuration contains a larger value.
 
-- Path exists.
-- Path is a directory.
-- Path contains a Git repository.
-- Resolved path is not outside approved project roots.
-- Node process can read the repository.
-- Git executable is available.
+### 10.1 WorkspaceBinding model
+
+A Project may have zero or one designated WorkspaceBinding in the initial phase:
+
+```json
+{
+  "id": "binding-01K...",
+  "projectId": "agent-command-center",
+  "nodeId": "fedora-workstation",
+  "repositoryPath": "/home/user/Developer/agent-command-center",
+  "status": "PendingValidation",
+  "validationRevision": 3,
+  "validationCode": null,
+  "validationDetail": null,
+  "validatedAt": null
+}
+```
+
+Binding status is `PendingValidation`, `Valid`, or `Invalid`. Liveness is separate: a valid binding can be temporarily ineligible because its Node is offline, its execution-status observation is stale, or a required runtime route is unavailable.
+
+### 10.2 Node-local, revisioned validation
+
+Creating or editing the binding's Node, path, default-branch policy, or other validation input increments `ValidationRevision` and sets the binding to `PendingValidation`. The Control Plane asks the connection authenticated as the binding's Node to validate the current revision. Only a response from that connection for that exact binding and revision may update the result; stale or wrong-node responses must be rejected.
+
+The bound Node validates:
+
+- Path exists and is a directory.
+- Resolved canonical path is within the node-local approved roots and satisfies symlink rules.
+- Path contains a Git repository and is readable by the Node process.
+- Git is available.
 - Configured default branch exists locally or remotely.
-- The repository is not itself a Git worktree created by this application.
+- The repository is not an application-created Git worktree.
 
-### 10.2 Canonical workspace rule
+Success stores the Node-returned canonical path and marks the current revision `Valid`. Failure stores a stable validation code and bounded operator-safe detail; a missing path is a binding result, not an invalid Project.
 
-All sessions for one project use exactly the registered repository path.
+Path uniqueness is scoped to `(NodeId, CanonicalRepositoryPath)`. The same path text on different nodes does not establish repository equivalence.
 
-The application must not duplicate the workspace per agent.
+### 10.3 Canonical workspace rule
+
+Every root and child session for a Work Request uses the canonical node/path snapshot in its ExecutionAssignment. Child-level placement and per-agent workspace selection are prohibited.
+
+An independent clone on another Node is ineligible even if its ProjectId, branch, or path text matches. The initial phase has no cloning, repository synchronization, workspace relocation, transparent failover, or repository mobility.
 
 ---
 
@@ -511,30 +544,87 @@ A blocked request retains its last active phase separately so it can resume corr
 
 ### 12.1 PoC scheduling rules
 
-- A project may have only one active `development` request.
-- A project may run up to the configured number of read-only requests.
-- Different projects may run concurrently.
-- Child-agent concurrency is limited per project and per request (`Pi:MaxChildAgentsPerRequest`); a role's candidates are tried in route order.
+- Enqueue requires only an enabled existing Project and valid request content. It never requires a WorkspaceBinding or connected Node.
+- An unassigned request remains `Queued`; its waiting reason is scheduling metadata and must not change it to `Blocked` or `Failed`.
+- A Project may have only one nonterminal development ExecutionAssignment, regardless of a larger configured write limit.
+- `Starting`, `Running`, `Finalizing`, `Cancelling`, and `RecoveryRequired` development assignments occupy the one-writer slot. A blocked assigned request also retains the slot.
+- Lease or heartbeat expiry never frees project or node capacity, releases ownership, or makes the same request claimable elsewhere.
+- A Project may run up to the configured number of read-only requests only when assignment and recovery policy permit it.
+- Different Projects may run concurrently.
+- Child-agent concurrency is limited per Project and per request (`Pi:MaxChildAgentsPerRequest`); a role's candidates are tried in route order.
 - Queue ordering is priority first, then creation time.
-- A blocked development request continues to own the active write-request slot unless explicitly suspended or cancelled.
 
-### 12.2 Request claiming
+### 12.2 Eligibility and waiting reasons
 
-The node claims a queued request through an atomic control-plane operation.
+One authoritative eligibility evaluator supplies both claim decisions and scheduling projections. Connected, online, or idle alone never means eligible.
 
-A claim contains:
+All of these conditions must hold at claim time:
+
+- Project execution is enabled by policy.
+- The sole designated WorkspaceBinding exists and its current revision is `Valid`.
+- The calling Node is the binding's Node and the connection is authenticated as that Node.
+- Node liveness, heartbeat, execution-status, and advertised-capacity observations are fresh.
+- Every required root and mandatory role route reports fresh adapter-observed runtime and authentication readiness. Only positive `Ready` evidence is eligible; missing, stale, unsupported, unavailable, or unknown evidence fails closed. Provider credentials and raw provider output never cross the node connection.
+- Control-plane counts show a free Node request slot.
+- Project write/read concurrency and the effective one-writer rule permit the request.
+- No conflicting nonterminal or recovery-required assignment exists.
+- The Work Request is still `Queued` and has no ExecutionAssignment.
+
+Queued waiting reasons are deterministic, nullable scheduling projections with this precedence:
+
+| Code | Meaning |
+|---|---|
+| `project_policy_disabled` | Project policy forbids assignment. |
+| `workspace_binding_missing` | The Project has no designated WorkspaceBinding. |
+| `workspace_validation_pending` | The current binding revision has not been validated. |
+| `workspace_path_missing` | The designated path does not exist on its Node. |
+| `workspace_invalid` | Other node-local validation failed. |
+| `node_offline` | The designated Node is not live and fresh. |
+| `runtime_unavailable` | A required runtime, route, or provider-native authentication observation is not ready. |
+| `capacity_unavailable` | The designated Node has no request slot. |
+| `project_concurrency_unavailable` | Project execution capacity is occupied, including by recovery work. |
+| `ready_for_claim` | All eligibility rules pass; the request awaits the next claim transaction. |
+
+Reasons contain stable codes and bounded safe detail. They are recomputed when project policy, binding revision or validation, node status, runtime readiness, assignment state, or capacity changes.
+
+### 12.3 Atomic execution assignment
+
+The Node requests work through an atomic Control Plane operation. The Control Plane derives NodeId from the authenticated connection and never trusts a body field.
+
+Inside one serializable transaction, the Control Plane selects queued requests in priority/time order, re-evaluates every eligibility rule, inserts the request's sole ExecutionAssignment, creates its opaque claim token, and transitions the Work Request to `Starting`. The unique assignment key on `RequestId` is the duplicate-claim backstop.
+
+An assignment contains:
 
 ```json
 {
   "requestId": "DEV-00042",
+  "projectId": "agent-command-center",
+  "workspaceBindingId": "binding-01K...",
   "nodeId": "fedora-workstation",
+  "repositoryPath": "/home/user/Developer/agent-command-center",
+  "defaultBranch": "main",
+  "bindingValidationRevision": 3,
+  "state": "Starting",
   "claimToken": "opaque-token",
-  "claimedAt": "2026-09-04T19:31:00Z",
-  "leaseExpiresAt": "2026-09-04T19:32:00Z"
+  "assignedAt": "2026-09-04T19:31:00Z",
+  "leaseExpiresAt": "2026-09-04T19:32:00Z",
+  "lastReconciledAt": null
 }
 ```
 
-The node renews the claim while the project runner is healthy.
+The binding id, NodeId, canonical path, default branch, and validation revision are immutable snapshots. Concurrent claims produce one winner, and the assignment is returned only to its authenticated Node. Every root and child session inherits this placement.
+
+ExecutionAssignment states are `Starting`, `Running`, `Finalizing`, `Cancelling`, `RecoveryRequired`, `Completed`, `Failed`, and `Cancelled`.
+
+### 12.4 Authorization, release, and recovery
+
+An ExecutionAssignment is the authority for request-scoped execution. Only the connection authenticated as the assigned Node, presenting the current claim token and matching request, project, binding, and session correlations, may renew the assignment, launch or report owned sessions, publish owned events, operate reservations, read or mutate the repository, perform Git operations, record verification, evaluate completion, or receive cancellation.
+
+The assignment lease records recent proof from the assigned supervisor; it is not a timeout-based transfer of write ownership. Expiry or disconnect changes liveness and moves or projects a nonterminal assignment to `RecoveryRequired`. The assignment remains durable, occupies capacity, blocks another writer, and can be restored only to the same authenticated Node through explicit reconciliation.
+
+Completion, failure, and cancellation acceptance do not release ownership. The assigned Node must first close admission of new root/child work, mutations, verification, and Git operations; drain or stop existing operations and supervised processes; flush assignment events; and provide assignment-bound reservation and repository evidence. Only after the Control Plane validates this quiescence barrier may it commit terminal request, assignment, and result state. Uncertainty remains `RecoveryRequired`.
+
+The ExecutionAssignment and immutable placement snapshot persist through terminal and recovery history. A retry that may execute elsewhere is a new linked Work Request, never mutation or reassignment of the original. The initial phase provides no transparent failover.
 
 ---
 
@@ -1230,7 +1320,7 @@ Cancelled
 | Active model stream, tool, child coordination, review, or verification | Active |
 | Healthy session with no current operation and no blocker | Idle |
 | Reservation conflict, input request, approval, failed required verification, or external change | Blocked |
-| Accepted request completion gate or completed child assignment | Completed |
+| Validated quiescence barrier and committed terminal assignment/request state | Completed |
 | Missed heartbeat past threshold | Disconnected |
 | Unexpected terminal failure | Failed |
 | User or parent cancellation | Cancelled |
@@ -1374,36 +1464,46 @@ State changes and SignalR updates occur transactionally after event persistence.
 
 ## 23. Node-to-Control-Plane Transport
 
-The node opens an outbound authenticated connection to the Control Plane.
+The Node opens an outbound connection authenticated by a stable per-node identity. Node registration metadata must match the connection principal, and the Control Plane binds that NodeId to the connection for its lifetime. Every later operation derives NodeId from the connection; any conflicting payload identity fails closed.
 
 For the PoC, use either:
 
 - gRPC bidirectional streaming, preferred; or
 - a persistent SignalR client connection if it materially reduces implementation effort.
 
+Non-loopback node transport must use HTTPS/WSS with normal certificate-chain and hostname validation. Plaintext remote endpoints, TLS downgrade redirects, and certificate-validation bypasses must be rejected before credentials or assignment data are sent.
+
 The contract must support:
 
-- Node registration.
-- Heartbeat.
-- Request claim and assignment.
-- Event batches.
-- Event acknowledgement.
-- Commands from Control Plane to node.
-- Reconnect and replay.
+- Authenticated Node registration.
+- Heartbeat with fresh execution-status, assignment-inventory, adapter-readiness, capacity, and latest resource observations.
+- Revisioned WorkspaceBinding validation request and result.
+- Atomic ExecutionAssignment claim result containing the immutable binding snapshot and token.
+- Assignment renewal and explicit reconciliation.
+- Assignment-authorized event batches and acknowledgements.
+- Assignment-routed commands, including cancellation.
+- Reconnect, inventory reconciliation, and idempotent replay before new claims.
 
-Heartbeat carries the node's latest resource snapshot when one was taken on that tick. The snapshot is current observation only: observed time, CPU percent, memory used/total, disk used/total, one-minute load, and uptime. Fields other than observed time may be null. The node samples on the existing heartbeat only (cgroup v2 when that is the node's environment). The first CPU sample after start is null. The Control Plane stores the latest snapshot, not a history.
+Heartbeat carries the Node's latest resource snapshot when one was taken on that tick. The snapshot is current observation only: observed time, CPU percent, memory used/total, disk used/total, one-minute load, and uptime. Fields other than observed time may be null. The Node samples on the existing heartbeat only (cgroup v2 when that is the Node's environment). The first CPU sample after start is null. The Control Plane stores the latest snapshot, not a history.
 
+Heartbeat execution status separately reports available request slots; active and recovery-required assignment ids; and fresh adapter-observed runtime/authentication readiness, evidence source, observation time, and routing revision for required routes. System resource telemetry is not eligibility evidence.
 
-### 23.1 Local event spool
+The Control Plane must reject events, session heartbeats, reservations, mutations, mail, verification, completion, and other request-scoped operations unless the authenticated Node, assignment token, request, project, binding, and session authorship all match the retained ExecutionAssignment. Terminal state does not erase authorship: bounded final/history events and duplicate event ids from recorded sessions may be acknowledged, but historical ingestion never authorizes new execution or mutation. Cancellation is routed directly to the assigned Node, not to a group inferred from heartbeat payloads.
 
-The node stores unacknowledged events in local SQLite.
+### 23.1 Local event and assignment spool
 
-On reconnect:
+Before launching work, the Node durably stores the assignment id, token, binding id/revision, immutable workspace snapshot, and root-session identity in owner-only local SQLite. It also stores unacknowledged events there.
 
-1. Send node inventory.
-2. Send active session snapshots.
-3. Replay unacknowledged events in order.
-4. Delete or mark acknowledged only after Control Plane confirmation.
+On reconnect or restart:
+
+1. Re-authenticate the Node identity.
+2. Reconcile the durable assignment inventory and process/repository state.
+3. Deliver cancellation for an owned assignment before requesting any new claim.
+4. Send active session snapshots.
+5. Replay unacknowledged events in order.
+6. Delete or mark events acknowledged only after Control Plane confirmation.
+
+A brief disconnect does not stop supervised processes or release ownership. A missed heartbeat or expired assignment lease places ownership in `RecoveryRequired` and continues to occupy capacity. Reconnection after expiry requires explicit reconciliation with the same authenticated Node and persisted token; normal renewal is insufficient. If that Node never returns, ownership remains recovery-required until audited administrator recovery proves quiescence. No other Node may claim the same request, and there is no automatic failover.
 
 ---
 
@@ -1738,14 +1838,50 @@ Use EF Core with SQLite.
 #### Project
 
 - Id
-- NodeId
 - DisplayName
-- RepositoryPath
 - DefaultBranch
 - ConfigurationJson
 - Enabled
 - CreatedAt
 - UpdatedAt
+- Version
+
+#### WorkspaceBinding
+
+- Id
+- ProjectId
+- NodeId
+- CanonicalRepositoryPath
+- Status
+- ValidationCode
+- ValidationDetail
+- ValidatedAt
+- ValidationRevision
+- CreatedAt
+- UpdatedAt
+- Version
+
+The initial phase enforces at most one binding per Project and uniqueness on `(NodeId, CanonicalRepositoryPath)`. Validation state belongs to the current revision and is independent of Node liveness.
+
+#### ExecutionAssignment
+
+- RequestId
+- ProjectId
+- WorkspaceBindingId
+- NodeIdSnapshot
+- CanonicalRepositoryPathSnapshot
+- DefaultBranchSnapshot
+- BindingValidationRevisionSnapshot
+- State (`Starting`, `Running`, `Finalizing`, `Cancelling`, `RecoveryRequired`, `Completed`, `Failed`, or `Cancelled`)
+- ClaimToken
+- AssignedAt
+- LeaseExpiresAt
+- LastRenewedAt
+- LastReconciledAt
+- TerminalAt
+- Version
+
+The assignment is one-to-one with its Work Request. Placement snapshots are immutable, and the row remains durable through `RecoveryRequired` and terminal history; lease expiry never deletes it or frees ownership.
 
 #### WorkRequest
 
@@ -1767,11 +1903,13 @@ Use EF Core with SQLite.
 - StartedAt
 - CompletedAt
 
+Queued waiting reasons are a nullable scheduling projection computed by the authoritative eligibility evaluator. They are distinct from `BlockedReason` and do not change a queued Work Request's lifecycle state.
 #### AgentSession
 
 - Id
 - ProjectId
 - RequestId
+- ExecutionAssignmentRequestId
 - ParentSessionId
 - AgentName
 - Role
@@ -1793,6 +1931,7 @@ Use EF Core with SQLite.
 
 - EventId
 - SessionId
+- ExecutionAssignmentRequestId
 - Sequence
 - Type
 - OccurredAt
@@ -1824,6 +1963,7 @@ Use EF Core with SQLite.
 - Id
 - ProjectId
 - RequestId
+- ExecutionAssignmentRequestId
 - OwnerSessionId
 - FencingToken
 - State
@@ -1844,6 +1984,7 @@ Use EF Core with SQLite.
 
 - Id
 - RequestId
+- ExecutionAssignmentRequestId
 - ProfileId
 - CommandId
 - Status
@@ -1879,12 +2020,16 @@ Use EF Core with SQLite.
 
 Use optimistic concurrency tokens on:
 
+- Project.
+- WorkspaceBinding.
+- ExecutionAssignment.
 - WorkRequest.
 - AgentSession projection.
 - ReservationLease.
-- Request claim.
 
-Reservation acquisition and handoff require database transactions with immediate conflict checks.
+Enforce one WorkspaceBinding per Project and one ExecutionAssignment per Work Request with database uniqueness. Assignment creation, request `Queued → Starting`, eligibility/capacity checks, and claim-token creation commit in one serializable transaction. Count every nonterminal and recovery-required assignment for one-writer and node capacity; never exclude one because its lease expired.
+
+Reservation acquisition and handoff remain separate transactional fencing operations. Assignment authorization is required in addition to reservation ownership; neither lease substitutes for the other.
 
 ---
 
@@ -1897,9 +2042,13 @@ GET    /api/projects
 POST   /api/projects
 GET    /api/projects/{projectId}
 PATCH  /api/projects/{projectId}
-POST   /api/projects/{projectId}/validate
 GET    /api/projects/{projectId}/status
+PUT    /api/projects/{projectId}/workspace-binding
+POST   /api/projects/{projectId}/workspace-binding/validate
+DELETE /api/projects/{projectId}/workspace-binding
 ```
+
+`POST /api/projects` accepts fleet metadata and policy only. Project reads include a nullable designated WorkspaceBinding summary. Binding removal or replacement is rejected while a nonterminal or recovery-required ExecutionAssignment references it. Validation is asynchronous and remains pending while the bound Node is offline.
 
 ### 30.2 Requests
 
@@ -1913,6 +2062,16 @@ POST   /api/requests/{requestId}/retry
 GET    /api/requests/{requestId}/events
 GET    /api/requests/{requestId}/result
 ```
+
+`POST /api/requests/{requestId}/retry` creates a new linked Work Request. It never reuses or mutates the original request's ExecutionAssignment.
+
+Request creation requires no binding or online Node. Request list/detail responses include a nullable scheduling status for queued work and the immutable ExecutionAssignment projection when assigned.
+
+Request cancellation is idempotent and returns the current durable request/assignment state.
+Queued work with no assignment becomes `Cancelled` in one transaction and cannot later be
+claimed. Assigned nonterminal work changes both records to `Cancelling` before any best-effort
+node command; an offline owner receives a cancel disposition during reconnect reconciliation.
+Only the assignment-bound quiescence terminalizer may advance assigned work to `Cancelled`.
 
 ### 30.3 Sessions
 
@@ -1945,7 +2104,7 @@ POST   /api/reservations/{leaseId}/force-release
 POST   /internal/reservations/authorize-mutation
 ```
 
-Internal endpoints require node authentication and are not exposed to the browser.
+Internal request-scoped endpoints require both the connection-authenticated assigned Node and matching ExecutionAssignment authorization; they are not exposed to the browser.
 
 ---
 
@@ -1966,6 +2125,10 @@ Display:
 - Project cards.
 - Global attention items.
 - Current node CPU, memory, disk, one-minute load, and uptime, including honest unavailable states.
+- Project workspace/eligibility state: `No workspace`, `Validation pending`, `Workspace path missing`, `Workspace invalid`, `Node offline`, `Runtime unavailable`, `At capacity`, or `Ready`.
+- Registration remains available with zero connected Nodes, asks only for Project identity and policy, and states: `Creates a fleet-owned project. Designate a workspace on a node when execution is needed.`
+
+Node online badges are liveness facts, not eligibility claims. Project cards must not display a fabricated NodeId or path.
 
 
 Example:
@@ -1990,11 +2153,12 @@ Node workstation   online · CPU — · mem 2.0 / 8.0 GiB · disk 10 / 100 GiB �
 
 Display:
 
-- Node status.
-- Repository path and branch.
-- New request composer.
+- Fleet-owned Project identity and policy.
+- A Workspace panel with nullable Node/path, validation status, code, time, revision, and current eligibility.
+- Actions to designate, edit, revalidate, or remove the sole WorkspaceBinding; removal and replacement are disabled while an active or recovery assignment references it.
+- New request composer, enabled even when no WorkspaceBinding exists, with notice that work remains queued until a designated workspace is eligible.
 - Active request.
-- Queue.
+- Queue with deterministic scheduling reasons.
 - Recent completed requests.
 - Active agent count.
 - Active reservations.
@@ -2005,7 +2169,11 @@ Display:
 
 - Original request.
 - Current phase and status reason.
-- Root and child agent tree.
+- For an unassigned queued request, the precise scheduling reason and operator action.
+- For an assigned request, the immutable Node/workspace/revision snapshot, assigned time, assignment state, and last reconciliation.
+- For disconnected or expired ownership, `Ownership uncertain — recovery required; DevFleet will not start a second writer.`
+- Retained assignment history after completion, failure, cancellation, binding edits, and restart.
+- Root and child agent tree; every child inherits the request's assignment and no child-level Node picker exists.
 - Structured plan.
 - Live event timeline.
 - Messages.
@@ -2014,7 +2182,7 @@ Display:
 - Verification results.
 - Review findings.
 - Final result.
-- Cancel and send-guidance actions.
+- Cancel and send-guidance actions. Cancellation targets the assigned Node and does not release ownership before quiescence.
 
 ### 31.4 Agent tree
 
@@ -2081,7 +2249,7 @@ The UI labels missing counters **Unavailable**. Estimated cost is each runtime's
 
 ## 32. Completion Gate
 
-`submit_completion` is accepted only when all required conditions are true.
+`submit_completion` may begin finalization only when all required conditions are true. Acceptance moves the ExecutionAssignment to `Finalizing`; it does not make the request terminal or release ownership.
 
 ### 32.1 Mandatory conditions
 
@@ -2090,8 +2258,10 @@ The UI labels missing counters **Unavailable**. Estimated cost is each runtime's
 - Independent review completed.
 - No unresolved blocking findings.
 - Required verification commands passed.
-- No active write operations.
-- No active reservations, except explicitly quarantined recovery leases.
+- Admission of new root/child work, mutations, verification, and Git operations is durably closed.
+- All root and child operations, writes, verification, Git work, and supervised processes are quiescent.
+- Assignment event spools are flushed or durably accounted for.
+- No active reservations remain, and assignment-bound reservation and repository evidence is recorded.
 - Repository diff was captured.
 - Changed-file ownership is known.
 - Request result summary exists.
@@ -2111,6 +2281,8 @@ The UI labels missing counters **Unavailable**. Estimated cost is each runtime's
 
 The root receives this response and must resolve the missing requirements.
 
+The Control Plane commits terminal request, ExecutionAssignment, and result state only after validating this assignment-bound quiescence barrier. Failure and cancellation use the same release predicate. Missing or uncertain proof moves the assignment to `RecoveryRequired` and continues to block another writer.
+
 ---
 
 ## 33. Failure and Recovery
@@ -2120,14 +2292,14 @@ The root receives this response and must resolve the missing requirements.
 - Node remains running.
 - Agent processes remain running.
 - Node spools events locally.
-- Node reconnects and replays.
+- Node reconnects, reconciles its durable assignment inventory before new claims, and replays events.
 - Browser reloads current projections from SQLite.
 
 ### 33.2 Node restart
 
-For the PoC, active child processes may be marked failed if they cannot be reattached.
+For the PoC, active child processes may be marked failed if they cannot be reattached, but that status is not evidence that assignment ownership ended. The ExecutionAssignment remains `RecoveryRequired` until process and repository quiescence are proven.
 
-The design must record enough process and provider-session metadata to support future reattachment.
+The design must record enough assignment, process, and provider-session metadata to support reconciliation and future reattachment.
 
 ### 33.3 Runtime process crash
 
@@ -2156,6 +2328,15 @@ The design must record enough process and provider-session metadata to support f
 - Do not crash the Node.
 - Fail the session only when synchronization cannot continue safely.
 
+### 33.7 Assignment disconnect, restart, and lease expiry
+
+- Control-plane restart retains every ExecutionAssignment in SQLite; the Node reconciles its durable assignment inventory before any new claim.
+- Node restart must prove old process trees are stopped or safely reattach them. Unknown process or repository state becomes `RecoveryRequired`.
+- Missed heartbeat or assignment-lease expiry changes liveness only. The assignment remains owned, occupies project and node capacity, and cannot be claimed by another Node.
+- A reconnect after expiry may restore the same assignment only through explicit reconciliation by the same authenticated Node with its persisted token and binding revision.
+- Startup validation or runtime failure after assignment blocks that assignment on its Node; it never returns the same Work Request to the queue.
+- If the assigned Node never returns, audited recovery must prove process death, reservation disposition, event-spool disposition, repository state, and fencing rotation before ownership can be released. There is no transparent failover.
+
 ---
 
 ## 34. Security Requirements
@@ -2170,15 +2351,16 @@ The design must record enough process and provider-session metadata to support f
 
 ### 34.2 Node authentication
 
-- Node uses an application-generated credential stored in a user-private file.
+- Each Node uses a separately provisioned credential stored in a user-private file.
+- The credential authenticates a stable NodeId; NodeId is derived from the connection principal rather than accepted from message bodies.
 - File permissions must be `0600` on Linux.
-- Node connection is authenticated.
-- Commands include correlation IDs and request IDs.
+- Request-scoped node actions require both the authenticated assigned Node identity and the current ExecutionAssignment token/correlation.
+- Commands include correlation IDs, request IDs, and assignment IDs.
 
 ### 34.3 Filesystem boundary
 
-- Only registered project paths may be used.
-- Resolve and validate every path.
+- A current valid WorkspaceBinding may supply a canonical path for assignment. Active or recovery work may use only its immutable ExecutionAssignment path snapshot under matching assignment authorization; a historical snapshot alone grants no filesystem authority.
+- Resolve and validate every path, and recheck approved-root containment for every filesystem operation.
 - Reject path traversal and external symlink resolution.
 - Agents cannot reserve or modify `.git/`.
 - Application configuration and hooks live outside agent-writable project paths.
@@ -2228,6 +2410,9 @@ node:
   maxSessions: 12
   heartbeatSeconds: 10
   eventSpoolPath: ~/.local/share/devfleet/node-spool.db
+  credentialPath: ~/.config/devfleet/node.credential
+  approvedRoots:
+    - /home/user/Developer
 
 orchestration:
   enabledByDefault: true
@@ -2243,16 +2428,6 @@ reservations:
   renewalSeconds: 30
   atomicMultiScopeAcquisition: true
   failClosed: true
-
-projects:
-  - id: agent-command-center
-    path: /home/user/Developer/agent-command-center
-    defaultBranch: main
-    maxActiveWriteRequests: 1
-    maxReadOnlyRequests: 2
-    createRequestBranch: true
-    createRequestCommit: true
-    autoMerge: false
 
 pi:
   model: codex/default
@@ -2362,23 +2537,23 @@ Implementation must proceed in vertical slices and keep builds passing.
 
 ### Milestone 1 — Projects and requests
 
-- Implement Project and WorkRequest entities.
-- Implement project registration and validation.
-- Implement queue APIs.
-- Build basic dashboard and request composer.
+- Implement fleet-owned Project and WorkRequest entities.
+- Implement metadata-only Project registration and enqueue without a WorkspaceBinding.
+- Implement zero-or-one WorkspaceBinding designation and revisioned node-local validation.
+- Implement queue APIs and deterministic unbound waiting reasons.
+- Build the dashboard, Workspace panel, and request composer.
 
-**Exit condition:** A persisted request can be queued for a valid project.
+**Exit condition:** A Project can be registered and a persisted request queued with zero Nodes or bindings; it reports `workspace_binding_missing`.
 
 ### Milestone 2 — Node connection
 
-- Implement Node worker.
-- Implement registration, heartbeat, claim, and event batch transport.
-- Implement local event spool and replay.
-- Show node online/offline in UI.
-- Show current node CPU, memory, disk, load, and uptime; render unavailable fields as unavailable.
+- Implement Node worker and stable per-node authenticated identity.
+- Implement registration, heartbeat execution status, WorkspaceBinding validation, atomic ExecutionAssignment, reconciliation, and assignment-authorized event transport.
+- Implement the durable local assignment/event spool and idempotent replay.
+- Show distinct Node liveness, binding validation, runtime readiness, capacity, and recovery states in the UI.
+- Show current Node CPU, memory, disk, load, and uptime; render unavailable fields as unavailable.
 
-
-**Exit condition:** Node claims a request and survives Control Plane restart.
+**Exit condition:** An eligible bound Node receives one durable assignment; Control Plane restart reconciles that same assignment before any new claim.
 
 ### Milestone 3 — Pi root session
 
@@ -2451,20 +2626,23 @@ Implementation must proceed in vertical slices and keep builds passing.
 
 - Implement trusted verification profiles.
 - Implement build resource reservation.
-- Implement completion gate.
+- Implement completion gate and assignment `Finalizing` state.
+- Close admission and prove root/child, mutation, verification, Git, process, event, reservation, and repository quiescence before terminal state releases ownership.
 - Store result summary, changed files, tests, and findings.
 
-**Exit condition:** A request cannot complete until review and verification pass.
+**Exit condition:** A request cannot become terminal or release the one-writer slot until review, verification, and the assignment quiescence barrier pass.
 
 ### Milestone 10 — Recovery and demonstration
 
 - Add process crash handling.
-- Add disconnected status.
-- Add reservation recovery inspection.
+- Add disconnected, `Cancelling`, and `RecoveryRequired` assignment states.
+- Persist and reconcile the Node's assignment journal before new claims.
+- Prove lease expiry and permanent Node loss never authorize a second writer or transparent failover.
+- Add reservation and repository recovery inspection.
 - Add end-to-end demo fixtures.
 - Document local setup and provider login prerequisites.
 
-**Exit condition:** All acceptance scenarios pass.
+**Exit condition:** All acceptance scenarios pass, including restart reconciliation and no reassignment while ownership is uncertain.
 
 ---
 
@@ -2482,7 +2660,7 @@ Required areas:
 - Expiration and recovery transitions.
 - Status reducer precedence.
 - Completion-gate evaluation.
-- Queue ordering and request claims.
+- Queue ordering, waiting-reason precedence, eligibility, and atomic ExecutionAssignment.
 - Runtime capability projection.
 
 ### 38.2 Integration tests
@@ -2494,6 +2672,10 @@ Required areas:
 - Runtime parser behavior with malformed lines.
 - Claude hook allow and deny decisions using fixtures.
 - Repository external-change detection.
+- Fleet-only Project registration and enqueue with zero Nodes or WorkspaceBindings.
+- Revisioned WorkspaceBinding validation accepted only from the bound authenticated Node.
+- Assignment authorization rejects foreign node, request, project, binding, token, session, reservation, verification, completion, and event correlations.
+- Lease expiry, disconnect, and restart retain one-writer ownership until explicit reconciliation and quiescence.
 
 ### 38.3 Runtime contract tests
 
@@ -2511,6 +2693,14 @@ RUN_REAL_MUSE_TESTS=1
 Contract tests must record the detected CLI version and fail with an actionable compatibility message.
 
 ### 38.4 End-to-end scenarios
+
+#### Scenario 0 — Register and enqueue while unbound
+
+1. Start with zero registered Nodes.
+2. Register a Project using identity and policy only.
+3. Enqueue a development Work Request.
+4. Project and request creation succeed without a Node or path.
+5. Request remains `Queued` with `workspace_binding_missing`; no NodeId or path is fabricated.
 
 #### Scenario A — Normal delegated change
 
@@ -2564,6 +2754,15 @@ Contract tests must record the detected CLI version and fail with an actionable 
 3. Node spools events.
 4. Node reconnects.
 5. State and event history recover without duplicates.
+
+#### Scenario G — Expired assignment does not fail over
+
+1. Assign a development request to its eligible designated WorkspaceBinding.
+2. Disconnect the Node while its root or repository state may still be active.
+3. Let the heartbeat and assignment lease expire.
+4. Observe `RecoveryRequired` and the occupied one-writer slot.
+5. Attempt a claim from another Node or independent clone; no assignment is returned.
+6. Reconnect the original authenticated Node and reconcile the same durable assignment, or keep it recovery-required until audited quiescence is proven.
 
 ---
 

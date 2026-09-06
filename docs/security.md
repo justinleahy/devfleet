@@ -1,6 +1,6 @@
 # Security
 
-Single local administrator. Loopback by default. No anonymous web UI or API (except loopback `/health`). Provider OAuth stays in official CLIs.
+Single local administrator. Loopback by default. No anonymous web UI or API (except loopback `/health`). Provider OAuth stays in official CLIs. Plain HTTP is allowed only for a positively verified loopback endpoint; every non-loopback node connection uses HTTPS/WSS.
 
 ## Threat model (PoC)
 
@@ -8,14 +8,14 @@ Single local administrator. Loopback by default. No anonymous web UI or API (exc
 |---|---|
 | Anonymous browser on the workstation | Cookie auth + antiforgery; no anonymous pages except `/health` on loopback |
 | CSRF against login/logout and mutating APIs | `UseAntiforgery`; login is an antiforgery form; logout is POST |
-| Node impersonation | High-entropy credential in a `0600` file; SignalR `/nodeHub` uses the node token policy only |
-| Credential leak in logs/API | Node secret is never logged or returned; provider tokens never enter SQLite or agent payloads |
-| Path traversal / symlink escape | Only `Projects:ApprovedRoots`; resolved canonical paths; `.git/` cannot be reserved |
+| Node impersonation | Distinct manually provisioned credential per node; authentication creates a principal containing the stable `NodeId`; hub code derives identity from the connection and rejects metadata mismatches |
+| Credential leak in logs/API/transport payloads | Node secrets are confined to the HTTP authentication layer and are never logged, returned, or placed in SignalR DTOs; provider credentials never leave the node or enter SQLite or agent payloads |
+| Path traversal / symlink escape | Node-local `Projects:ApprovedRoots`; revisioned canonical-path and Git validation by the node that owns the path namespace; `.git/` cannot be reserved |
 | Prompt injection widening permissions | Runtime executables, profiles, hooks, project roots, and completion gates are configuration/supervisor-owned |
 | Reservation bypass via Claude tools | Host-owned `--settings`; `--setting-sources ""` disables repository/user hook discovery; PreToolUse/PostToolUse gate on loopback |
 | Shell escape for writers | Pi children lack unrestricted `edit`/`write`/`bash`; mutations go through reserved tools + `AuthorizeMutation` |
-| Stale writer after crash | Leases go `RecoveryRequired`; fencing token must match |
-| Binding to the LAN accidentally | Kestrel URLs default to `127.0.0.1` |
+| Stale or duplicate writer after disconnect | A nonterminal or recovery assignment retains ownership and consumes the project write slot; lease/heartbeat expiry never authorizes reassignment; fencing tokens must match |
+| Binding to the LAN accidentally | Kestrel and node URLs default to `127.0.0.1`; plaintext remote node URLs, TLS downgrade redirects, and certificate-validation bypasses are rejected |
 
 Out of scope: multi-user tenancy, public internet hosting, full VM sandboxing.
 
@@ -38,23 +38,27 @@ Typed-options defaults (when unset) are under `~/.config/pi-command-center/`. `s
 |---|---|
 | `$HOME/.local/share/devfleet/admin.password.hash` | `Admin:PasswordFile` (Identity hash, `0600`) |
 | `$HOME/.local/share/devfleet/admin.password` | One-time plaintext for the operator (`0600`); not what the runtime loads |
-| `$HOME/.local/share/devfleet/node.token` | `NodeAuthentication:CredentialFile` (256-bit hex, `0600`) |
+| `$HOME/.local/share/devfleet/node.token` | One node's `NodeAuthentication:CredentialFile` for the explicit loopback local installation (256-bit hex, `0600`) |
 | `$HOME/.local/share/devfleet/local.env` | Sourced by `scripts/demo.sh` |
 | `$HOME/.local/share/devfleet/pi-command-center.env` | systemd `EnvironmentFile=` (owner-only, absolute host paths) |
 
-### Node (token, `/nodeHub` only)
+### Node (per-node credential, `/nodeHub` only)
 
 | Key | Meaning |
 |---|---|
-| `NodeAuthentication:CredentialFile` | Application-generated 256-bit hex token (`0600`). Same file on Control Plane and Node |
-| `NodeAuthentication:Header` | HTTP header (`Authorization`) |
-| `NodeAuthentication:Scheme` | Auth scheme (`Bearer`) |
+| `NodeAuthentication:CredentialFile` | Node-side `0600` file containing that node's unique application-generated 256-bit credential |
+| `NodeAuthentication:Header` | HTTP authentication header (`Authorization`) |
+| `NodeAuthentication:Scheme` | Authentication scheme (`Bearer`) |
 
-The Node process reads the file and authenticates the SignalR connection. The secret is never written to logs, never returned on APIs, and never given to agents.
+The operator manually provisions a distinct credential for each node and the corresponding control-plane identity mapping. Automatic credential distribution is out of scope. Successful authentication creates a principal containing exactly one stable `NodeId`; `Register` metadata must match it, and the connection remains bound to it. Every later hub method derives the caller from that connection. A fleet-shared token followed by a body-supplied `NodeId` does not authenticate multiple node identities.
+
+The raw node credential is used only by the HTTP authentication layer. It is never written to a SignalR request, response, callback, event, assignment, or readiness DTO; never logged or returned by an API; and never given to agents. For a non-loopback control-plane URL, the node requires HTTPS/WSS with normal certificate-chain and hostname validation and rejects plaintext, downgrade redirects, and validation bypasses before sending the authentication header or assignment data. Positively verified loopback is the sole HTTP exception.
+
+Provider/runtime authentication readiness crosses the hub only as typed status (`Ready`, `Unavailable`, or `Unknown`), stable evidence source, observation time, and routing revision. Provider credentials, credential contents, account identifiers, and raw provider output never cross the node transport. Credential-file presence alone is not authentication evidence.
 
 ### Startup failure
 
-Outside the `Testing` environment, missing `Admin:PasswordFile` or `NodeAuthentication:CredentialFile` (or unreadable/empty files) **fails process start** with an actionable message to run Control Plane `--setup` / `scripts/setup-local.sh`. No insecure built-in password. `--setup` is explicit; it is not invoked on ordinary `dotnet run`.
+Outside the `Testing` environment, a missing `Admin:PasswordFile` on the control plane or missing node-side `NodeAuthentication:CredentialFile` (or an unreadable/empty file) **fails that process start** with an actionable provisioning message. No insecure built-in password or node credential is generated during ordinary startup. `--setup` is explicit; it is not invoked on ordinary `dotnet run`.
 
 ### Data Protection keys (cookie persistence)
 
@@ -64,7 +68,7 @@ Outside the `Testing` environment, missing `Admin:PasswordFile` or `NodeAuthenti
 
 Purpose: keep authenticated browser sessions valid across Control Plane process restarts. Keys must live under the canonical data root that survives unit restarts (production: `~/.local/share/devfleet` data-protection keys; local typed-options default: `~/.config/pi-command-center/data-protection-keys`).
 
-This is **not** the admin password hash (`Admin:PasswordFile`) and **not** the node token (`NodeAuthentication:CredentialFile`). Those authenticate operators and nodes. Data Protection keys only protect cookies, antiforgery tokens, and other ASP.NET Core payloads so a second host sharing the same database, auth material, and key directory can accept a cookie issued by the first.
+This is **not** the admin password hash (`Admin:PasswordFile`) and **not** any node authentication credential. Those authenticate operators and individual nodes. Data Protection keys only protect cookies, antiforgery tokens, and other ASP.NET Core payloads so a second host sharing the same database, auth identity registry, and key directory can accept a cookie issued by the first.
 
 `DataProtection:KeysDirectory` is created with owner-only directory mode (`0700`) on Unix. File persistence alone does **not** encrypt keys at rest.
 
@@ -73,11 +77,17 @@ This is **not** the admin password hash (`Admin:PasswordFile`) and **not** the n
 | Path | Mode |
 |---|---|
 | Data root (`~/.local/share/devfleet`) | `0700` |
-| `Admin:PasswordFile`, `NodeAuthentication:CredentialFile`, node spool DB, Claude session settings | `0600` (directories `0700`) |
+| `Admin:PasswordFile`, each node's `NodeAuthentication:CredentialFile`, node spool DB, Claude session settings | `0600` (directories `0700`) |
 | `DataProtection:KeysDirectory` | `0700` |
 | Claude reservation hook script | owner-only executable |
 
 `scripts/setup-local.sh` creates these. systemd units load `EnvironmentFile=` from that private directory.
+
+## Node-local workspace trust
+
+`Projects:ApprovedRoots` belongs to each node, not to the control plane: only that machine can define and inspect its local path namespace. A workspace designation starts a new validation revision. The control plane invokes `ValidateWorkspaceBinding` only on the connection authenticated as the binding's node, and the node canonicalizes the path and applies its ApprovedRoots, filesystem, and Git checks. The result is bounded and structured; it includes the same binding, project, and revision plus the canonical path on success. The control plane accepts it only from that node and only while the revision remains current. Stale-revision and cross-node results fail closed.
+
+A Project can exist and accept queued requests without a WorkspaceBinding. A path grants no authority by itself: it is meaningful only with its authenticated node and current binding revision.
 
 ## Reservation and hook boundary
 
@@ -85,13 +95,15 @@ This is **not** the admin password hash (`Admin:PasswordFile`) and **not** the n
 - Fencing tokens are monotonic per project. Stale tokens → `invalid_fencing_token`.
 - Claude: settings and hook live under `$XDG_DATA_HOME/devfleet/claude-runtime/<session>/`; `--setting-sources ""` prevents merged project or user hooks, while the explicit host `--settings` file installs the reservation gate.
 - Pi reserved tools must present lease id + fencing token; the node calls `AuthorizeMutation` immediately before the write.
+- Node event and control authorization is assignment-scoped. The authenticated connection `NodeId`, durable `ExecutionAssignment`, claim token, binding revision, session, request, and project must correlate before renewal, event publication, heartbeat session membership, reservation, mutation, verification, completion, mail, cancellation, repository/Git work, or child-session creation.
+- Disconnect, heartbeat expiry, and claim-lease expiry change liveness or require reconciliation; they do not release writer ownership. Completion, failure, or cancellation becomes releasable only after assignment-bound quiescence closes admission and accounts for supervised processes, mutations, verification, Git work, reservations, and spooled events. Uncertainty remains `RecoveryRequired`; there is no automatic failover.
 - Antigravity runs inside Bubblewrap with a private PID namespace plus private `/proc`, and with the host root and repository read-only. Its provider-owned `~/.gemini` credential/cache/log directory is the sole writable home-state bind required by the official CLI; private empty mounts hide Pi, Claude, and Muse credential stores. The node unit keeps an empty capability set and the inner read-only root, rather than systemd's namespace-based kernel, control-group, clock, and hostname protections, because those redundant directives prevent Bubblewrap from mounting the isolated `/proc`.
 - Verification runs inside Bubblewrap with networking and the host process table isolated, user homes/runtime sockets hidden, host root read-only, and only the canonical repository plus a temporary HOME writable.
 
 ## Provider credentials
 
-- Never stored, copied, or relayed. Claude Code and `agy` keep their own login caches.
-- Missing provider auth: session dimensions `Attention=InputRequired`, `WorkState=Blocked`, reason naming **Claude Code native login** or **agy native login** — not a generic crash and not a Command Center credential form.
+- Never stored, copied, or relayed. Claude Code, `agy`, Muse, and Pi providers keep their own node-local login caches. Credential contents never appear in execution-readiness observations or cross the node transport.
+- Missing provider auth: typed readiness is `Unavailable` or `Unknown`; an already assigned session uses `Attention=InputRequired`, `WorkState=Blocked`, with a reason naming the provider's native login — not a generic crash and not a Command Center credential form. It remains assigned to that node.
 - Operators run `claude` / `agy` login locally before any `RUN_REAL_*` path. `scripts/demo.sh --smoke` does not start those CLIs and does not collect provider tokens.
 - Do not paste provider tokens into Command Center config, SQLite, or the admin password files.
 - Model selectors are `<provider>/<model>`: the reserved prefixes `claude-code`, `antigravity`, and `muse` select their official-harness adapters; every other valid prefix goes **only** to Pi as the runtime adapter (`codex` aliases Pi's `openai-codex`, all others pass through identically). There is no path from a selector to an arbitrary executable, and an unknown or unauthenticated Pi provider fails closed rather than falling back.
@@ -99,4 +111,4 @@ This is **not** the admin password hash (`Admin:PasswordFile`) and **not** the n
 
 ## Logging
 
-Redact secrets; bound stderr tails (`Claude:MaxStderrLines`, `Antigravity:MaxStderrLines`, default 200). Do not dump environment wholesale. Protocol stdout is not a log stream. Audit force-release, cancel, completion override, and supervisor Git mutations.
+Redact secrets; bound stderr tails (`Claude:MaxStderrLines`, `Antigravity:MaxStderrLines`, default 200). Do not dump environment wholesale. Protocol stdout is not a log stream. Never log node credentials, authentication headers, provider credentials, or raw readiness evidence. Audit force-release, cancellation, completion override, assignment reconciliation/recovery, workspace validation changes, and supervisor Git mutations.

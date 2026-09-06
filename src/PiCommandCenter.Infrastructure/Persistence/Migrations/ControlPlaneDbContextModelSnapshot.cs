@@ -232,6 +232,10 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("ExecutionStatusJson")
+                        .HasMaxLength(131072)
+                        .HasColumnType("TEXT");
+
                     b.Property<long>("LastHeartbeatAt")
                         .HasColumnType("INTEGER");
 
@@ -297,14 +301,6 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.Property<int>("MaxReadOnlyRequests")
                         .HasColumnType("INTEGER");
 
-                    b.Property<Guid>("NodeId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("RepositoryPath")
-                        .IsRequired()
-                        .HasMaxLength(1024)
-                        .HasColumnType("TEXT");
-
                     b.Property<bool>("RequireCleanStart")
                         .HasColumnType("INTEGER");
 
@@ -317,27 +313,19 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("RepositoryPath")
-                        .IsUnique()
-                        .HasDatabaseName("IX_Projects_RepositoryPath");
-
                     b.ToTable("Projects", (string)null);
                 });
 
-            modelBuilder.Entity("PiCommandCenter.Domain.Requests.RequestClaim", b =>
+            modelBuilder.Entity("PiCommandCenter.Domain.Projects.WorkspaceBinding", b =>
                 {
-                    b.Property<Guid>("RequestId")
+                    b.Property<Guid>("Id")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("ClaimToken")
-                        .IsRequired()
-                        .HasMaxLength(128)
+                    b.Property<string>("CanonicalRepositoryPath")
+                        .HasMaxLength(1024)
                         .HasColumnType("TEXT");
 
-                    b.Property<long>("ClaimedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long>("LeaseExpiresAt")
+                    b.Property<long>("CreatedAt")
                         .HasColumnType("INTEGER");
 
                     b.Property<Guid>("NodeId")
@@ -346,20 +334,122 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("ProjectId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("RepositoryPath")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("UpdatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("ValidatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ValidationCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ValidationDetail")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("ValidationRevision")
+                        .HasColumnType("INTEGER");
+
                     b.Property<long>("Version")
                         .IsConcurrencyToken()
                         .HasColumnType("INTEGER");
 
+                    b.HasKey("Id");
+
+                    b.HasIndex("NodeId", "CanonicalRepositoryPath")
+                        .IsUnique()
+                        .HasDatabaseName("IX_WorkspaceBindings_NodeId_CanonicalRepositoryPath");
+
+                    b.HasIndex("NodeId", "RepositoryPath")
+                        .IsUnique()
+                        .HasDatabaseName("IX_WorkspaceBindings_NodeId_RepositoryPath");
+
+                    b.HasIndex("ProjectId")
+                        .IsUnique()
+                        .HasDatabaseName("IX_WorkspaceBindings_ProjectId");
+
+                    b.ToTable("WorkspaceBindings", (string)null);
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Domain.Requests.ExecutionAssignment", b =>
+                {
+                    b.Property<Guid>("RequestId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("AssignedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("BindingValidationRevisionSnapshot")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("CanonicalRepositoryPathSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ClaimToken")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DefaultBranchSnapshot")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("LastReconciledAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("LastRenewedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("LeaseExpiresAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("NodeIdSnapshot")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("TerminalAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("WorkspaceBindingId")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("RequestId");
 
-                    b.HasIndex("RequestId")
-                        .IsUnique()
-                        .HasDatabaseName("IX_RequestClaims_RequestId");
+                    b.HasIndex("NodeIdSnapshot", "State")
+                        .HasDatabaseName("IX_ExecutionAssignments_NodeIdSnapshot_State");
 
-                    b.HasIndex("ProjectId", "LeaseExpiresAt")
-                        .HasDatabaseName("IX_RequestClaims_ProjectId_LeaseExpiresAt");
+                    b.HasIndex("ProjectId", "State")
+                        .HasDatabaseName("IX_ExecutionAssignments_ProjectId_State");
 
-                    b.ToTable("RequestClaims", (string)null);
+                    b.HasIndex("WorkspaceBindingId")
+                        .HasDatabaseName("IX_ExecutionAssignments_WorkspaceBindingId");
+
+                    b.ToTable("ExecutionAssignments", (string)null);
                 });
 
             modelBuilder.Entity("PiCommandCenter.Domain.Requests.WorkRequest", b =>
@@ -672,7 +762,7 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
             modelBuilder.Entity("PiCommandCenter.Infrastructure.Persistence.SessionEvent", b =>
                 {
                     b.Property<string>("EventId")
-                        .HasMaxLength(64)
+                        .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("NodeId")
@@ -955,12 +1045,39 @@ namespace PiCommandCenter.Infrastructure.Persistence.Migrations
                         .IsRequired();
                 });
 
-            modelBuilder.Entity("PiCommandCenter.Domain.Requests.RequestClaim", b =>
+            modelBuilder.Entity("PiCommandCenter.Domain.Projects.WorkspaceBinding", b =>
                 {
+                    b.HasOne("PiCommandCenter.Domain.Nodes.FleetNode", null)
+                        .WithMany()
+                        .HasForeignKey("NodeId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PiCommandCenter.Domain.Projects.Project", null)
+                        .WithOne()
+                        .HasForeignKey("PiCommandCenter.Domain.Projects.WorkspaceBinding", "ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("PiCommandCenter.Domain.Requests.ExecutionAssignment", b =>
+                {
+                    b.HasOne("PiCommandCenter.Domain.Nodes.FleetNode", null)
+                        .WithMany()
+                        .HasForeignKey("NodeIdSnapshot")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("PiCommandCenter.Domain.Projects.Project", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
                     b.HasOne("PiCommandCenter.Domain.Requests.WorkRequest", null)
                         .WithOne()
-                        .HasForeignKey("PiCommandCenter.Domain.Requests.RequestClaim", "RequestId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .HasForeignKey("PiCommandCenter.Domain.Requests.ExecutionAssignment", "RequestId")
+                        .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired();
                 });
 

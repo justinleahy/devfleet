@@ -178,28 +178,27 @@ public class WorkRequestTests
     }
 
     [Fact]
-    public void Cancel_is_allowed_until_a_terminal_state_is_reached()
+    public void Cancellation_requires_queued_admission_or_a_quiescence_confirmation()
     {
         var queued = Enqueue();
-        queued.Cancel(Now);
+        Assert.Throws<InvalidOperationException>(() => queued.ConfirmCancellation(Now));
+        queued.CancelQueued(Now);
         Assert.Equal(WorkRequestStatus.Cancelled, queued.Status);
-        Assert.Throws<InvalidOperationException>(() => queued.Cancel(Now));
+
+        var assigned = Enqueue();
+        assigned.Start(Now);
+        Assert.Throws<InvalidOperationException>(() => assigned.CancelQueued(Now));
+        assigned.BeginCancelling(Now);
+        Assert.Equal(WorkRequestStatus.Cancelling, assigned.Status);
+        assigned.ConfirmCancellation(Now);
+        Assert.Equal(WorkRequestStatus.Cancelled, assigned.Status);
 
         var blocked = Enqueue();
         blocked.Start(Now);
         blocked.Block(Now);
-        blocked.Cancel(Now);
-        Assert.Equal(WorkRequestStatus.Cancelled, blocked.Status);
+        blocked.BeginCancelling(Now);
+        Assert.Equal(WorkRequestStatus.Cancelling, blocked.Status);
         Assert.Null(blocked.BlockedPhase);
-
-        var completed = Enqueue();
-        completed.Start(Now);
-        completed.BeginPlanning(Now);
-        completed.BeginExecuting(Now);
-        completed.BeginReviewing(Now);
-        completed.BeginVerifying(Now);
-        completed.Complete(Now);
-        Assert.Throws<InvalidOperationException>(() => completed.Cancel(Now));
     }
     [Fact]
     public void Rehydrate_round_trips_state_and_version()

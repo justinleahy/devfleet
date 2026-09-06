@@ -1,7 +1,16 @@
+/* Mobile-first: one column of full-width fields, then a touch-sized action row. */
+
 .composer {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
+}
+
+.composer-head {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
 }
 
 .composer h3 {
@@ -13,18 +22,15 @@
 
 .composer-lead {
     margin: 0;
-    max-width: 64ch;
-    color: var(--neutral-foreground-hint);
-}
-
-.composer-note {
+    max-width: 68ch;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
 }
 
 .panel-empty {
     margin: 0;
-    max-width: 64ch;
+    max-width: 68ch;
     color: var(--neutral-foreground-hint);
 }
 
@@ -34,10 +40,123 @@
     overflow-wrap: anywhere;
 }
 
+.composer-fields {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
+}
+
 .composer ::deep .field {
     width: 100%;
+    min-width: 0;
 }
 
 .composer ::deep .field-wide {
     display: block;
+}
+
+/* Touch-first control heights; pointer widths tighten at the desktop breakpoint. */
+.composer-fields ::deep fluent-select::part(control),
+.composer-fields ::deep fluent-text-field::part(control) {
+    min-height: 44px;
+}
+
+.composer-fields ::deep fluent-text-area::part(control) {
+    width: 100%;
+}
+
+/* Acknowledgement is the delivery contract of the message: give it a touch-sized row. */
+.confirm-row {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding-block: calc(var(--design-unit) * 1px);
+}
+
+.confirm-row ::deep fluent-checkbox {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+}
+
+.composer-actions {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.composer-actions ::deep .composer-send,
+.composer-actions ::deep .composer-send::part(control) {
+    width: 100%;
+    min-height: 44px;
+}
+
+.composer-note {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    margin: 0;
+    min-width: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.composer-note-lead {
+    color: var(--neutral-foreground-rest);
+    font-size: var(--type-ramp-minus-2-font-size);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+@media (min-width: 600px) {
+    /* Recipient and subject share a row; the body keeps the full width. */
+    .composer-fields {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        column-gap: calc(var(--design-unit) * 4px);
+    }
+
+    .composer-fields ::deep .field-body {
+        grid-column: 1 / -1;
+    }
+
+    .composer-actions {
+        flex-direction: row;
+        align-items: center;
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .composer-actions ::deep .composer-send,
+    .composer-actions ::deep .composer-send::part(control) {
+        width: auto;
+        min-width: 22ch;
+    }
+
+    /* The send metadata compacts onto one line beside the button. */
+    .composer-note {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: calc(var(--design-unit) * 2px);
+    }
+
+    .composer-note span + span::before {
+        content: "\00b7";
+        margin-inline-end: calc(var(--design-unit) * 2px);
+    }
+}
+
+@media (min-width: 960px) {
+    .composer {
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .composer-actions ::deep .composer-send::part(control),
+    .composer-fields ::deep fluent-select::part(control),
+    .composer-fields ::deep fluent-text-field::part(control) {
+        min-height: 32px;
+    }
 }

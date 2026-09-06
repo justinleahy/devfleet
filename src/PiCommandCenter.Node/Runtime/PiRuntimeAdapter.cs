@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Domain.Sessions;
+using PiCommandCenter.Node.Quiescence;
 
 namespace PiCommandCenter.Node.Runtime;
 
@@ -44,7 +45,8 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<PiRuntimeAdapter> _logger;
     private readonly Application.Git.ITrustedGitService? _gitService;
-    private readonly ConcurrentDictionary<string, PiWorkerSession> _sessions = new();
+    private readonly IRequestAdmissionGate _admission;
+    private readonly ConcurrentDictionary<string, ActivePiSession> _sessions = new();
 
     public PiRuntimeAdapter(
         IOptions<NodeOptions> nodeOptions,
@@ -53,6 +55,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         IPiOrchestrationRequestHandler orchestration,
         TimeProvider timeProvider,
         ILogger<PiRuntimeAdapter> logger,
+        IRequestAdmissionGate admission,
         Application.Git.ITrustedGitService? gitService = null)
     {
         ArgumentNullException.ThrowIfNull(nodeOptions);
@@ -61,6 +64,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         _orchestration = orchestration ?? throw new ArgumentNullException(nameof(orchestration));
         _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _admission = admission ?? throw new ArgumentNullException(nameof(admission));
         _options = workerOptions.Value;
         _heartbeatStaleAfter = TimeSpan.FromSeconds(Math.Max(1, nodeOptions.Value.HeartbeatSeconds) * 3);
         _nodeId = nodeOptions.Value.Id.ToString("D");
@@ -101,6 +105,20 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
 
         // The orchestrator owns the session id; AgentStartRequest validates it non-empty.
         var sessionId = request.SessionId;
+        RequestCallbackLease? callbackSource = null;
+        if (request.Mode == AgentRuntimeMode.Root)
+        {
+            callbackSource = _admission.TryRegisterCallbackSource(
+                request.RequestId.Value,
+                sessionId);
+            if (callbackSource is null)
+            {
+                throw new InvalidOperationException(
+                    $"Request {request.RequestId.Value} is terminalizing; "
+                    + "a root runtime cannot be started.");
+            }
+        }
+
         var identity = new PiOrchestrationContext(
             sessionId,
             _nodeId,
@@ -111,8 +129,17 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
             request.WorkingDirectory,
             CreateCheckpointDelegate(request));
 
-        var process = _processFactory.Start(
-            _options.NodeExecutable, _options.WorkerPath, request.WorkingDirectory);
+        IPiWorkerProcess process;
+        try
+        {
+            process = _processFactory.Start(
+                _options.NodeExecutable, _options.WorkerPath, request.WorkingDirectory);
+        }
+        catch
+        {
+            callbackSource?.Dispose();
+            throw;
+        }
         var session = new PiWorkerSession(
             identity,
             process,
@@ -124,7 +151,7 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
 
         // Register before the handshake so custom-tool requests racing the start response can
         // already be persisted; removed again below if the handshake fails.
-        _sessions[sessionId] = session;
+        _sessions[sessionId] = new ActivePiSession(session, callbackSource);
         try
         {
             await session.StartAsync(
@@ -147,7 +174,9 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         catch (Exception)
         {
             _sessions.TryRemove(sessionId, out _);
-            await session.DisposeAsync().ConfigureAwait(false);
+            await DisposeStoppedSessionAsync(
+                new ActivePiSession(session, callbackSource),
+                CancellationToken.None).ConfigureAwait(false);
             throw;
         }
 
@@ -196,24 +225,53 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
     /// <summary>Closes one session gracefully, killing the process tree after a short grace period.</summary>
     public async Task CloseSessionAsync(string sessionId, CancellationToken cancellationToken)
     {
-        if (!_sessions.TryRemove(sessionId, out var session))
+        if (!_sessions.TryRemove(sessionId, out var active))
         {
             return;
         }
 
         try
         {
-            await session.CloseAsync(cancellationToken).ConfigureAwait(false);
+            await active.Worker.CloseAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            await session.DisposeAsync().ConfigureAwait(false);
+            await DisposeStoppedSessionAsync(active, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task DisposeStoppedSessionAsync(
+        ActivePiSession active,
+        CancellationToken cancellationToken)
+    {
+        var callbacksDrained = await active.Worker
+            .DrainCallbacksAsync(cancellationToken)
+            .ConfigureAwait(false);
+        var disposed = false;
+        try
+        {
+            await active.Worker.DisposeAsync().ConfigureAwait(false);
+            disposed = true;
+        }
+        finally
+        {
+            if (callbacksDrained && disposed)
+            {
+                active.CallbackSource?.Dispose();
+            }
+            else if (active.CallbackSource is not null)
+            {
+                _logger.LogWarning(
+                    "Retaining terminal fence for session {SessionId}: "
+                    + "runtime callback shutdown was not proven.",
+                    active.Worker.SessionId);
+            }
         }
     }
 
     /// <summary>Current stderr tail for diagnostics, when the session is known.</summary>
     public IReadOnlyList<string> GetStderrTail(string sessionId)
-        => _sessions.TryGetValue(sessionId, out var session) ? session.StderrTail : [];
+        => _sessions.TryGetValue(sessionId, out var active) ? active.Worker.StderrTail : [];
 
     private Func<PiCheckpointRequest, CancellationToken, Task<PiCheckpointResult>>? CreateCheckpointDelegate(
         AgentStartRequest request)
@@ -228,6 +286,16 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
         var branchName = Git.PiRequestGit.RequestBranchName(request.RequestId.Value);
         return async (checkpointRequest, token) =>
         {
+            using var activity = _admission.TryEnterOperation(
+                request.RequestId.Value,
+                "git:checkpoint");
+            if (activity is null)
+            {
+                return PiCheckpointResult.Failure(
+                    "admission_closed",
+                    "The request is terminalizing; no checkpoint work is admitted.");
+            }
+
             try
             {
                 var committed = await _gitService.CreateCheckpointCommitAsync(
@@ -263,25 +331,29 @@ public sealed class PiRuntimeAdapter : IAgentRuntimeAdapter
     {
         // Orchestration events ride the same normalized channel as worker events so they are
         // persisted exactly once, in sequence, by the supervisor's watch loop.
-        if (!_sessions.TryGetValue(sessionId, out var session))
+        if (!_sessions.TryGetValue(sessionId, out var active))
         {
             throw new InvalidOperationException(
                 $"Session {sessionId} is not running; cannot persist orchestration event '{type}'.");
         }
 
-        await session.EmitOrchestrationEventAsync(type, payload, cancellationToken)
+        await active.Worker.EmitOrchestrationEventAsync(type, payload, cancellationToken)
             .ConfigureAwait(false);
     }
 
     private PiWorkerSession RequireSession(string sessionId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
-        if (_sessions.TryGetValue(sessionId, out var session))
+        if (_sessions.TryGetValue(sessionId, out var active))
         {
-            return session;
+            return active.Worker;
         }
 
         throw new KeyNotFoundException($"Unknown or stopped Pi session '{sessionId}'.");
     }
+
+    private sealed record ActivePiSession(
+        PiWorkerSession Worker,
+        RequestCallbackLease? CallbackSource);
 
 }

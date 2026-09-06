@@ -36,7 +36,6 @@ public static class TestNodes
 
     public static Project SeedProject(
         ControlPlaneDbContext db,
-        NodeId nodeId,
         FakeTimeProvider clock,
         bool enabled = true,
         int maxReadOnlyRequests = 4,
@@ -44,9 +43,7 @@ public static class TestNodes
         string? displayName = null)
     {
         var project = Project.Register(
-            nodeId,
             displayName ?? "Project " + Guid.NewGuid().ToString("N")[..6],
-            Path.Combine(Path.GetTempPath(), "pi-cc-tests", Guid.NewGuid().ToString("N"), "repo"),
             "main",
             enabled,
             maxActiveWriteRequests,

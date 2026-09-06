@@ -1,14 +1,24 @@
+/* Mobile-first: one column of stacked message rows, metadata under the sender. */
+
 .thread {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 3px);
-    padding: calc(var(--design-unit) * 4px);
+    padding: calc(var(--design-unit) * 3px);
+    min-width: 0;
 }
 
 .thread-head {
     display: flex;
     flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+}
+
+.thread-title {
+    display: flex;
+    flex-direction: column;
     gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
 }
 
 .thread-head h3 {
@@ -16,6 +26,7 @@
     font-size: var(--type-ramp-plus-1-font-size);
     line-height: var(--type-ramp-plus-1-line-height);
     font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
 .thread-id {
@@ -57,13 +68,15 @@
     list-style: none;
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 
 .message {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 2px);
-    padding: calc(var(--design-unit) * 3px) 0 calc(var(--design-unit) * 3px) calc(var(--design-unit) * 3px);
+    min-width: 0;
+    padding: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 2px);
     border-block-start: 1px solid var(--neutral-stroke-divider-rest);
     border-inline-start: 2px solid transparent;
 }
@@ -72,69 +85,110 @@
     border-block-start: 0;
 }
 
+/* Unread is carried by the rail colour and repeated in each recipient's state text. */
 .message.is-unread {
     border-inline-start-color: var(--accent-fill-rest);
 }
 
+/* Human guidance also carries the "human guidance" role label, never colour alone. */
 .message.is-human {
     background: var(--neutral-fill-secondary-rest);
 }
 
 .message-head {
     display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
+}
+
+.message-who {
+    display: flex;
     flex-wrap: wrap;
-    align-items: center;
+    align-items: baseline;
     gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.message-role {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+}
+
+.message.is-human .message-role {
+    color: var(--neutral-foreground-rest);
+    font-weight: 600;
 }
 
 .message-sender {
     font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
 .message-time {
-    margin-inline-start: auto;
-    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: calc(var(--design-unit) * 1px);
     font-size: var(--type-ramp-minus-2-font-size);
     color: var(--neutral-foreground-hint);
+}
+
+.message-stamp {
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-variant-numeric: tabular-nums;
     white-space: nowrap;
+}
+
+.message-badges {
+    gap: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 2px);
 }
 
 .message-subject {
     margin: 0;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
+    overflow-wrap: anywhere;
 }
 
 .message-body {
     margin: 0;
-    max-width: 88ch;
+    max-width: 70ch;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
 
 .message-foot {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 4px);
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.message-id {
+    font-size: var(--type-ramp-minus-2-font-size);
 }
 
 .recipient-list {
     margin: 0;
     padding: 0;
     list-style: none;
-    display: flex;
-    flex-wrap: wrap;
-    gap: calc(var(--design-unit) * 2px);
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: calc(var(--design-unit) * 1px);
 }
 
 .recipient {
     display: flex;
-    align-items: baseline;
-    gap: calc(var(--design-unit) * 1px);
-    padding: 0 calc(var(--design-unit) * 2px);
+    flex-direction: column;
+    min-width: 0;
+    padding: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 2px);
     border-inline-start: 2px solid var(--neutral-stroke-divider-rest);
     font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
 }
 
 .recipient.is-unread {
@@ -151,8 +205,71 @@
 
 .recipient-name {
     font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
+/* Read / acknowledgement state is always spelled out next to the rail. */
 .recipient-state {
     color: var(--neutral-foreground-hint);
+    overflow-wrap: anywhere;
+}
+
+.recipient.is-pending-ack .recipient-state {
+    color: var(--warning);
+}
+
+@media (min-width: 600px) {
+    .thread {
+        padding: calc(var(--design-unit) * 4px);
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .message {
+        padding-inline: calc(var(--design-unit) * 3px);
+    }
+
+    /* Metadata compacts into a single row: sender left, timestamp right. */
+    .message-head {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: baseline;
+        column-gap: calc(var(--design-unit) * 3px);
+    }
+
+    .message-time {
+        margin-inline-start: auto;
+        flex-wrap: nowrap;
+        gap: calc(var(--design-unit) * 2px);
+    }
+
+    .recipient-list {
+        grid-template-columns: repeat(auto-fill, minmax(26ch, 1fr));
+        gap: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 4px);
+    }
+
+    .recipient {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: calc(var(--design-unit) * 2px);
+    }
+}
+
+@media (min-width: 960px) {
+    /* Heading block left, thread badges right, on one row. */
+    .thread-head {
+        flex-direction: row;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .thread-title {
+        flex: 1 1 auto;
+    }
+
+    .thread-head > .badge-row {
+        flex: 0 1 auto;
+        justify-content: flex-end;
+    }
 }

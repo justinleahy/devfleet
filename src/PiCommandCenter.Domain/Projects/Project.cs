@@ -10,9 +10,7 @@ public sealed class Project
 
     private Project(
         ProjectId id,
-        NodeId nodeId,
         string displayName,
-        string repositoryPath,
         string defaultBranch,
         bool enabled,
         int maxActiveWriteRequests,
@@ -27,9 +25,7 @@ public sealed class Project
         long version)
     {
         Id = id;
-        NodeId = nodeId;
         DisplayName = displayName;
-        RepositoryPath = repositoryPath;
         DefaultBranch = defaultBranch;
         Enabled = enabled;
         MaxActiveWriteRequests = maxActiveWriteRequests;
@@ -46,13 +42,8 @@ public sealed class Project
 
     public ProjectId Id { get; }
 
-    public NodeId NodeId { get; }
-
     /// <summary>Normalized non-empty display name.</summary>
     public string DisplayName { get; private set; }
-
-    /// <summary>Single canonical (trimmed) repository path used for duplicate detection.</summary>
-    public string RepositoryPath { get; private set; }
 
     /// <summary>Normalized non-empty default branch.</summary>
     public string DefaultBranch { get; private set; }
@@ -84,9 +75,7 @@ public sealed class Project
     /// Creates a new project. Throws <see cref="ArgumentException"/> when any invariant is violated.
     /// </summary>
     public static Project Register(
-        NodeId nodeId,
         string displayName,
-        string repositoryPath,
         string defaultBranch,
         bool enabled,
         int maxActiveWriteRequests,
@@ -98,9 +87,8 @@ public sealed class Project
         bool autoMerge,
         DateTimeOffset createdAt)
     {
-        var (display, path, branch, writeLimit, readLimit, childLimit) = Normalize(
+        var (display, branch, writeLimit, readLimit, childLimit) = Normalize(
             displayName,
-            repositoryPath,
             defaultBranch,
             maxActiveWriteRequests,
             maxReadOnlyRequests,
@@ -108,9 +96,7 @@ public sealed class Project
 
         return new Project(
             ProjectId.New(),
-            nodeId,
             display,
-            path,
             branch,
             enabled,
             writeLimit,
@@ -130,9 +116,7 @@ public sealed class Project
     /// </summary>
     public static Project Rehydrate(
         ProjectId id,
-        NodeId nodeId,
         string displayName,
-        string repositoryPath,
         string defaultBranch,
         bool enabled,
         int maxActiveWriteRequests,
@@ -146,9 +130,8 @@ public sealed class Project
         DateTimeOffset updatedAt,
         long version)
     {
-        var (display, path, branch, writeLimit, readLimit, childLimit) = Normalize(
+        var (display, branch, writeLimit, readLimit, childLimit) = Normalize(
             displayName,
-            repositoryPath,
             defaultBranch,
             maxActiveWriteRequests,
             maxReadOnlyRequests,
@@ -156,9 +139,7 @@ public sealed class Project
 
         return new Project(
             id,
-            nodeId,
             display,
-            path,
             branch,
             enabled,
             writeLimit,
@@ -173,24 +154,8 @@ public sealed class Project
             version);
     }
 
-    /// <summary>
-    /// Canonical comparison key for repository paths: trims surrounding whitespace, resolves to a
-    /// full path, and strips trailing directory separators while preserving a filesystem root.
-    /// </summary>
-    public static string CanonicalizePath(string repositoryPath)
-    {
-        if (string.IsNullOrWhiteSpace(repositoryPath))
-        {
-            throw new ArgumentException("Repository path must not be empty.", nameof(repositoryPath));
-        }
-
-        var fullPath = Path.GetFullPath(repositoryPath.Trim());
-        return Path.TrimEndingDirectorySeparator(fullPath);
-    }
-
     public void Update(
         string displayName,
-        string repositoryPath,
         string defaultBranch,
         bool enabled,
         int maxActiveWriteRequests,
@@ -202,16 +167,14 @@ public sealed class Project
         bool autoMerge,
         DateTimeOffset updatedAt)
     {
-        var (display, path, branch, writeLimit, readLimit, childLimit) = Normalize(
+        var (display, branch, writeLimit, readLimit, childLimit) = Normalize(
             displayName,
-            repositoryPath,
             defaultBranch,
             maxActiveWriteRequests,
             maxReadOnlyRequests,
             maxChildAgentsPerRequest);
 
         DisplayName = display;
-        RepositoryPath = path;
         DefaultBranch = branch;
         Enabled = enabled;
         MaxActiveWriteRequests = writeLimit;
@@ -225,9 +188,8 @@ public sealed class Project
         Version++;
     }
 
-    private static (string Display, string Path, string Branch, int WriteLimit, int ReadLimit, int ChildLimit) Normalize(
+    private static (string Display, string Branch, int WriteLimit, int ReadLimit, int ChildLimit) Normalize(
         string displayName,
-        string repositoryPath,
         string defaultBranch,
         int maxActiveWriteRequests,
         int maxReadOnlyRequests,
@@ -239,26 +201,16 @@ public sealed class Project
         }
 
         var display = displayName.Trim();
-        if (display.Length == 0)
-        {
-            throw new ArgumentException("Display name must not be empty.", nameof(displayName));
-        }
 
-        var path = CanonicalizePath(repositoryPath);
         if (string.IsNullOrWhiteSpace(defaultBranch))
         {
             throw new ArgumentException("Default branch must not be empty.", nameof(defaultBranch));
         }
 
         var branch = defaultBranch.Trim();
-        if (branch.Length == 0)
-        {
-            throw new ArgumentException("Default branch must not be empty.", nameof(defaultBranch));
-        }
 
         return (
             display,
-            path,
             branch,
             EnsurePositive(maxActiveWriteRequests, nameof(maxActiveWriteRequests)),
             EnsurePositive(maxReadOnlyRequests, nameof(maxReadOnlyRequests)),

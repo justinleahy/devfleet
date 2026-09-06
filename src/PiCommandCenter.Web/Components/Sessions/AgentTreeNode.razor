@@ -10,51 +10,70 @@
 <li role="treeitem" aria-expanded="@(_children.Count > 0 ? "true" : null)">
     <div class="agent-node">
         <div class="agent-head">
-            <span class="@LivenessClass(Session.Liveness)" aria-hidden="true"></span>
-            <span class="agent-name">@Session.AgentName</span>
-            <span class="agent-role">@Session.Role</span>
-            <FluentBadge Appearance="@(IsSettled(Session.WorkState) ? Appearance.Neutral : Appearance.Accent)">
-                @Session.WorkState
-            </FluentBadge>
-            <FluentBadge Appearance="Appearance.Neutral">@Session.Activity</FluentBadge>
-            @if (Session.Attention != AgentAttention.None)
-            {
-                <FluentBadge Appearance="Appearance.Accent">@Session.Attention</FluentBadge>
-            }
+            <span class="agent-identity">
+                <span class="@LivenessClass(Session.Liveness)" aria-hidden="true"></span>
+                <span class="agent-name">@Session.AgentName</span>
+                <span class="agent-role">@Session.Role</span>
+            </span>
+            <span class="agent-flags">
+                <FluentBadge Appearance="@(IsSettled(Session.WorkState) ? Appearance.Neutral : Appearance.Accent)">
+                    @Session.WorkState
+                </FluentBadge>
+                <FluentBadge Appearance="Appearance.Neutral">@Session.Activity</FluentBadge>
+                @if (Session.Attention != AgentAttention.None)
+                {
+                    <FluentBadge Appearance="Appearance.Accent">@Session.Attention</FluentBadge>
+                }
+            </span>
         </div>
 
         @if (Session.CurrentOperation is { Length: > 0 } operation)
         {
-            <p class="agent-reason">@operation</p>
+            <p class="agent-reason">
+                <span class="agent-reason-key">operation</span>
+                <span class="agent-reason-value">@operation</span>
+            </p>
         }
         else if (!string.IsNullOrWhiteSpace(Session.StatusReason))
         {
-            <p class="agent-reason">@Session.StatusReason</p>
+            <p class="agent-reason">
+                <span class="agent-reason-key">reason</span>
+                <span class="agent-reason-value">@Session.StatusReason</span>
+            </p>
         }
 
-        <div class="agent-meta">
-            <span>@Session.Liveness</span>
+        <dl class="agent-meta">
+            <div class="meta-item">
+                <dt>liveness</dt>
+                <dd>@Session.Liveness</dd>
+            </div>
             @if (ModelText.RuntimeAside(Session.Runtime, Session.Model) is { } runtime)
             {
-                <span>
-                    <span class="visually-hidden">Runtime</span>
-                    @runtime
-                </span>
+                <div class="meta-item">
+                    <dt>runtime</dt>
+                    <dd>@runtime</dd>
+                </div>
             }
-            <span class="agent-model">
-                <span class="visually-hidden">Model</span>
-                @Session.Model
-            </span>
-            <span class="agent-id">@Session.Id</span>
-            <span>
-                <span class="visually-hidden">Last heartbeat</span>
-                @(Session.LastHeartbeatAt is { } beat ? Relative(beat, Now) : "no heartbeat")
-            </span>
+            <div class="meta-item">
+                <dt>model</dt>
+                <dd class="is-mono">@Session.Model</dd>
+            </div>
+            <div class="meta-item">
+                <dt>session</dt>
+                <dd class="is-mono">@Session.Id</dd>
+            </div>
+            <div class="meta-item">
+                <dt>heartbeat</dt>
+                <dd>@(Session.LastHeartbeatAt is { } beat ? Relative(beat, Now) : "no heartbeat")</dd>
+            </div>
             @if (Session.ProcessId is { } processId)
             {
-                <span>pid @processId</span>
+                <div class="meta-item">
+                    <dt>pid</dt>
+                    <dd>@processId</dd>
+                </div>
             }
-        </div>
+        </dl>
     </div>
 
     @if (_children.Count > 0)

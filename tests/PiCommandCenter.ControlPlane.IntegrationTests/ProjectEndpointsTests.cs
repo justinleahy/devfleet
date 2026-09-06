@@ -1,22 +1,25 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
+using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Projects;
+using PiCommandCenter.Domain;
+using PiCommandCenter.Domain.Projects;
 
 namespace PiCommandCenter.ControlPlane.IntegrationTests;
 
 public class ProjectEndpointsTests : IClassFixture<ControlPlaneFixture>
 {
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+
     private readonly ControlPlaneFixture _fixture;
 
     public ProjectEndpointsTests(ControlPlaneFixture fixture) => _fixture = fixture;
 
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-
-    private static HttpContent RegisterBody(string displayName, string repositoryPath) =>
+    private static HttpContent RegisterBody(string displayName) =>
         JsonContent.Create(new RegisterProjectCommand(
             DisplayName: displayName,
-            RepositoryPath: repositoryPath,
             DefaultBranch: "main",
             Enabled: true,
             MaxActiveWriteRequests: 2,
@@ -27,106 +30,186 @@ public class ProjectEndpointsTests : IClassFixture<ControlPlaneFixture>
             CreateRequestCommit: false,
             AutoMerge: false));
 
-    [Fact]
-    public async Task Registering_a_real_git_repository_returns_201_with_the_project()
-    {
-        var client = _fixture.CreateClient();
-        var repositoryPath = _fixture.CreateGitRepository();
+    private static HttpContent DesignationBody(Guid nodeId, string repositoryPath) =>
+        JsonContent.Create(new { nodeId, repositoryPath });
 
-        var response = await client.PostAsync("/api/projects", RegisterBody("Fleet", repositoryPath));
+    private static async Task<ProjectDto> RegisterProjectAsync(HttpClient client, string displayName)
+    {
+        var response = await client.PostAsync("/api/projects", RegisterBody(displayName));
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.Created, $"status {(int)response.StatusCode}: {body}");
+        return JsonSerializer.Deserialize<ProjectDto>(body, Json)!;
+    }
+
+    private async Task RegisterNodeAsync()
+    {
+        using var scope = _fixture.Factory.Services.CreateScope();
+        var registry = scope.ServiceProvider.GetRequiredService<INodeRegistry>();
+        await registry.RegisterAsync(
+            new RegisterNodeCommand(
+                new NodeId(_fixture.AuthenticatedNodeId),
+                "project-endpoint-node",
+                "1.0.0",
+                "{}"),
+            DateTimeOffset.UtcNow);
+    }
+
+    [Fact]
+    public async Task Registration_accepts_metadata_only_and_returns_an_unbound_project()
+    {
+        using var client = _fixture.CreateClient();
+
+        var response = await client.PostAsync("/api/projects", RegisterBody("Fleet"));
         var body = await response.Content.ReadAsStringAsync();
 
-        Assert.True(HttpStatusCode.Created == response.StatusCode, $"status {(int)response.StatusCode}: {body}");
-        Assert.Equal($"/api/projects/{JsonDocument.Parse(body).RootElement.GetProperty("id").GetString()}", response.Headers.Location?.ToString());
+        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var project = JsonSerializer.Deserialize<ProjectDto>(body, Json)!;
+        Assert.Equal($"/api/projects/{project.Id}", response.Headers.Location?.ToString());
         Assert.Equal("Fleet", project.DisplayName);
         Assert.Equal("main", project.DefaultBranch);
+        Assert.Null(project.Binding);
         Assert.Equal(1, project.Version);
     }
 
     [Fact]
-    public async Task Registering_a_duplicate_repository_path_is_a_deterministic_409()
+    public async Task Invalid_project_metadata_is_a_deterministic_400()
     {
-        var client = _fixture.CreateClient();
-        var repositoryPath = _fixture.CreateGitRepository();
-        var first = await client.PostAsync("/api/projects", RegisterBody("First", repositoryPath));
-        Assert.True(first.IsSuccessStatusCode, await first.Content.ReadAsStringAsync());
+        using var client = _fixture.CreateClient();
 
-        var second = await client.PostAsync("/api/projects", RegisterBody("Second", repositoryPath + "/"));
-        var body = await second.Content.ReadAsStringAsync();
-
-        Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
-        var problem = JsonDocument.Parse(body).RootElement;
-        Assert.Equal(409, problem.GetProperty("status").GetInt32());
-        Assert.Equal("Duplicate project", problem.GetProperty("title").GetString());
-    }
-
-    [Fact]
-    public async Task Registering_a_path_outside_the_approved_root_is_a_deterministic_400()
-    {
-        var client = _fixture.CreateClient();
-        var outsideRoot = Path.Combine(Path.GetTempPath(), "pi-cc-integration", Guid.NewGuid().ToString("N"), "outside");
-        Directory.CreateDirectory(outsideRoot);
-
-        var response = await client.PostAsync("/api/projects", RegisterBody("Rogue", outsideRoot));
+        var response = await client.PostAsync("/api/projects", RegisterBody("   "));
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var problem = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
+        Assert.Equal(400, problem.GetProperty("status").GetInt32());
+        Assert.Equal("Validation failed", problem.GetProperty("title").GetString());
     }
 
     [Fact]
-    public async Task Get_project_returns_the_registration_and_a_missing_id_is_404()
+    public async Task Get_and_list_include_an_unbound_registration()
     {
-        var client = _fixture.CreateClient();
-        var repositoryPath = _fixture.CreateGitRepository();
-        var created = await client.PostAsync("/api/projects", RegisterBody("Lookup", repositoryPath));
-        var registered = await created.Content.ReadFromJsonAsync<ProjectDto>(Json);
+        using var client = _fixture.CreateClient();
+        var registered = await RegisterProjectAsync(client, "Lookup");
 
-        var fetched = await client.GetAsync($"/api/projects/{registered!.Id}");
-        var dto = await fetched.Content.ReadFromJsonAsync<ProjectDto>(Json);
+        var fetchedResponse = await client.GetAsync($"/api/projects/{registered.Id}");
+        var fetched = await fetchedResponse.Content.ReadFromJsonAsync<ProjectDto>(Json);
+        var listResponse = await client.GetAsync("/api/projects");
+        var list = await listResponse.Content.ReadFromJsonAsync<JsonElement>(Json);
 
-        Assert.True(fetched.IsSuccessStatusCode, $"status {(int)fetched.StatusCode}");
-        Assert.NotNull(dto);
-        Assert.Equal(registered.Id, dto!.Id);
-        Assert.Equal("Lookup", dto.DisplayName);
+        Assert.Equal(HttpStatusCode.OK, fetchedResponse.StatusCode);
+        Assert.NotNull(fetched);
+        Assert.Equal(registered.Id, fetched!.Id);
+        Assert.Null(fetched.Binding);
+        Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+        var listed = list.GetProperty("projects")
+            .EnumerateArray()
+            .Single(project => project.GetProperty("id").GetGuid() == registered.Id);
+        Assert.Equal(JsonValueKind.Null, listed.GetProperty("binding").ValueKind);
 
         var missing = await client.GetAsync($"/api/projects/{Guid.NewGuid()}");
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
     [Fact]
-    public async Task List_projects_reflects_registrations()
+    public async Task Workspace_binding_can_be_designated_remain_pending_offline_and_deleted()
     {
-        var client = _fixture.CreateClient();
+        using var client = _fixture.CreateClient();
+        var project = await RegisterProjectAsync(client, "Binding lifecycle");
+        await RegisterNodeAsync();
         var repositoryPath = _fixture.CreateGitRepository();
-        var created = await client.PostAsync("/api/projects", RegisterBody("Listed", repositoryPath));
-        var registered = await created.Content.ReadFromJsonAsync<ProjectDto>(Json);
 
-        var response = await client.GetAsync("/api/projects");
-        var body = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
+        var designatedResponse = await client.PutAsync(
+            $"/api/projects/{project.Id}/workspace-binding",
+            DesignationBody(_fixture.AuthenticatedNodeId, repositoryPath));
+        var designated = await designatedResponse.Content.ReadFromJsonAsync<WorkspaceBindingDto>(Json);
 
-        Assert.True(response.IsSuccessStatusCode);
-        var projects = body.GetProperty("projects");
-        Assert.True(projects.GetArrayLength() >= 1);
-        Assert.Contains(
-            projects.EnumerateArray(),
-            p => p.GetProperty("id").GetGuid() == registered!.Id);
+        Assert.Equal(HttpStatusCode.OK, designatedResponse.StatusCode);
+        Assert.NotNull(designated);
+        Assert.Equal(_fixture.AuthenticatedNodeId, designated!.NodeId);
+        Assert.Equal(repositoryPath, designated.RepositoryPath);
+        Assert.Equal(WorkspaceBindingStatus.PendingValidation, designated.Status);
+        Assert.Equal(1, designated.ValidationRevision);
+        Assert.Null(designated.CanonicalRepositoryPath);
+
+        var validationResponse = await client.PostAsync(
+            $"/api/projects/{project.Id}/workspace-binding/validate",
+            content: null);
+        var pending = await validationResponse.Content.ReadFromJsonAsync<WorkspaceBindingDto>(Json);
+
+        Assert.Equal(HttpStatusCode.OK, validationResponse.StatusCode);
+        Assert.NotNull(pending);
+        Assert.Equal(designated, pending);
+        Assert.Equal(WorkspaceBindingStatus.PendingValidation, pending!.Status);
+
+        var fetched = await client.GetFromJsonAsync<ProjectDto>($"/api/projects/{project.Id}", Json);
+        Assert.Equal(designated, fetched!.Binding);
+
+        var deleted = await client.DeleteAsync($"/api/projects/{project.Id}/workspace-binding");
+        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+        fetched = await client.GetFromJsonAsync<ProjectDto>($"/api/projects/{project.Id}", Json);
+        Assert.Null(fetched!.Binding);
     }
 
     [Fact]
-    public async Task Validate_reports_the_repository_report_for_a_registered_project()
+    public async Task Workspace_binding_routes_map_missing_invalid_and_conflicting_designations()
     {
-        var client = _fixture.CreateClient();
+        using var client = _fixture.CreateClient();
+        await RegisterNodeAsync();
+        var firstProject = await RegisterProjectAsync(client, "First binding");
+        var secondProject = await RegisterProjectAsync(client, "Second binding");
         var repositoryPath = _fixture.CreateGitRepository();
-        var created = await client.PostAsync("/api/projects", RegisterBody("Validated", repositoryPath));
-        var registered = await created.Content.ReadFromJsonAsync<ProjectDto>(Json);
 
-        var response = await client.PostAsync($"/api/projects/{registered!.Id}/validate", content: null);
-        var report = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
+        var missingProject = await client.PutAsync(
+            $"/api/projects/{Guid.NewGuid()}/workspace-binding",
+            DesignationBody(_fixture.AuthenticatedNodeId, repositoryPath));
+        var missingNode = await client.PutAsync(
+            $"/api/projects/{firstProject.Id}/workspace-binding",
+            DesignationBody(Guid.NewGuid(), repositoryPath));
+        var invalidPath = await client.PutAsync(
+            $"/api/projects/{firstProject.Id}/workspace-binding",
+            DesignationBody(_fixture.AuthenticatedNodeId, "relative/path"));
+        var firstDesignation = await client.PutAsync(
+            $"/api/projects/{firstProject.Id}/workspace-binding",
+            DesignationBody(_fixture.AuthenticatedNodeId, repositoryPath));
+        var conflict = await client.PutAsync(
+            $"/api/projects/{secondProject.Id}/workspace-binding",
+            DesignationBody(_fixture.AuthenticatedNodeId, repositoryPath));
 
-        Assert.True(response.IsSuccessStatusCode, response.StatusCode.ToString());
-        Assert.True(report.GetProperty("isValid").GetBoolean(), report.GetRawText());
+        Assert.Equal(HttpStatusCode.NotFound, missingProject.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, missingNode.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, invalidPath.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, firstDesignation.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, conflict.StatusCode);
+    }
 
-        var missing = await client.PostAsync($"/api/projects/{Guid.NewGuid()}/validate", content: null);
-        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    [Fact]
+    public async Task Unbound_validation_is_409_and_missing_binding_resources_are_404()
+    {
+        using var client = _fixture.CreateClient();
+        var project = await RegisterProjectAsync(client, "Unbound validation");
+        var missingProjectId = Guid.NewGuid();
+
+        var unboundValidation = await client.PostAsync(
+            $"/api/projects/{project.Id}/workspace-binding/validate",
+            content: null);
+        var missingValidation = await client.PostAsync(
+            $"/api/projects/{missingProjectId}/workspace-binding/validate",
+            content: null);
+        var missingDelete = await client.DeleteAsync(
+            $"/api/projects/{missingProjectId}/workspace-binding");
+
+        Assert.Equal(HttpStatusCode.Conflict, unboundValidation.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, missingValidation.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, missingDelete.StatusCode);
+    }
+
+    [Fact]
+    public async Task Legacy_project_validate_post_returns_method_not_allowed()
+    {
+        using var client = _fixture.CreateClient();
+        var project = await RegisterProjectAsync(client, "No ambiguous validation");
+
+        var response = await client.PostAsync($"/api/projects/{project.Id}/validate", content: null);
+
+        Assert.Equal(HttpStatusCode.MethodNotAllowed, response.StatusCode);
     }
 }

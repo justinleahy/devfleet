@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.SignalR;
 using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Mail;
@@ -14,6 +15,7 @@ using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Verification;
 using PiCommandCenter.ControlPlane.RuntimeRouting;
+using PiCommandCenter.Domain.Projects;
 
 namespace PiCommandCenter.ControlPlane.Hubs;
 
@@ -27,6 +29,7 @@ public static class NodeTransportLimits
     public const int MinLeaseSeconds = 10;
     public const int MaxLeaseSeconds = 300;
     public const int MaxEventBatchCount = 500;
+    public const int MaxEventIdLength = AssignmentOperationLimits.MaxEventIdLength;
     public const int MaxPayloadBytes = 256 * 1024;
     public const int MaxActiveSessionIds = 200;
     public const int MaxMailPayloadBytes = 64 * 1024;
@@ -51,9 +54,10 @@ public sealed class NodeHub(
     IReservationService reservationService,
     IMessageService messageService,
     IAgentIdentityRegistry identityRegistry,
-    IRequestClaimService claimService,
+    IExecutionAssignmentService executionAssignmentService,
     IVerificationRunStore verificationRuns,
-    ICompletionGateService completionGate,
+    IAssignmentTerminalizationService terminalization,
+    IAssignmentOperationAuthorizer assignmentAuthorizer,
     NodeConnectionDirectory nodeConnections,
     TimeProvider timeProvider,
     ILogger<NodeHub> logger) : Hub
@@ -61,28 +65,33 @@ public sealed class NodeHub(
     public async Task<NodeDto> Register(NodeRegistrationMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireAuthenticatedNodeId();
+        RequireMatchingNodeId(message.NodeId, nodeId);
         var registered = await registry.RegisterAsync(
             new RegisterNodeCommand(
-                new NodeId(message.NodeId),
+                new NodeId(nodeId),
                 message.DisplayName,
                 message.AgentVersion,
                 message.CapabilitiesJson),
             timeProvider.GetUtcNow(),
             Context.ConnectionAborted).ConfigureAwait(false);
-        nodeConnections.Bind(message.NodeId, Context.ConnectionId);
+        nodeConnections.Bind(nodeId, Context.ConnectionId);
         return registered;
     }
 
     public async Task<NodeDto> Heartbeat(NodeHeartbeatMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        var sessionIds = (message.ActiveSessionIds ?? [])
+        var nodeId = RequireRegisteredNodeId(message.NodeId);
+        var executionStatus = ToExecutionStatusDto(message.ExecutionStatus);
+        var requestedSessionIds = (message.ActiveSessionIds ?? [])
             .Take(NodeTransportLimits.MaxActiveSessionIds)
             .ToArray();
+        var sessionIds = await FilterHeartbeatSessionsAsync(nodeId, requestedSessionIds).ConfigureAwait(false);
         await SyncSessionGroupsAsync(sessionIds).ConfigureAwait(false);
         return await registry.HeartbeatAsync(
             new NodeHeartbeatCommand(
-                new NodeId(message.NodeId),
+                new NodeId(nodeId),
                 sessionIds,
                 message.Resources is null
                     ? null
@@ -94,7 +103,8 @@ public sealed class NodeHub(
                         message.Resources.DiskUsedBytes,
                         message.Resources.DiskTotalBytes,
                         message.Resources.LoadAverageOneMinute,
-                        message.Resources.UptimeSeconds)),
+                        message.Resources.UptimeSeconds),
+                executionStatus),
             timeProvider.GetUtcNow(),
             Context.ConnectionAborted).ConfigureAwait(false);
     }
@@ -102,6 +112,12 @@ public sealed class NodeHub(
     public async Task<AgentIdentityMessage> AllocateAgentIdentity(AllocateAgentIdentityMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken).ConfigureAwait(false);
         var identity = await identityRegistry.AllocateAsync(
             new AllocateAgentIdentityCommand(
                 new ProjectId(message.ProjectId),
@@ -119,15 +135,28 @@ public sealed class NodeHub(
             identity.AllocatedAtUtc);
     }
 
-    public Task ReleaseAgentIdentity(ReleaseAgentIdentityMessage message)
+    public async Task ReleaseAgentIdentity(ReleaseAgentIdentityMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        return identityRegistry.ReleaseAsync(message.SessionId, Context.ConnectionAborted);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.SessionId).ConfigureAwait(false);
+        await identityRegistry.ReleaseAsync(message.SessionId, Context.ConnectionAborted).ConfigureAwait(false);
     }
 
     public async Task<AgentIdentityMessage?> FindAgentIdentity(FindAgentIdentityMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken).ConfigureAwait(false);
         var identity = await identityRegistry.FindByNameAsync(
             new ProjectId(message.ProjectId),
             message.AgentName,
@@ -151,6 +180,13 @@ public sealed class NodeHub(
     public async Task<MailDeliveryMessage> SendMail(SendMailMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.SenderSessionId).ConfigureAwait(false);
         ValidateMailSize(message.Subject, message.BodyMarkdown);
         var delivered = await messageService.SendAsync(ToCommand(message), Context.ConnectionAborted).ConfigureAwait(false);
         await RouteLiveAsync(delivered).ConfigureAwait(false);
@@ -164,6 +200,13 @@ public sealed class NodeHub(
     public async Task<MailInboxMessage> FetchInbox(FetchMailInboxMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.RecipientSessionId).ConfigureAwait(false);
         var unread = await messageService.GetUnreadAsync(
             new ProjectId(message.ProjectId),
             message.RecipientSessionId,
@@ -176,6 +219,13 @@ public sealed class NodeHub(
     public async Task<MailInboxMessage> FetchThread(FetchMailThreadMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.RecipientSessionId).ConfigureAwait(false);
         var thread = await messageService.GetThreadAsync(
             new ProjectId(message.ProjectId),
             message.ThreadId,
@@ -187,6 +237,13 @@ public sealed class NodeHub(
     public async Task<MailReceiptMessage> MarkMailRead(MarkMailReadMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.RecipientSessionId).ConfigureAwait(false);
         var delivered = await messageService.MarkReadAsync(
             message.MessageId,
             message.RecipientSessionId,
@@ -198,6 +255,13 @@ public sealed class NodeHub(
     public async Task<MailReceiptMessage> AcknowledgeMail(AcknowledgeMailMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.RecipientSessionId).ConfigureAwait(false);
         var delivered = await messageService.AcknowledgeAsync(
             message.MessageId,
             message.RecipientSessionId,
@@ -205,14 +269,44 @@ public sealed class NodeHub(
         return ToReceipt(delivered, message.RecipientSessionId);
     }
 
-    public async Task<RequestClaimMessage?> ClaimNext(ClaimRequestMessage message)
+    public async Task<ReconcileAssignmentsResultMessage> ReconcileAssignments(
+        ReconcileAssignmentsMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
-        var claim = await claimService.ClaimNextAsync(
-            new NodeId(message.NodeId),
+        var nodeId = RequireRegisteredNodeId(message.NodeId);
+        var inventory = (message.Assignments ?? [])
+            .Select(ToDto)
+            .ToArray();
+        var results = await executionAssignmentService.ReconcileAsync(
+            new NodeId(nodeId),
+            inventory,
             ClampLease(message.LeaseSeconds),
             Context.ConnectionAborted).ConfigureAwait(false);
-        return claim is null ? null : ToMessage(claim);
+        Context.Items[AssignmentInventoryReconciledKey] = true;
+        return new ReconcileAssignmentsResultMessage(results
+            .Select(result => new AssignmentReconciliationResultMessage(
+                result.RequestId.Value,
+                result.Disposition,
+                result.Assignment is null ? null : ToMessage(result.Assignment)))
+            .ToArray());
+    }
+
+    public async Task<ExecutionAssignmentMessage?> ClaimNext(ClaimRequestMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId(message.NodeId);
+        if (!Context.Items.TryGetValue(AssignmentInventoryReconciledKey, out var reconciled)
+            || reconciled is not true)
+        {
+            throw new HubException(
+                "Assignment inventory reconciliation must succeed before this connection can claim work.");
+        }
+
+        var assignment = await executionAssignmentService.ClaimNextAsync(
+            new NodeId(nodeId),
+            ClampLease(message.LeaseSeconds),
+            Context.ConnectionAborted).ConfigureAwait(false);
+        return assignment is null ? null : ToMessage(assignment);
     }
 
 
@@ -223,6 +317,13 @@ public sealed class NodeHub(
     public async Task<MailDeliveryMessage> ReplyMail(ReplyMailMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.SenderSessionId).ConfigureAwait(false);
         ValidateMailSize("reply", message.BodyMarkdown);
         var delivered = await messageService.ReplyAsync(new ReplyAgentMessageCommand(
             new ProjectId(message.ProjectId),
@@ -238,18 +339,19 @@ public sealed class NodeHub(
             delivered.Recipients.Select(recipient => recipient.SessionId).ToArray());
     }
     /// <summary>
-    /// Renews a claim's lease and returns the new expiry. The renewal protocol message carries
-    /// no project id, so no full claim is reconstructed here.
+    /// Renews an execution assignment's lease and returns the new expiry. The renewal protocol
+    /// message carries no project id, so no full assignment is reconstructed here.
     /// </summary>
 
     public async Task<DateTimeOffset?> RenewClaim(ClaimRenewalMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId(message.NodeId);
         try
         {
-            return await claimService.RenewAsync(
+            return await executionAssignmentService.RenewAsync(
                 new WorkRequestId(message.RequestId),
-                new NodeId(message.NodeId),
+                new NodeId(nodeId),
                 message.ClaimToken,
                 ClampLease(message.LeaseSeconds),
                 Context.ConnectionAborted).ConfigureAwait(false);
@@ -263,6 +365,7 @@ public sealed class NodeHub(
     public async Task<NodeEventAcknowledgementMessage> PublishEvents(NodeEventBatchMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
         var events = message.Events ?? [];
         if (events.Count > NodeTransportLimits.MaxEventBatchCount)
         {
@@ -277,10 +380,14 @@ public sealed class NodeHub(
                 throw new HubException(
                     $"Event payload exceeds the limit of {NodeTransportLimits.MaxPayloadBytes} bytes.");
             }
+
+            RequireMatchingNodeId(@event.NodeId, nodeId);
         }
 
+        await RequireHistoricalEventsAsync(nodeId, events).ConfigureAwait(false);
+
         var batch = new EventBatch(events
-            .Select(ToDto)
+            .Select(@event => ToDto(@event, nodeId))
             .ToArray());
         var ack = await eventSink.AppendAsync(batch, Context.ConnectionAborted).ConfigureAwait(false);
         return new NodeEventAcknowledgementMessage(ack.EventIds);
@@ -290,6 +397,10 @@ public sealed class NodeHub(
     public Task<ReservationOperationResultMessage> AcquireReservation(AcquireReservationMessage message) =>
         InvokeReservationAsync(
             message,
+            message.ProjectId,
+            message.RequestId,
+            message.ClaimToken,
+            message.OwnerSessionId,
             (service, token) => service.AcquireAsync(
                 new AcquireReservationCommand(
                     message.ProjectId,
@@ -303,6 +414,10 @@ public sealed class NodeHub(
     public Task<ReservationOperationResultMessage> RenewReservation(ReservationMutationMessage message) =>
         InvokeReservationAsync(
             message,
+            message.ProjectId,
+            message.RequestId,
+            message.ClaimToken,
+            message.SessionId,
             (service, token) => service.RenewAsync(
                 new RenewReservationCommand(message.LeaseId, message.FencingToken, message.SessionId),
                 token));
@@ -311,6 +426,10 @@ public sealed class NodeHub(
     public Task<ReservationOperationResultMessage> ExpandReservation(ExpandReservationMessage message) =>
         InvokeReservationAsync(
             message,
+            message.ProjectId,
+            message.RequestId,
+            message.ClaimToken,
+            message.SessionId,
             (service, token) => service.ExpandAsync(
                 new ExpandReservationCommand(
                     message.LeaseId,
@@ -322,21 +441,47 @@ public sealed class NodeHub(
     public Task<ReservationOperationResultMessage> ReleaseReservation(ReleaseReservationMessage message) =>
         InvokeReservationAsync(
             message,
+            message.ProjectId,
+            message.RequestId,
+            message.ClaimToken,
+            message.SessionId,
             (service, token) => service.ReleaseAsync(
                 new ReleaseReservationCommand(message.LeaseId, message.SessionId),
                 token));
 
     /// <summary>Moves a lease to a new owner session.</summary>
-    public Task<ReservationOperationResultMessage> TransferReservation(TransferReservationMessage message) =>
-        InvokeReservationAsync(
+    public async Task<ReservationOperationResultMessage> TransferReservation(TransferReservationMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.ToSessionId).ConfigureAwait(false);
+        return await InvokeReservationAsync(
             message,
+            message.ProjectId,
+            message.RequestId,
+            message.ClaimToken,
+            message.FromSessionId,
             (service, token) => service.TransferAsync(
                 new TransferReservationCommand(message.LeaseId, message.FromSessionId, message.ToSessionId),
-                token));
+                token)).ConfigureAwait(false);
+    }
 
     /// <summary>Authorizes one mutation against a lease immediately before it is applied.</summary>
     public async Task<MutationAuthorizationResultMessage> AuthorizeMutation(MutationAuthorizationMessage message)
     {
+        ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.SessionId).ConfigureAwait(false);
         try
         {
             await reservationService.AuthorizeAsync(
@@ -360,6 +505,10 @@ public sealed class NodeHub(
     public Task<ReservationOperationResultMessage> MarkReservationRecovery(MarkRecoveryMessage message) =>
         InvokeReservationAsync(
             message,
+            message.ProjectId,
+            message.RequestId,
+            message.ClaimToken,
+            sessionId: null,
             (service, token) => service.MarkRecoveryRequiredAsync(
                 new MarkRecoveryRequiredCommand(message.LeaseId, message.Reason),
                 token));
@@ -368,6 +517,12 @@ public sealed class NodeHub(
     public async Task<ReservationLeaseMessage[]> ListReservations(ListReservationsMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken).ConfigureAwait(false);
         var leases = await reservationService.ListAsync(
             message.ProjectId,
             message.IncludeReleased,
@@ -376,10 +531,17 @@ public sealed class NodeHub(
     }
 
     /// <summary>Records one verification command run. Identifiers are required and bounded.</summary>
-    public async Task<VerificationRunMessage> RecordVerification(VerificationRunMessage message)
+    public async Task<VerificationRunResultMessage> RecordVerification(VerificationRunMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
         RequireCorrelation(message.CorrelationId, message.ProjectId, message.RequestId, message.SessionId);
+        await RequireActiveAsync(
+            nodeId,
+            message.RequestId,
+            message.ProjectId,
+            message.ClaimToken,
+            message.SessionId).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(message.ProfileId) || message.ProfileId.Length > NodeTransportLimits.MaxVerificationIdLength)
         {
             throw new HubException("Verification profile id is required and bounded.");
@@ -433,59 +595,138 @@ public sealed class NodeHub(
     }
 
     /// <summary>
-    /// Evaluates the objective completion gate. Rejection returns the complete missing-requirement list.
+    /// First terminalization step: validates the fence and intent payload, then closes
+    /// admission by moving the assignment into Finalizing (Complete/Fail) or Cancelling
+    /// (Cancel). Complete runs the objective completion preflight before the state move.
+    /// Rejection returns the complete missing-requirement list and changes nothing.
     /// </summary>
-    public async Task<CompletionGateDecisionMessage> EvaluateCompletion(EvaluateCompletionMessage message)
+    public async Task<CompletionGateDecisionMessage> BeginTerminalization(BeginTerminalizationMessage message)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
         RequireCorrelation(message.CorrelationId, message.ProjectId, message.RequestId, message.RootSessionId);
-        ArgumentNullException.ThrowIfNull(message.Evidence);
-
-        if (message.Evidence.SummaryMarkdown is { Length: > NodeTransportLimits.MaxCompletionSummaryBytes })
-        {
-            throw new HubException(
-                $"Completion summary exceeds the limit of {NodeTransportLimits.MaxCompletionSummaryBytes} bytes.");
-        }
-
-        if (message.Evidence.ChangedFiles is { Count: > NodeTransportLimits.MaxChangedFiles })
-        {
-            throw new HubException(
-                $"Changed-file list exceeds the limit of {NodeTransportLimits.MaxChangedFiles}.");
-        }
-
-        var findings = message.Evidence.ReviewFindings ?? [];
-        if (findings.Count > NodeTransportLimits.MaxReviewFindings)
-        {
-            throw new HubException(
-                $"Review finding list exceeds the limit of {NodeTransportLimits.MaxReviewFindings}.");
-        }
+        RequireEvidenceBounds(message.Evidence);
 
         try
         {
-            var decision = await completionGate.EvaluateAsync(
+            var decision = await terminalization.BeginAsync(
+                new NodeId(nodeId),
                 new ProjectId(message.ProjectId),
                 new WorkRequestId(message.RequestId),
+                message.ClaimToken,
                 message.RootSessionId.Trim(),
-                new CompletionEvidence(
-                    message.Evidence.SummaryMarkdown,
-                    message.Evidence.ChangedFiles,
-                    findings.Select(f => new ReviewFinding(f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
-                    message.Evidence.VerificationSummary,
-                    message.Evidence.RequestBranch,
-                    message.Evidence.CheckpointCommitId),
+                message.Intent,
+                ToEvidence(message.Evidence),
+                message.Reason,
                 Context.ConnectionAborted).ConfigureAwait(false);
 
-            return new CompletionGateDecisionMessage(
-                message.CorrelationId,
-                decision.Accepted,
-                decision.MissingRequirements,
-                decision.Result is null ? null : ToResultMessage(decision.Result));
+            return ToDecisionMessage(message.CorrelationId, decision);
         }
         catch (RequestNotFoundException ex)
         {
             throw new HubException(ex.Message);
         }
+        catch (AssignmentAuthorizationException error)
+        {
+            throw ToHubException(error);
+        }
     }
+
+    /// <summary>
+    /// Second terminalization step: requires the matching Finalizing/Cancelling state and an
+    /// exact all-zero/true quiescence proof, then atomically persists the result (Complete
+    /// only), the request terminal status, and the assignment terminal status. Exact retries
+    /// return the persisted outcome without reopening.
+    /// </summary>
+    public async Task<CompletionGateDecisionMessage> ConfirmTerminalization(ConfirmTerminalizationMessage message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        RequireCorrelation(message.CorrelationId, message.ProjectId, message.RequestId, message.RootSessionId);
+        RequireEvidenceBounds(message.Evidence);
+        ArgumentNullException.ThrowIfNull(message.Proof);
+
+        try
+        {
+            var decision = await terminalization.ConfirmAsync(
+                new NodeId(nodeId),
+                new ProjectId(message.ProjectId),
+                new WorkRequestId(message.RequestId),
+                message.ClaimToken,
+                message.RootSessionId.Trim(),
+                message.Intent,
+                ToEvidence(message.Evidence),
+                message.Reason,
+                new AssignmentQuiescenceProof(
+                    message.Proof.AdmissionClosed,
+                    message.Proof.ActiveChildren,
+                    message.Proof.ActiveOperations,
+                    message.Proof.ActiveProcesses,
+                    message.Proof.PendingEvents,
+                    message.Proof.ActiveReservations,
+                    message.Proof.RepositoryInspected,
+                    message.Proof.ObservedAt),
+                Context.ConnectionAborted).ConfigureAwait(false);
+
+            return ToDecisionMessage(message.CorrelationId, decision);
+        }
+        catch (RequestNotFoundException ex)
+        {
+            throw new HubException(ex.Message);
+        }
+        catch (AssignmentAuthorizationException error)
+        {
+            throw ToHubException(error);
+        }
+    }
+
+    private static void RequireEvidenceBounds(CompletionEvidenceMessage? evidence)
+    {
+        if (evidence is null)
+        {
+            return;
+        }
+
+        if (evidence.SummaryMarkdown is { Length: > NodeTransportLimits.MaxCompletionSummaryBytes })
+        {
+            throw new HubException(
+                $"Completion summary exceeds the limit of {NodeTransportLimits.MaxCompletionSummaryBytes} bytes.");
+        }
+
+        if (evidence.ChangedFiles is { Count: > NodeTransportLimits.MaxChangedFiles })
+        {
+            throw new HubException(
+                $"Changed-file list exceeds the limit of {NodeTransportLimits.MaxChangedFiles}.");
+        }
+
+        if ((evidence.ReviewFindings ?? []).Count > NodeTransportLimits.MaxReviewFindings)
+        {
+            throw new HubException(
+                $"Review finding list exceeds the limit of {NodeTransportLimits.MaxReviewFindings}.");
+        }
+    }
+
+    private static CompletionEvidence? ToEvidence(CompletionEvidenceMessage? evidence) =>
+        evidence is null
+            ? null
+            : new CompletionEvidence(
+                evidence.SummaryMarkdown,
+                evidence.ChangedFiles,
+                (evidence.ReviewFindings ?? [])
+                    .Select(f => new ReviewFinding(f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden))
+                    .ToArray(),
+                evidence.VerificationSummary,
+                evidence.RequestBranch,
+                evidence.CheckpointCommitId);
+
+    private static CompletionGateDecisionMessage ToDecisionMessage(
+        Guid correlationId,
+        CompletionGateDecision decision) =>
+        new(
+            correlationId,
+            decision.Accepted,
+            decision.MissingRequirements,
+            decision.Result is null ? null : ToResultMessage(decision.Result));
 
 
     /// <summary>
@@ -494,9 +735,15 @@ public sealed class NodeHub(
     /// </summary>
     private async Task<ReservationOperationResultMessage> InvokeReservationAsync<TMessage>(
         TMessage message,
+        Guid projectId,
+        Guid requestId,
+        string claimToken,
+        string? sessionId,
         Func<IReservationService, CancellationToken, Task<ReservationLeaseDto>> invoke)
     {
         ArgumentNullException.ThrowIfNull(message);
+        var nodeId = RequireRegisteredNodeId();
+        await RequireActiveAsync(nodeId, requestId, projectId, claimToken, sessionId).ConfigureAwait(false);
         try
         {
             var lease = await invoke(reservationService, Context.ConnectionAborted).ConfigureAwait(false);
@@ -571,28 +818,201 @@ public sealed class NodeHub(
         await base.OnDisconnectedAsync(exception).ConfigureAwait(false);
     }
 
+    private Guid RequireAuthenticatedNodeId()
+    {
+        var claim = Context.User?.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (!Guid.TryParse(claim, out var nodeId) || nodeId == Guid.Empty)
+        {
+            throw new HubException("Authenticated node identity is missing or invalid.");
+        }
+
+        return nodeId;
+    }
+
+    private Guid RequireRegisteredNodeId()
+    {
+        var nodeId = RequireAuthenticatedNodeId();
+        if (!nodeConnections.IsBound(nodeId, Context.ConnectionId))
+        {
+            throw new HubException("Node connection is not registered.");
+        }
+
+        return nodeId;
+    }
+
+    private Guid RequireRegisteredNodeId(Guid assertedNodeId)
+    {
+        var nodeId = RequireRegisteredNodeId();
+        RequireMatchingNodeId(assertedNodeId, nodeId);
+        return nodeId;
+    }
+
+    private static void RequireMatchingNodeId(Guid assertedNodeId, Guid authenticatedNodeId)
+    {
+        if (assertedNodeId != authenticatedNodeId)
+        {
+            throw new HubException("Message node identity does not match the authenticated node.");
+        }
+    }
+
+    private async Task RequireActiveAsync(
+        Guid nodeId,
+        Guid requestId,
+        Guid projectId,
+        string claimToken,
+        string? sessionId = null)
+    {
+        try
+        {
+            await assignmentAuthorizer.RequireActiveAsync(
+                new NodeId(nodeId),
+                new WorkRequestId(requestId),
+                new ProjectId(projectId),
+                claimToken,
+                sessionId,
+                Context.ConnectionAborted).ConfigureAwait(false);
+        }
+        catch (AssignmentAuthorizationException error)
+        {
+            throw ToHubException(error);
+        }
+    }
+
+    private async Task RequireHistoricalEventsAsync(
+        Guid nodeId,
+        IReadOnlyList<NodeEventMessage> events)
+    {
+        var requests = new AssignmentEventAuthorizationRequest[events.Count];
+        for (var index = 0; index < events.Count; index++)
+        {
+            var @event = events[index];
+            if (@event.RequestId is not Guid requestId)
+            {
+                throw new HubException(
+                    $"Assignment authorization denied ({AssignmentAuthorizationCodes.InvalidInput}).");
+            }
+
+            requests[index] = new AssignmentEventAuthorizationRequest(
+                new WorkRequestId(requestId),
+                new ProjectId(@event.ProjectId),
+                @event.ClaimToken,
+                @event.SessionId,
+                @event.EventId,
+                @event.Type);
+        }
+
+        try
+        {
+            await assignmentAuthorizer.RequireHistoricalEventsAsync(
+                new NodeId(nodeId),
+                requests,
+                Context.ConnectionAborted).ConfigureAwait(false);
+        }
+        catch (AssignmentAuthorizationException error)
+        {
+            throw ToHubException(error);
+        }
+    }
+
+    private async Task<IReadOnlyList<string>> FilterHeartbeatSessionsAsync(
+        Guid nodeId,
+        IReadOnlyCollection<string> sessionIds)
+    {
+        try
+        {
+            return await assignmentAuthorizer.FilterHeartbeatSessionsAsync(
+                new NodeId(nodeId),
+                sessionIds,
+                Context.ConnectionAborted).ConfigureAwait(false);
+        }
+        catch (AssignmentAuthorizationException error)
+        {
+            throw ToHubException(error);
+        }
+    }
+
+    private static HubException ToHubException(AssignmentAuthorizationException error) =>
+        new($"Assignment authorization denied ({error.Code}).");
+
     private static TimeSpan ClampLease(int leaseSeconds) => TimeSpan.FromSeconds(
         Math.Clamp(leaseSeconds, NodeTransportLimits.MinLeaseSeconds, NodeTransportLimits.MaxLeaseSeconds));
 
-    private static RequestClaimMessage ToMessage(RequestClaimDto claim) => new(
-        claim.RequestId,
-        claim.ProjectId,
-        claim.NodeId,
-        claim.ClaimToken,
-        claim.ClaimedAt,
-        claim.LeaseExpiresAt,
-        claim.RepositoryPath,
-        claim.DefaultBranch,
-        claim.Title,
-        claim.Prompt,
-        claim.Kind,
-        claim.RiskLevel,
-        claim.CreateRequestBranch,
-        claim.CreateRequestCommit);
+    private static NodeExecutionStatusDto? ToExecutionStatusDto(NodeExecutionStatusMessage? status)
+    {
+        if (status is null)
+        {
+            return null;
+        }
 
-    private static NodeEventDto ToDto(NodeEventMessage message) => new(
+        if (status.ActiveAssignmentIds is null || status.Routes is null)
+        {
+            throw new HubException("Execution status assignments and routes are required.");
+        }
+
+        return new NodeExecutionStatusDto(
+            status.ObservedAt,
+            status.AvailableRequestSlots,
+            status.ActiveAssignmentIds,
+            status.RoutingRevision,
+            status.Routes.Select(route => new RuntimeRouteReadinessDto(
+                route.Role,
+                route.CanonicalModel,
+                route.Readiness,
+                route.EvidenceSource,
+                route.ObservedAt,
+                route.RoutingRevision)).ToArray());
+    }
+
+    private static ExecutionAssignmentInventoryDto ToDto(
+        ExecutionAssignmentInventoryItemMessage item)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        ArgumentNullException.ThrowIfNull(item.Assignment);
+        var assignment = item.Assignment;
+        return new ExecutionAssignmentInventoryDto(
+            new WorkRequestId(assignment.RequestId),
+            new ProjectId(assignment.ProjectId),
+            new WorkspaceBindingId(assignment.WorkspaceBindingId),
+            new NodeId(assignment.NodeIdSnapshot),
+            assignment.CanonicalRepositoryPathSnapshot,
+            assignment.DefaultBranchSnapshot,
+            assignment.BindingValidationRevisionSnapshot,
+            Enum.TryParse<ExecutionAssignmentState>(
+                assignment.State,
+                ignoreCase: false,
+                out var state)
+                && Enum.IsDefined(state)
+                    ? state
+                    : null,
+            assignment.ClaimToken,
+            assignment.AssignedAt,
+            item.SupervisorState,
+            item.RepositoryKnown,
+            item.PendingEventCount);
+    }
+
+    private static ExecutionAssignmentMessage ToMessage(ExecutionAssignmentDto assignment) => new(
+        assignment.RequestId.Value,
+        assignment.ProjectId.Value,
+        assignment.WorkspaceBindingId.Value,
+        assignment.NodeIdSnapshot.Value,
+        assignment.CanonicalRepositoryPathSnapshot,
+        assignment.DefaultBranchSnapshot,
+        assignment.BindingValidationRevisionSnapshot,
+        assignment.State.ToString(),
+        assignment.ClaimToken,
+        assignment.AssignedAt,
+        assignment.LeaseExpiresAt,
+        assignment.RequestTitle,
+        assignment.RequestPrompt,
+        assignment.RequestKind.ToString(),
+        assignment.RequestRiskLevel.ToString(),
+        assignment.CreateRequestBranch,
+        assignment.CreateRequestCommit);
+
+    private static NodeEventDto ToDto(NodeEventMessage message, Guid nodeId) => new(
         message.EventId,
-        message.NodeId,
+        nodeId,
         message.ProjectId,
         message.RequestId,
         message.SessionId,
@@ -729,7 +1149,7 @@ public sealed class NodeHub(
         }
     }
 
-    private static VerificationRunMessage ToMessage(
+    private static VerificationRunResultMessage ToMessage(
         Guid correlationId,
         Guid projectId,
         string sessionId,
@@ -761,5 +1181,6 @@ public sealed class NodeHub(
         result.RequestBranch,
         result.CheckpointCommitId);
 
+    private const string AssignmentInventoryReconciledKey = "assignments:reconciled";
     private const string SessionGroupsKey = "mail:sessionGroups";
 }

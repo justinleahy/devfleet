@@ -1,10 +1,16 @@
+/* Tree node: mobile-first. Depth is carried by a single hairline guide plus a small indent step,
+   so a five-deep tree still leaves room for text at 320px. Status never relies on colour alone —
+   the liveness marker changes shape, and every dimension is also spelled out in the fact list. */
+
 li {
-    padding-block: calc(var(--design-unit) * 1px);
+    min-width: 0;
+    padding-block: calc(var(--design-unit) * 0.5px);
 }
 
 .subtree {
-    margin: 0 0 0 calc(var(--design-unit) * 4px);
-    padding: 0 0 0 calc(var(--design-unit) * 4px);
+    margin: 0;
+    /* 8px step on phone: enough to read the nesting, cheap enough to repeat. */
+    padding: 0 0 0 calc(var(--design-unit) * 2px);
     list-style: none;
     border-inline-start: 1px solid var(--neutral-stroke-divider-rest);
 }
@@ -12,77 +18,173 @@ li {
 .agent-node {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 1px);
+    gap: calc(var(--design-unit) * 1.5px);
+    min-width: 0;
     padding-block: calc(var(--design-unit) * 2px);
 }
 
+/* Head: identity above flags on phone, one baseline row once there is width. */
 .agent-head {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1.5px);
+    min-width: 0;
+}
+
+.agent-identity {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.agent-flags {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: calc(var(--design-unit) * 1.5px);
+    min-width: 0;
 }
 
 .agent-name {
     font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
 .agent-role {
     color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    overflow-wrap: anywhere;
 }
 
+/* Reason / current operation: labelled prose, wraps hard rather than pushing the row wide. */
 .agent-reason {
     margin: 0;
-    max-width: 88ch;
-    overflow-wrap: anywhere;
-}
-
-.agent-meta {
     display: flex;
-    flex-wrap: wrap;
-    gap: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 4px);
-    color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-minus-1-font-size);
-    font-variant-numeric: tabular-nums;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 0.5px);
+    max-width: 72ch;
+    min-width: 0;
 }
 
-.agent-id,
-.agent-model {
-    font-family: var(--monospace-font-family, ui-monospace, monospace);
+.agent-reason-key {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.agent-reason-value {
     overflow-wrap: anywhere;
 }
 
+/* Fact list: one column on phone, label above value; label-value rows in columns above 600px. */
+.agent-meta {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: calc(var(--design-unit) * 1.5px);
+    margin: 0;
+    min-width: 0;
+    font-size: var(--type-ramp-minus-1-font-size);
+}
+
+.meta-item {
+    min-width: 0;
+}
+
+.agent-meta dt {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.agent-meta dd {
+    margin: 0;
+    min-width: 0;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.agent-meta dd.is-mono {
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+}
+
+/* Liveness marker: filled disc = online, hollow ring = idle/unknown, square = gone.
+   Shape carries the state on its own; colour only reinforces it. */
 .liveness-dot {
-    inline-size: 8px;
-    block-size: 8px;
+    inline-size: 10px;
+    block-size: 10px;
+    border: 2px solid var(--neutral-foreground-hint);
     border-radius: 50%;
-    background: var(--neutral-foreground-hint);
+    background: transparent;
     flex: 0 0 auto;
 }
 
 .liveness-dot.is-online {
+    border-color: var(--accent-fill-rest);
     background: var(--accent-fill-rest);
 }
 
 .liveness-dot.is-gone {
+    border-radius: 1px;
+    border-color: var(--error, var(--neutral-foreground-hint));
     background: var(--error, var(--neutral-foreground-hint));
 }
 
-.visually-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    margin: -1px;
-    padding: 0;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-    border: 0;
+@media (min-width: 600px) {
+    .subtree {
+        padding-inline-start: calc(var(--design-unit) * 3px);
+    }
+
+    .agent-head {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        column-gap: calc(var(--design-unit) * 3px);
+    }
+
+    .agent-reason {
+        flex-direction: row;
+        align-items: baseline;
+        gap: calc(var(--design-unit) * 2px);
+    }
+
+    .agent-reason-key {
+        flex: 0 0 auto;
+    }
+
+    .agent-meta {
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        column-gap: calc(var(--design-unit) * 4px);
+    }
+
+    .meta-item {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+    }
 }
 
-@media (max-width: 620px) {
+@media (min-width: 1280px) {
     .subtree {
-        margin-inline-start: calc(var(--design-unit) * 2px);
-        padding-inline-start: calc(var(--design-unit) * 2px);
+        padding-inline-start: calc(var(--design-unit) * 4px);
+    }
+
+    /* Desktop trades vertical rhythm for density: labels sit beside their values. */
+    .agent-meta {
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        row-gap: calc(var(--design-unit) * 1px);
+    }
+
+    .meta-item {
+        display: grid;
+        grid-template-columns: calc(var(--design-unit) * 17px) minmax(0, 1fr);
+        align-items: baseline;
+        column-gap: calc(var(--design-unit) * 2px);
     }
 }

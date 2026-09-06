@@ -1,6 +1,6 @@
 namespace PiCommandCenter.Node;
 
-/// <summary>Aggregates cancellation and heartbeat visibility for root and child sessions.</summary>
+/// <summary>Provides child-only cancellation and combined root/child heartbeat visibility.</summary>
 internal sealed class ChildSessionCanceller(
     Child.PiChildSessionSupervisor children,
     IRootSessionSupervisor roots) : ISessionCanceller
@@ -13,13 +13,6 @@ internal sealed class ChildSessionCanceller(
     public IReadOnlyList<string> ActiveSessionIds
         => [.. _roots.ActiveSessionIds, .. _children.ActiveSessionIds];
 
-    public async Task<bool> CancelSessionAsync(string sessionId, string reason)
-    {
-        if (await _children.CancelSessionAsync(sessionId, reason).ConfigureAwait(false))
-        {
-            return true;
-        }
-
-        return await _roots.CancelSessionAsync(sessionId, reason).ConfigureAwait(false);
-    }
+    public Task<bool> CancelChildSessionAsync(string sessionId, string reason)
+        => _children.CancelSessionAsync(sessionId, reason);
 }

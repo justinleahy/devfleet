@@ -8,6 +8,7 @@
 @using PiCommandCenter.Application.Sessions
 @using PiCommandCenter.Domain
 @using PiCommandCenter.Domain.Nodes
+@using PiCommandCenter.Domain.Projects
 @using PiCommandCenter.Domain.Requests
 @using PiCommandCenter.Domain.Sessions
 @using PiCommandCenter.Application.Live
@@ -26,23 +27,17 @@
 <FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
 
     <header class="page-head">
-        <FluentStack Class="page-head-row"
-                     Orientation="Orientation.Horizontal"
-                     VerticalAlignment="VerticalAlignment.Bottom"
-                     HorizontalGap="16"
-                     Width="100%">
-            <FluentStack Class="page-head-copy" Orientation="Orientation.Vertical" VerticalGap="4" Width="auto">
-                <h1>Fleet dashboard</h1>
-                <p class="page-lead">
-                    Registered projects and their queued work, read straight from the control-plane
-                    database as each write commits. Snapshot @_snapshot.ToString("u").
-                </p>
-            </FluentStack>
-            <FluentSpacer />
-            <FluentButton Class="page-head-action" Appearance="Appearance.Accent" OnClick="OpenRegistration">
-                Register project
-            </FluentButton>
-        </FluentStack>
+        <div class="page-head-copy">
+            <h1>Fleet</h1>
+            <p class="page-lead">
+                Registered projects and their queued work, read straight from the control-plane
+                database as each write commits.
+            </p>
+            <p class="page-snapshot">Snapshot @_snapshot.ToString("u")</p>
+        </div>
+        <FluentButton Class="page-head-action" Appearance="Appearance.Accent" OnClick="OpenRegistration">
+            Register project
+        </FluentButton>
     </header>
 
     <section class="metrics" aria-label="Fleet summary">
@@ -60,7 +55,7 @@
                 <dt>Queued requests</dt>
                 <dd>@_queuedRequests</dd>
             </div>
-            <div class="metric">
+            <div class="metric @(_attentionSessions > 0 ? "is-alert" : null)">
                 <dt>Needs attention</dt>
                 <dd><a href="/attention">@_attentionSessions</a></dd>
                 <p class="metric-note">
@@ -72,8 +67,16 @@
     </section>
 
     <section aria-labelledby="nodes-heading">
-        <h2 id="nodes-heading">Nodes</h2>
-        <p class="panel-lead">@NodeCountNote()</p>
+        <div class="section-head">
+            <h2 id="nodes-heading">Nodes</h2>
+            <p class="section-meta">
+                @if (_nodeError is null && _nodes.Count > 0)
+                {
+                    <span class="section-count">@_onlineNodes online</span>
+                }
+                <span class="section-note">@NodeCountNote()</span>
+            </p>
+        </div>
 
         @if (_nodeError is not null)
         {
@@ -104,13 +107,17 @@
                 {
                     <li class="node-row">
                         <div class="node-head">
-                            <span class="node-name">@node.DisplayName</span>
-                            <FluentBadge Appearance="@BadgeAppearance(node.Status)">@node.Status.ToString()</FluentBadge>
-                            <span class="node-version">agent @node.AgentVersion</span>
-                            <span class="node-seen">
-                                <span class="visually-hidden">Last heartbeat</span>
-                                @Relative(node.LastHeartbeatAt, _snapshot)
-                                <span class="node-seen-utc">@node.LastHeartbeatAt.ToString("u")</span>
+                            <span class="node-ident">
+                                <span class="node-name">@node.DisplayName</span>
+                                <FluentBadge Appearance="@BadgeAppearance(node.Status)">@node.Status.ToString()</FluentBadge>
+                            </span>
+                            <span class="node-meta">
+                                <span class="node-version">agent @node.AgentVersion</span>
+                                <span class="node-seen">
+                                    <span class="visually-hidden">Last heartbeat</span>
+                                    @Relative(node.LastHeartbeatAt, _snapshot)
+                                    <span class="node-seen-utc">@node.LastHeartbeatAt.ToString("u")</span>
+                                </span>
                             </span>
                         </div>
 
@@ -182,16 +189,12 @@
     </section>
 
     <section aria-labelledby="projects-heading">
-        <FluentStack Orientation="Orientation.Horizontal"
-                     VerticalAlignment="VerticalAlignment.Center"
-                     HorizontalGap="12"
-                     Width="100%">
+        <div class="section-head">
             <h2 id="projects-heading">Projects</h2>
-            <FluentSpacer />
-            <FluentButton Appearance="Appearance.Stealth" OnClick="ReloadAsync" Disabled="@_loading">
+            <FluentButton Class="section-action" Appearance="Appearance.Stealth" OnClick="ReloadAsync" Disabled="@_loading">
                 Reload
             </FluentButton>
-        </FluentStack>
+        </div>
 
         @if (_loadError is not null)
         {
@@ -214,8 +217,8 @@
                 <div class="state-empty">
                     <h3>No projects registered</h3>
                     <p>
-                        Register a local Git repository to give the fleet somewhere to work. The path
-                        must exist on this machine and contain a repository.
+                        Register a project to give the fleet somewhere to queue work. Registration
+                        records project settings only; a node-local workspace is bound afterwards.
                     </p>
                     <FluentButton Appearance="Appearance.Accent" OnClick="OpenRegistration">
                         Register project
@@ -225,60 +228,93 @@
         }
         else
         {
-            <FluentGrid Spacing="3" Justify="JustifyContent.FlexStart" Width="100%">
+            <FluentGrid Class="project-grid" Spacing="3" Justify="JustifyContent.FlexStart" Width="100%">
                 @foreach (var project in _projects)
                 {
                     <FluentGridItem xs="12" md="6" xl="4">
                         <FluentCard Height="100%">
                             <article class="project-card">
-                                <FluentStack Orientation="Orientation.Horizontal"
-                                             VerticalAlignment="VerticalAlignment.Center"
-                                             HorizontalGap="8">
+                                <div class="project-head">
                                     <h3>
                                         <a href="@($"/projects/{project.Id}")">@project.DisplayName</a>
                                     </h3>
-                                    <FluentSpacer />
                                     <FluentBadge Appearance="@(project.Enabled ? Appearance.Accent : Appearance.Neutral)">
                                         @(project.Enabled ? "Enabled" : "Disabled")
                                     </FluentBadge>
-                                </FluentStack>
+                                </div>
 
                                 <p class="project-summary">@Summarize(project.Id)</p>
 
                                 <dl class="facts">
-                                    <dt>Repository path</dt>
-                                    <dd class="path">@project.RepositoryPath</dd>
                                     <dt>Default branch</dt>
                                     <dd>@project.DefaultBranch</dd>
-                                    <dt>Node</dt>
+                                    <dt>Workspace</dt>
+                                    @if (project.Binding is { } binding)
+                                    {
+                                        <dd class="path">@WorkspacePath(binding)</dd>
+                                        <dt>Node</dt>
+                                        <dd>
+                                            @{
+                                                var node = FindNode(binding.NodeId);
+                                            }
+                                            @if (node is null)
+                                            {
+                                                <span class="node-missing">Not registered</span>
+                                                <span class="path node-id">@binding.NodeId</span>
+                                            }
+                                            else
+                                            {
+                                                <span class="node-inline">
+                                                    <span class="node-name">@node.DisplayName</span>
+                                                    <FluentBadge Appearance="@BadgeAppearance(node.Status)">@node.Status.ToString()</FluentBadge>
+                                                    <span class="node-seen">
+                                                        <span class="visually-hidden">Last heartbeat</span>
+                                                        @Relative(node.LastHeartbeatAt, _snapshot)
+                                                    </span>
+                                                </span>
+                                            }
+                                        </dd>
+                                    }
+                                    else
+                                    {
+                                        <dd>
+                                            <span class="node-missing">Unbound</span>
+                                            <span class="node-seen">No node-local workspace is designated yet.</span>
+                                        </dd>
+                                    }
+                                    <dt>Readiness</dt>
                                     <dd>
-                                        @{
-                                            var node = FindNode(project.NodeId);
-                                        }
-                                        @if (node is null)
+                                        @if (Scheduling(project.Id) is { } scheduling)
                                         {
-                                            <span class="node-missing">Not registered</span>
-                                            <span class="path node-id">@project.NodeId</span>
+                                            <span class="node-inline">
+                                                <FluentBadge Appearance="@(scheduling.IsEligible ? Appearance.Accent : Appearance.Neutral)">
+                                                    @SchedulingLabel(scheduling.Code)
+                                                </FluentBadge>
+                                            </span>
+                                            <span class="node-seen">@scheduling.Detail</span>
+                                            <span class="node-seen">@scheduling.Action</span>
                                         }
                                         else
                                         {
                                             <span class="node-inline">
-                                                <span class="node-name">@node.DisplayName</span>
-                                                <FluentBadge Appearance="@BadgeAppearance(node.Status)">@node.Status.ToString()</FluentBadge>
-                                                <span class="node-seen">
-                                                    <span class="visually-hidden">Last heartbeat</span>
-                                                    @Relative(node.LastHeartbeatAt, _snapshot)
-                                                </span>
+                                                <FluentBadge Appearance="@BindingStateAppearance(project.Binding)">
+                                                    @BindingStateLabel(project.Binding)
+                                                </FluentBadge>
+                                            </span>
+                                            <span class="node-seen">@BindingStateNote(project.Binding)</span>
+                                            <span class="node-seen">
+                                                Nothing is queued, so the control plane projects no scheduling
+                                                decision for this project.
                                             </span>
                                         }
                                     </dd>
                                 </dl>
 
-                                <FluentStack Class="card-action" Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
+                                <div class="card-action">
                                     <FluentAnchor Href="@($"/projects/{project.Id}")" Appearance="Appearance.Outline">
                                         Open project
                                     </FluentAnchor>
-                                </FluentStack>
+                                </div>
                             </article>
                         </FluentCard>
                     </FluentGridItem>
@@ -299,8 +335,8 @@
             <header class="dialog-header">
                 <h2 id="register-heading">Register project</h2>
                 <p class="dialog-lead">
-                    The repository path is validated on this node before anything is written. Registration
-                    binds the project to this control plane's node identity.
+                    Registration records project settings only. No repository path or node is chosen
+                    here; a workspace is bound to a node after the project exists.
                 </p>
             </header>
 
@@ -331,12 +367,12 @@
                     <FluentMessageBar Intent="MessageIntent.Success"
                                       Title="Validation passed"
                                       AllowDismiss="false">
-                        The repository path and branch satisfy every registration rule.
+                        The project settings satisfy every registration rule.
                     </FluentMessageBar>
                 }
 
                 <section class="form-section" aria-labelledby="register-identity-heading">
-                    <h3 class="form-section-title" id="register-identity-heading">Repository</h3>
+                    <h3 class="form-section-title" id="register-identity-heading">Project</h3>
                     <div class="form-grid">
                         <FluentTextField @bind-Value="_form.DisplayName"
                                          Label="Display name"
@@ -348,11 +384,6 @@
                                          Required="true"
                                          Placeholder="main"
                                          Class="field" />
-                        <FluentTextField @bind-Value="_form.RepositoryPath"
-                                         Label="Repository path"
-                                         Required="true"
-                                         Placeholder="/home/user/Developer/project"
-                                         Class="field field-wide" />
                     </div>
                 </section>
 
@@ -378,7 +409,7 @@
                 </section>
 
                 <fieldset class="switch-set">
-                    <legend>Repository policy</legend>
+                    <legend>Request policy</legend>
                     <div class="switch-grid">
                         <FluentSwitch @bind-Value="_form.Enabled" Label="Enabled" />
                         <FluentSwitch @bind-Value="_form.RequireCleanStart" Label="Require clean start" />
@@ -394,7 +425,7 @@
                     Register project
                 </FluentButton>
                 <FluentButton Appearance="Appearance.Outline" OnClick="ValidateAsync" Disabled="@_submitting">
-                    Validate path
+                    Validate settings
                 </FluentButton>
                 <FluentButton Appearance="Appearance.Stealth" OnClick="CloseRegistration" Disabled="@_submitting" Class="action-cancel">
                     Cancel
@@ -408,6 +439,7 @@
     private readonly RegistrationForm _form = new();
     private readonly Dictionary<Guid, QueueCounts> _counts = [];
     private readonly Dictionary<Guid, NodeDto> _nodesById = [];
+    private readonly Dictionary<Guid, SchedulingStatusDto> _scheduling = [];
 
     private IReadOnlyList<ProjectDto> _projects = Array.Empty<ProjectDto>();
     private IReadOnlyList<NodeDto> _nodes = Array.Empty<NodeDto>();
@@ -482,6 +514,7 @@
         {
             var projects = await Catalog.ListAsync(CancellationToken.None);
             _counts.Clear();
+            _scheduling.Clear();
 
             var queued = 0;
             var agents = 0;
@@ -493,6 +526,11 @@
                 var requests = await Queue.ListAsync(new ProjectId(project.Id), CancellationToken.None);
                 var counts = await TallyAsync(requests);
                 _counts[project.Id] = counts;
+                if (HeadScheduling(requests) is { } scheduling)
+                {
+                    _scheduling[project.Id] = scheduling;
+                }
+
                 queued += counts.Queued;
                 agents += counts.Agents;
                 attention += counts.Attention;
@@ -511,6 +549,7 @@
             _loadError = ex.Message;
             _projects = Array.Empty<ProjectDto>();
             _counts.Clear();
+            _scheduling.Clear();
             _activeProjects = 0;
             _queuedRequests = 0;
             _activeSessions = 0;
@@ -557,6 +596,78 @@
 
     private NodeDto? FindNode(Guid nodeId) =>
         _nodesById.TryGetValue(nodeId, out var node) ? node : null;
+
+    // The node reports a canonical path once it has validated the designation; until then the
+    // operator's requested path is all the control plane knows.
+    private static string WorkspacePath(WorkspaceBindingDto binding) =>
+        binding.CanonicalRepositoryPath ?? binding.RepositoryPath;
+
+    /// <summary>
+    /// The scheduling decision the server already attached to this project's head-of-queue
+    /// request, or null when nothing is queued.
+    /// </summary>
+    private SchedulingStatusDto? Scheduling(Guid projectId) =>
+        _scheduling.TryGetValue(projectId, out var status) ? status : null;
+
+    // The queue is ordered priority first, then creation time, and only a queued request with no
+    // assignment carries a decision. Taking the first one mirrors the server's own precedence
+    // instead of re-deriving eligibility on the card.
+    private static SchedulingStatusDto? HeadScheduling(IReadOnlyList<WorkRequestDto> requests)
+    {
+        foreach (var request in requests)
+        {
+            if (request.SchedulingStatus is { } status)
+            {
+                return status;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Operator label for a server-issued scheduling code. The server owns precedence, detail,
+    /// and action text; this only names the code it already chose.
+    /// </summary>
+    private static string SchedulingLabel(string code) => code switch
+    {
+        SchedulingReasonCodes.ProjectDisabled => "Project disabled",
+        SchedulingReasonCodes.WorkspaceBindingMissing => "No workspace",
+        SchedulingReasonCodes.WorkspaceValidationPending => "Validation pending",
+        SchedulingReasonCodes.WorkspaceInvalid => "Workspace invalid",
+        SchedulingReasonCodes.NodeOffline => "Node offline",
+        SchedulingReasonCodes.RuntimeUnavailable => "Runtime unavailable",
+        SchedulingReasonCodes.RuntimeUnknown => "Runtime unknown",
+        SchedulingReasonCodes.NodeCapacityUnavailable => "At capacity",
+        SchedulingReasonCodes.ProjectConcurrencyUnavailable => "Project at limit",
+        SchedulingReasonCodes.Eligible => "Ready",
+        _ => code,
+    };
+
+    // With nothing queued there is no server decision to mirror, so the card reports the
+    // designation's own validation state and never claims the project is ready to run.
+    private static string BindingStateLabel(WorkspaceBindingDto? binding) => binding?.Status switch
+    {
+        null => "No workspace",
+        WorkspaceBindingStatus.PendingValidation => "Validation pending",
+        WorkspaceBindingStatus.Invalid => "Workspace invalid",
+        _ => "Workspace valid",
+    };
+
+    private static Appearance BindingStateAppearance(WorkspaceBindingDto? binding) =>
+        binding?.Status == WorkspaceBindingStatus.Valid ? Appearance.Accent : Appearance.Neutral;
+
+    private static string BindingStateNote(WorkspaceBindingDto? binding) => binding switch
+    {
+        null => "Designate a workspace on a node before this project can execute work.",
+        { Status: WorkspaceBindingStatus.PendingValidation } =>
+            $"The designated node has not answered validation revision {binding.ValidationRevision}.",
+        { Status: WorkspaceBindingStatus.Invalid } =>
+            binding.ValidationDetail is { Length: > 0 } detail
+                ? detail
+                : $"Node-local validation rejected revision {binding.ValidationRevision}.",
+        _ => $"Node-local validation passed at revision {binding.ValidationRevision}.",
+    };
 
     private string NodeCountNote()
     {
@@ -785,10 +896,6 @@
         {
             _registrationErrors = ex.Errors;
         }
-        catch (DuplicateProjectException)
-        {
-            _registrationErrors = new[] { "A project is already registered for that repository path." };
-        }
         catch (Exception ex)
         {
             _registrationErrors = new[] { ex.Message };
@@ -823,6 +930,7 @@
                 case WorkRequestStatus.Executing:
                 case WorkRequestStatus.Reviewing:
                 case WorkRequestStatus.Verifying:
+                case WorkRequestStatus.Cancelling:
                     active++;
                     break;
                 default:
@@ -883,8 +991,6 @@
     {
         public string? DisplayName { get; set; } = string.Empty;
 
-        public string? RepositoryPath { get; set; } = string.Empty;
-
         public string? DefaultBranch { get; set; } = "main";
 
         public bool Enabled { get; set; } = true;
@@ -905,15 +1011,10 @@
 
         public IReadOnlyList<string> LocalErrors()
         {
-            var errors = new List<string>(3);
+            var errors = new List<string>(2);
             if (string.IsNullOrWhiteSpace(DisplayName))
             {
                 errors.Add("Display name is required.");
-            }
-
-            if (string.IsNullOrWhiteSpace(RepositoryPath))
-            {
-                errors.Add("Repository path is required.");
             }
 
             if (string.IsNullOrWhiteSpace(DefaultBranch))
@@ -926,7 +1027,6 @@
 
         public RegisterProjectCommand ToCommand() => new(
             (DisplayName ?? string.Empty).Trim(),
-            (RepositoryPath ?? string.Empty).Trim(),
             (DefaultBranch ?? string.Empty).Trim(),
             Enabled,
             MaxActiveWriteRequests,
@@ -940,7 +1040,6 @@
         public void Reset()
         {
             DisplayName = string.Empty;
-            RepositoryPath = string.Empty;
             DefaultBranch = "main";
             Enabled = true;
             MaxActiveWriteRequests = 1;

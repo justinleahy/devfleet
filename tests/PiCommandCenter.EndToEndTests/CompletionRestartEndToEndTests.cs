@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Projects;
 using PiCommandCenter.Application.Requests;
+using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Domain.Reservations;
@@ -39,10 +40,8 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
             var catalog = scope.ServiceProvider.GetRequiredService<IProjectCatalog>();
             var queue = scope.ServiceProvider.GetRequiredService<IRequestQueue>();
             var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
-            var repo = _fixture.CreateGitRepository();
             var project = await catalog.RegisterAsync(new RegisterProjectCommand(
                 "Completion Demo",
-                repo,
                 "main",
                 true,
                 1,
@@ -124,12 +123,35 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
             });
             await db.SaveChangesAsync();
 
-            var gate = scope.ServiceProvider.GetRequiredService<ICompletionGateService>();
-            var decision = await gate.EvaluateAsync(
-                new ProjectId(projectId),
+            var nodeId = NodeId.New();
+            db.FleetNodes.Add(PiCommandCenter.Domain.Nodes.FleetNode.Register(nodeId, "node-e2e", "1.0.0", "{}", now));
+            var repositoryPath = Path.Combine(Path.GetTempPath(), requestId.ToString());
+            var binding = PiCommandCenter.Domain.Projects.WorkspaceBinding.Designate(
+                new ProjectId(projectId), nodeId, repositoryPath, now);
+            db.WorkspaceBindings.Add(binding);
+            db.ExecutionAssignments.Add(ExecutionAssignment.Create(
                 new WorkRequestId(requestId),
-                "root",
-                new CompletionEvidence("Done.", ["README.md"], [], "true passed"));
+                new ProjectId(projectId),
+                binding.Id,
+                nodeId,
+                repositoryPath,
+                "main",
+                binding.ValidationRevision,
+                "e2e-claim",
+                now,
+                TimeSpan.FromMinutes(5)));
+            await db.SaveChangesAsync();
+
+            var authority = scope.ServiceProvider.GetRequiredService<IAssignmentTerminalizationService>();
+            var evidence = new CompletionEvidence("Done.", ["README.md"], [], "true passed");
+            var begin = await authority.BeginAsync(
+                nodeId, new ProjectId(projectId), new WorkRequestId(requestId),
+                "e2e-claim", "root", TerminalizationIntent.Complete, evidence, reason: null);
+            Assert.True(begin.Accepted, string.Join(",", begin.MissingRequirements));
+            var decision = await authority.ConfirmAsync(
+                nodeId, new ProjectId(projectId), new WorkRequestId(requestId),
+                "e2e-claim", "root", TerminalizationIntent.Complete, evidence, reason: null,
+                new AssignmentQuiescenceProof(true, 0, 0, 0, 0, 0, true, now));
             Assert.True(decision.Accepted, string.Join(",", decision.MissingRequirements));
         }
 
@@ -137,10 +159,10 @@ public sealed class CompletionRestartEndToEndTests : IClassFixture<EndToEndFixtu
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={_fixture.SqlitePath}");
             builder.UseSetting("Projects:ApprovedRoots:0", _fixture.ApprovedRoot);
-            builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialFile);
+            builder.UseTestAuthFiles(_fixture.PasswordFile, _fixture.CredentialDirectory);
         });
         using var restartScope = restarted.Services.CreateScope();
-        var restored = restartScope.ServiceProvider.GetRequiredService<ICompletionGateService>();
+        var restored = restartScope.ServiceProvider.GetRequiredService<IAssignmentTerminalizationService>();
         var result = await restored.GetResultAsync(new WorkRequestId(requestId));
         Assert.NotNull(result);
         Assert.Equal("Done.", result!.SummaryMarkdown);

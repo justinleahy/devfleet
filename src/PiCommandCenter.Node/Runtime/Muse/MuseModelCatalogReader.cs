@@ -7,10 +7,11 @@ using PiCommandCenter.Application.Runtime;
 namespace PiCommandCenter.Node.Runtime.Muse;
 
 /// <summary>
-/// Launches a separate read-only Muse host, handshakes, calls <c>model/list {}</c> only, combines
-/// its valid non-default model ids with DevFleet's curated native ids, prefixes them with
-/// <c>muse/</c>, deduplicates, sorts, and terminates the host. Errors are stable sentences without
-/// raw provider output; a login failure yields the local-login guidance.
+/// Launches a separate read-only Muse host, handshakes, calls <c>model/list {}</c> only, and
+/// preserves the valid native model ids before combining them with DevFleet's curated discovery
+/// aliases. All ids are prefixed with <c>muse/</c>, deduplicated, sorted, and the host is
+/// terminated. Errors are stable sentences without raw provider output; a login failure yields
+/// the local-login guidance.
 /// </summary>
 public sealed class MuseModelCatalogReader : IMuseModelCatalogReader
 {
@@ -119,12 +120,10 @@ public sealed class MuseModelCatalogReader : IMuseModelCatalogReader
             return MuseModelCatalogResult.Failure("Muse model discovery returned no model list.");
         }
 
-        var selectors = new SortedSet<string>(StringComparer.Ordinal);
-        foreach (var modelId in CuratedModelIds)
-        {
-            selectors.Add(AgentModelSelector.Muse + "/" + modelId);
-        }
-
+        var selectors = new SortedSet<string>(
+            CuratedModelIds.Select(modelId => AgentModelSelector.Muse + "/" + modelId),
+            StringComparer.Ordinal);
+        var nativeSelectors = new SortedSet<string>(StringComparer.Ordinal);
         foreach (var entry in models.EnumerateArray())
         {
             var modelId = MuseProtocol.GetString(entry, "modelId")?.Trim();
@@ -137,10 +136,11 @@ public sealed class MuseModelCatalogReader : IMuseModelCatalogReader
             if (AgentModelSelector.TryParse(selector, out var parsed))
             {
                 selectors.Add(parsed.Value);
+                nativeSelectors.Add(parsed.Value);
             }
         }
 
-        return new MuseModelCatalogResult(selectors.ToArray(), null);
+        return new MuseModelCatalogResult(selectors.ToArray(), nativeSelectors.ToArray(), null);
     }
 
     private static string DescribeFailure(string detail, IReadOnlyList<string> stderrTail)

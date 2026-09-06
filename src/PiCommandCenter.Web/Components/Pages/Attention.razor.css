@@ -1,21 +1,51 @@
+/* Phone first: one column, tight rhythm, full-width action. Wider viewports only
+   add a second axis; nothing below is undone by the breakpoints. */
+.page {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 4px);
+    min-width: 0;
+}
+
 .page-head {
     display: flex;
     flex-direction: column;
-    gap: calc(var(--design-unit) * 2px);
+    gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
+}
+
+.page-head-text {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
 }
 
 .page-head h1 {
     margin: 0;
-    font-size: var(--type-ramp-plus-4-font-size);
-    line-height: var(--type-ramp-plus-4-line-height);
+    font-size: var(--type-ramp-plus-3-font-size);
+    line-height: var(--type-ramp-plus-3-line-height);
     font-weight: 600;
     letter-spacing: -0.02em;
+    overflow-wrap: anywhere;
 }
 
 .page-lead {
     margin: 0;
-    max-width: 78ch;
+    max-width: 68ch;
     color: var(--neutral-foreground-hint);
+}
+
+.page-head-actions {
+    display: flex;
+    flex-shrink: 0;
+    gap: calc(var(--design-unit) * 2px);
+}
+
+.page-head-actions ::deep fluent-button,
+.page-head-actions ::deep fluent-button::part(control) {
+    width: 100%;
+    min-height: 44px;
 }
 
 .scan-note {
@@ -23,28 +53,36 @@
     color: var(--neutral-foreground-hint);
     font-family: var(--monospace-font-family, ui-monospace, monospace);
     font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
 }
 
 .state-block {
     display: flex;
     align-items: center;
     gap: calc(var(--design-unit) * 3px);
-    padding: calc(var(--design-unit) * 6px) 0;
+    padding-block: calc(var(--design-unit) * 5px);
     color: var(--neutral-foreground-hint);
 }
 
+/* Bordered surface rather than an oversized card: the empty state is a note,
+   not a piece of evidence. */
 .state-empty {
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: calc(var(--design-unit) * 3px);
-    padding: calc(var(--design-unit) * 7px);
+    padding: calc(var(--design-unit) * 4px);
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--control-corner-radius) * 1px);
+    background: var(--neutral-layer-1);
 }
 
 .state-empty h2 {
     margin: 0;
-    font-size: var(--type-ramp-plus-2-font-size);
-    line-height: var(--type-ramp-plus-2-line-height);
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
     font-weight: 600;
 }
 
@@ -54,13 +92,54 @@
     color: var(--neutral-foreground-hint);
 }
 
+.state-empty ::deep fluent-anchor::part(control) {
+    min-height: 44px;
+}
+
 .signal-stack {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
 }
 
 .error-list {
     margin: 0;
-    padding-inline-start: calc(var(--design-unit) * 5px);
+    padding-inline-start: calc(var(--design-unit) * 4px);
+    overflow-wrap: anywhere;
+}
+
+@media (min-width: 600px) {
+    .page-head-actions ::deep fluent-button,
+    .page-head-actions ::deep fluent-button::part(control) {
+        width: auto;
+    }
+}
+
+/* Desktop: the heading and its action share one row and the evidence rows
+   tighten up so more of the queue is visible at once. */
+@media (min-width: 960px) {
+    .page {
+        gap: calc(var(--design-unit) * 5px);
+    }
+
+    .page-head {
+        flex-direction: row;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .page-head h1 {
+        font-size: var(--type-ramp-plus-4-font-size);
+        line-height: var(--type-ramp-plus-4-line-height);
+    }
+
+    .page-head-actions ::deep fluent-button::part(control) {
+        min-height: 32px;
+    }
+
+    .signal-stack {
+        gap: calc(var(--design-unit) * 2px);
+    }
 }

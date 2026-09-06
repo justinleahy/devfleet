@@ -16,6 +16,8 @@ using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Verification;
 using PiCommandCenter.Node.Repository;
 using PiCommandCenter.Node.Verification;
+using PiCommandCenter.Node.Quiescence;
+
 namespace PiCommandCenter.Node.Tests;
 
 /// <summary>
@@ -39,7 +41,9 @@ public class PiChildSessionSupervisorTests : IDisposable
     private readonly FakeRepositoryInspector _repository = new();
     private readonly FakeCrashRecovery _crash = new();
     private readonly FakeCompletionGateway _completion = new();
+    private readonly NodeAssignmentCredentialSource _assignmentCredentials = new();
     private readonly RequestWorkspaceTracker _workspace = new();
+    private readonly RequestAdmissionGate _admission = new(TimeProvider.System);
     private readonly List<(string Type, IReadOnlyDictionary<string, object?> Payload)> _parentEvents = [];
 
     public PiChildSessionSupervisorTests()
@@ -85,10 +89,17 @@ public class PiChildSessionSupervisorTests : IDisposable
         };
 
     private PiOrchestrationContext RootContext(string requestId)
-        => new(
+    {
+        var projectId = Guid.NewGuid();
+        _assignmentCredentials.Track(new NodeAssignmentCredential(
+            Guid.Parse(requestId),
+            projectId,
+            "child-session-supervisor-test-token"));
+
+        return new PiOrchestrationContext(
             "root-session-1",
             Guid.NewGuid().ToString("D"),
-            Guid.NewGuid().ToString("D"),
+            projectId.ToString("D"),
             requestId,
             ParentSessionId: null,
             EmitAsync: (type, payload, _) =>
@@ -97,6 +108,7 @@ public class PiChildSessionSupervisorTests : IDisposable
                 return Task.CompletedTask;
             },
             RepositoryRoot: _repoRoot);
+    }
 
     private static PiToolResponse Invoke(
         PiChildSessionSupervisor supervisor,
@@ -568,6 +580,28 @@ public class PiChildSessionSupervisorTests : IDisposable
     }
 
     [Fact]
+    public void Verification_records_the_exact_requesting_session()
+    {
+        var requestId = Guid.NewGuid();
+        var context = RootContext(requestId.ToString("D")) with
+        {
+            SessionId = "requesting-root-session",
+        };
+
+        var response = Invoke(
+            _supervisor,
+            context,
+            "verification.request",
+            new { profileId = "default" });
+
+        Assert.True(response.Ok);
+        Assert.Equal(context.SessionId, _verification.LastContext?.OwnerSessionId);
+        var recorded = Assert.Single(_completion.Runs);
+        Assert.Equal(context.SessionId, recorded.SessionId);
+        Assert.Equal(requestId, recorded.Run.RequestId);
+    }
+
+    [Fact]
     public void Unknown_profile_id_is_rejected()
     {
         var context = RootContext(Guid.NewGuid().ToString("D"));
@@ -577,32 +611,152 @@ public class PiChildSessionSupervisorTests : IDisposable
     }
 
     [Fact]
-    public void Accepted_completion_emits_request_completed_only_after_gate()
+    public void Accepted_completion_fences_repeated_completion_and_late_results_until_root_stops()
     {
         var requestId = Guid.NewGuid();
         var context = RootContext(requestId.ToString("D"));
         _workspace.SetBaseline(requestId, new RepositoryBaseline("main", "abc", "", true, []));
         _completion.Accept = true;
-        var response = Invoke(_supervisor, context, "request.complete", new { summaryMarkdown = "shipped" });
+        var rootCallbacks = Assert.IsType<RequestCallbackLease>(
+            _admission.TryRegisterCallbackSource(requestId, context.SessionId));
+
+        var response = Invoke(
+            _supervisor,
+            context,
+            "request.complete",
+            new { summaryMarkdown = "shipped" });
+
         Assert.True(response.Ok);
         Assert.Equal(true, Result(response.Result)["accepted"]);
-        Assert.Contains(_parentEvents, e => e.Type == "request.completed");
+        Assert.True(_admission.IsAdmissionClosed(requestId));
+        Assert.Single(_parentEvents, e => e.Type == "request.completed");
+
+        var repeated = Invoke(
+            _supervisor,
+            context,
+            "request.complete",
+            new { summaryMarkdown = "duplicate" });
+        var lateResult = Invoke(
+            _supervisor,
+            context,
+            "child.result.submit",
+            new { summaryMarkdown = "late" });
+
+        Assert.Equal("admission_closed", repeated.ErrorCode);
+        Assert.Equal("admission_closed", lateResult.ErrorCode);
+        Assert.Single(_completion.Begun);
+        Assert.Single(_completion.Confirmed);
+        Assert.Single(_parentEvents, e => e.Type == "request.completed");
+
+        rootCallbacks.Dispose();
+        Assert.False(_admission.IsAdmissionClosed(requestId));
+    }
+
+    [Fact]
+    public async Task Accepted_root_failure_confirms_with_an_exact_quiescence_proof()
+    {
+        var requestId = Guid.NewGuid();
+        var assignment = NodeWorkerTestHarness.Assignment(
+            requestId,
+            DateTimeOffset.UtcNow.AddMinutes(1)) with
+        {
+            CanonicalRepositoryPathSnapshot = _repoRoot,
+        };
+        _completion.Accept = true;
+
+        var outcome = await _supervisor.FailAsync(
+            assignment,
+            "root-session-1",
+            "worker exited",
+            CancellationToken.None);
+
+        Assert.Equal(RootTerminalizationOutcome.Accepted, outcome);
+        Assert.False(_admission.IsAdmissionClosed(requestId));
+        Assert.Equal(
+            [(TerminalizationIntent.Fail, "worker exited")],
+            _completion.Begun);
+        Assert.Equal(
+            [(TerminalizationIntent.Fail, "worker exited")],
+            _completion.Confirmed);
+        var proof = Assert.Single(_completion.Proofs);
+        Assert.True(proof.AdmissionClosed);
+        Assert.Equal(0, proof.ActiveChildren);
+        Assert.Equal(0, proof.ActiveOperations);
+        Assert.Equal(0, proof.ActiveProcesses);
+        Assert.Equal(0, proof.PendingEvents);
+        Assert.Equal(0, proof.ActiveReservations);
+        Assert.True(proof.RepositoryInspected);
+    }
+
+    [Fact]
+    public async Task Uncertain_root_failure_keeps_admission_closed_and_withholds_confirmation()
+    {
+        var requestId = Guid.NewGuid();
+        var assignment = NodeWorkerTestHarness.Assignment(
+            requestId,
+            DateTimeOffset.UtcNow.AddMinutes(1)) with
+        {
+            CanonicalRepositoryPathSnapshot = _repoRoot,
+        };
+        using var activity = _admission.TryEnterOperation(requestId, "in-flight mutation");
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        _completion.Accept = true;
+
+        var outcome = await _supervisor.FailAsync(
+            assignment,
+            "root-session-1",
+            "worker exited",
+            cancelled.Token);
+
+        Assert.Equal(RootTerminalizationOutcome.Uncertain, outcome);
+        Assert.True(_admission.IsAdmissionClosed(requestId));
+        Assert.Single(_completion.Begun);
+        Assert.Empty(_completion.Confirmed);
+    }
+
+    [Fact]
+    public async Task Rejected_failure_confirmation_keeps_admission_closed()
+    {
+        var requestId = Guid.NewGuid();
+        var assignment = NodeWorkerTestHarness.Assignment(
+            requestId,
+            DateTimeOffset.UtcNow.AddMinutes(1)) with
+        {
+            CanonicalRepositoryPathSnapshot = _repoRoot,
+        };
+        _completion.Accept = true;
+        _completion.AcceptConfirm = false;
+
+        var outcome = await _supervisor.FailAsync(
+            assignment,
+            "root-session-1",
+            "worker exited",
+            CancellationToken.None);
+
+        Assert.Equal(RootTerminalizationOutcome.Rejected, outcome);
+        Assert.True(_admission.IsAdmissionClosed(requestId));
+        Assert.Single(_completion.Confirmed);
     }
 
     [Fact]
     public async Task Configured_completion_checkpoint_persists_git_evidence()
     {
         var requestId = Guid.NewGuid();
+        var checkpointCalls = 0;
         PiCheckpointRequest? captured = null;
         var context = RootContext(requestId.ToString("D")) with
         {
             CreateCheckpointAsync = (request, _) =>
             {
+                checkpointCalls++;
                 captured = request;
                 return Task.FromResult(PiCheckpointResult.Committed("abc123", "pi/request"));
             },
         };
         _completion.Accept = true;
+        using var rootCallbacks = Assert.IsType<RequestCallbackLease>(
+            _admission.TryRegisterCallbackSource(requestId, context.SessionId));
 
         var response = await _supervisor.HandleAsync(
             context,
@@ -620,6 +774,17 @@ public class PiChildSessionSupervisorTests : IDisposable
         Assert.Equal("abc123", evidence.CheckpointCommitId);
         Assert.Equal("pi/request", evidence.RequestBranch);
         Assert.Contains(_parentEvents, item => item.Type == "repository.checkpoint_created");
+        var repeated = await _supervisor.HandleAsync(
+            context,
+            "request.complete",
+            JsonSerializer.SerializeToElement(new
+            {
+                summaryMarkdown = "duplicate",
+                changedFiles = new[] { "src/App.cs" },
+            }),
+            CancellationToken.None);
+        Assert.Equal("admission_closed", repeated.ErrorCode);
+        Assert.Equal(1, checkpointCalls);
     }
 
     [Theory]
@@ -685,7 +850,8 @@ public class PiChildSessionSupervisorTests : IDisposable
             new NodeWorkerProcessFactory(),
             inner,
             TimeProvider.System,
-            NullLogger<PiRuntimeAdapter>.Instance);
+            NullLogger<PiRuntimeAdapter>.Instance,
+            _admission);
         var settings = Path.Combine(_root, $"claude-settings-{Guid.NewGuid():N}.json");
         File.WriteAllText(settings, "{}");
         var claude = new ClaudeCodeRuntimeAdapter(
@@ -717,14 +883,19 @@ public class PiChildSessionSupervisorTests : IDisposable
             mail ?? new FakeMailGateway(),
             _identities,
             _spool,
+            _assignmentCredentials,
             TimeProvider.System,
             NullLogger.Instance,
             new Lazy<IAgentRuntimeRegistry>(registry),
+            new Lazy<IRootSessionSupervisor>(() => new FakeRootSessionSupervisor()),
+            new Lazy<INodeAssignmentTerminalizationOrchestrator>(
+                () => new ImmediateAssignmentTerminalizationOrchestrator()),
             _verification,
             _repository,
             _crash,
             _completion,
-            _workspace);
+            _workspace,
+            _admission);
     }
 
     [Fact]
@@ -1133,6 +1304,7 @@ public class PiChildSessionSupervisorTests : IDisposable
     private sealed class FakeVerificationRunner : IVerificationCommandRunner
     {
         public string? LastProfileId { get; private set; }
+        public VerificationRunContext? LastContext { get; private set; }
         public bool Succeed { get; set; } = true;
         public string RejectCode { get; set; } = "";
 
@@ -1142,6 +1314,7 @@ public class PiChildSessionSupervisorTests : IDisposable
             string? commandId,
             CancellationToken cancellationToken)
         {
+            LastContext = context;
             LastProfileId = profileId;
             if (!string.IsNullOrEmpty(RejectCode))
             {
@@ -1197,25 +1370,57 @@ public class PiChildSessionSupervisorTests : IDisposable
     private sealed class FakeCompletionGateway : INodeCompletionGateway
     {
         public bool Accept { get; set; }
+        public bool AcceptConfirm { get; set; } = true;
         public IReadOnlyList<string> Missing { get; set; } = ["verification"];
-        public List<VerificationRunDto> Runs { get; } = [];
+        public List<(string SessionId, VerificationRunDto Run)> Runs { get; } = [];
         public List<CompletionEvidence> Evidence { get; } = [];
+        public List<CompletionEvidence> ConfirmedEvidence { get; } = [];
+        public List<PiCommandCenter.Application.Completion.AssignmentQuiescenceProof> Proofs { get; } = [];
+        public List<(TerminalizationIntent Intent, string? Reason)> Begun { get; } = [];
+        public List<(TerminalizationIntent Intent, string? Reason)> Confirmed { get; } = [];
 
-
-        public Task RecordVerificationRunAsync(VerificationRunDto run, CancellationToken cancellationToken)
+        public Task RecordVerificationRunAsync(
+            string sessionId,
+            VerificationRunDto run,
+            CancellationToken cancellationToken)
         {
-            Runs.Add(run);
+            Runs.Add((sessionId, run));
             return Task.CompletedTask;
         }
 
-        public Task<CompletionGateDecision> EvaluateCompletionAsync(
-            Guid projectId, Guid requestId, string rootSessionId, CompletionEvidence evidence, CancellationToken cancellationToken)
+        public Task<CompletionGateDecision> BeginTerminalizationAsync(
+            Guid projectId, Guid requestId, string rootSessionId, TerminalizationIntent intent,
+            CompletionEvidence? evidence, string? reason, CancellationToken cancellationToken)
         {
-            Evidence.Add(evidence);
-            return Task.FromResult(new CompletionGateDecision(
-                Accept,
-                Accept ? [] : Missing,
-                Accept
+            Begun.Add((intent, reason));
+            if (evidence is not null)
+            {
+                Evidence.Add(evidence);
+            }
+
+            return Task.FromResult(Decision(requestId, evidence, Accept));
+        }
+
+        public Task<CompletionGateDecision> ConfirmTerminalizationAsync(
+            Guid projectId, Guid requestId, string rootSessionId, TerminalizationIntent intent,
+            CompletionEvidence? evidence, string? reason, PiCommandCenter.Application.Completion.AssignmentQuiescenceProof proof,
+            CancellationToken cancellationToken)
+        {
+            Confirmed.Add((intent, reason));
+            if (evidence is not null)
+            {
+                ConfirmedEvidence.Add(evidence);
+            }
+
+            Proofs.Add(proof);
+            return Task.FromResult(Decision(requestId, evidence, Accept && AcceptConfirm));
+        }
+
+        private CompletionGateDecision Decision(Guid requestId, CompletionEvidence? evidence, bool accepted)
+            => new(
+                accepted,
+                accepted ? [] : Missing,
+                accepted && evidence is not null
                     ? new RequestResultDto(
                         requestId,
                         evidence.SummaryMarkdown,
@@ -1225,7 +1430,17 @@ public class PiChildSessionSupervisorTests : IDisposable
                         DateTimeOffset.UtcNow,
                         evidence.RequestBranch,
                         evidence.CheckpointCommitId)
-                    : null));
-        }
+                    : null);
+    }
+
+    private sealed class ImmediateAssignmentTerminalizationOrchestrator
+        : INodeAssignmentTerminalizationOrchestrator
+    {
+        public Task<CompletionGateDecision> BeginTerminalizationAsync(
+            Guid requestId,
+            TerminalizationIntent intent,
+            Func<CancellationToken, Task<CompletionGateDecision>> beginAsync,
+            CancellationToken cancellationToken)
+            => beginAsync(cancellationToken);
     }
 }

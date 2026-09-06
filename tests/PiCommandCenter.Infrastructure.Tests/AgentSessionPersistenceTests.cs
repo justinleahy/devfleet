@@ -59,7 +59,7 @@ public class AgentSessionPersistenceTests : IDisposable
         _nodeId = TestNodes.NewNodeId().Value;
         var clock = TestNodes.Clock();
         TestNodes.SeedNode(db, new NodeId(_nodeId), clock);
-        var project = TestNodes.SeedProject(db, new NodeId(_nodeId), clock);
+        var project = TestNodes.SeedProject(db, clock);
         _projectId = project.Id.Value;
         var request = TestNodes.SeedRequest(db, project, clock);
         _requestId = request.Id.Value;

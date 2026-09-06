@@ -1,13 +1,26 @@
+/* The form carries no layout of its own: `display: contents` promotes the button
+   to a direct child of whichever container hosts <LogoutForm /> (shell header,
+   mobile navigation panel, access-denied action stack). That is deliberate under
+   CSS isolation — a host cannot reach the button with its own selectors, so the
+   host positions it through flex/grid alone and everything visual lives here. */
 .logout-form {
     display: contents;
 }
 
+/* Mobile-first: a 44px target that stretches to the full width of a column stack
+   (align-items: stretch does the work, so no host-side override is needed) and
+   keeps its intrinsic width on a horizontal line. */
 .logout-button {
-    min-height: calc(var(--design-unit) * 8px);
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    min-height: calc(var(--design-unit) * 11px);
     padding: 0 calc(var(--design-unit) * 4px);
     color: inherit;
     font-family: inherit;
     font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
     font-weight: 600;
     background-color: transparent;
     border: calc(var(--stroke-width) * 1px) solid currentColor;
@@ -17,8 +30,20 @@
     transition: background-color 120ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* Pointer-sized surfaces: drop back to the standard Fluent control height so the
+   control sits level with badges and navigation items instead of towering. */
+@media (min-width: 600px) {
+    .logout-button {
+        min-height: calc(var(--design-unit) * 8px);
+    }
+}
+
 .logout-button:hover {
     background-color: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.logout-button:active {
+    background-color: color-mix(in srgb, currentColor 20%, transparent);
 }
 
 .logout-button:focus-visible {

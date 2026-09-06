@@ -11,7 +11,7 @@ namespace PiCommandCenter.Node.Tests;
 /// <summary>
 /// Supervisor integration tests driven through a fake worker executable
 /// (<c>TestData/fake-pi-worker.mjs</c>): no provider network, authentication, or model call.
-/// Proves the claimed assignment starts a root session whose lifecycle lands in the durable
+/// Proves an execution assignment starts a root session whose lifecycle lands in the durable
 /// spool, and that a worker crash is converted into session.failed/session.closed events.
 /// </summary>
 public class PiRootSessionSupervisorTests : IDisposable
@@ -38,24 +38,31 @@ public class PiRootSessionSupervisorTests : IDisposable
         }
     }
 
-    private static RequestClaimMessage MakeClaim(string repositoryPath) => new(
+    private static ExecutionAssignmentMessage MakeAssignment(string repositoryPath) => new(
         RequestId: Guid.NewGuid(),
         ProjectId: Guid.NewGuid(),
-        NodeId: Guid.NewGuid(),
+        WorkspaceBindingId: Guid.NewGuid(),
+        NodeIdSnapshot: Guid.NewGuid(),
+        CanonicalRepositoryPathSnapshot: repositoryPath,
+        DefaultBranchSnapshot: "main",
+        BindingValidationRevisionSnapshot: 1,
+        State: "Starting",
         ClaimToken: "token-1",
-        ClaimedAt: Base,
+        AssignedAt: Base,
         LeaseExpiresAt: Base.AddMinutes(5),
-        RepositoryPath: repositoryPath,
-        DefaultBranch: "main",
-        Title: "Ship the feature",
-        Prompt: "Implement and review the feature",
-        Kind: "Development",
-        RiskLevel: "Standard",
+        RequestTitle: "Ship the feature",
+        RequestPrompt: "Implement and review the feature",
+        RequestKind: "Development",
+        RequestRiskLevel: "Standard",
         CreateRequestBranch: false,
         CreateRequestCommit: false);
 
     private (PiRootSessionSupervisor Supervisor, SqliteNodeEventSpool Spool, RecordingRequestHandler Handler)
-        CreateWorld(string workerScriptName, int requestTimeoutSeconds = 30)
+        CreateWorld(
+            string workerScriptName,
+            int requestTimeoutSeconds = 30,
+            FakeRootSessionTerminalizer? terminalizer = null,
+            StubCrash? crashRecovery = null)
     {
         var spoolPath = Path.Combine(_root, "spool.db");
         var agentData = Path.Combine(_root, "agent-data");
@@ -79,7 +86,8 @@ public class PiRootSessionSupervisorTests : IDisposable
             new NodeWorkerProcessFactory(),
             handler,
             TimeProvider.System,
-            new FileLogger<PiRuntimeAdapter>(logPath));
+            new FileLogger<PiRuntimeAdapter>(logPath),
+            new Quiescence.RequestAdmissionGate(TimeProvider.System));
         var supervisor = new PiRootSessionSupervisor(
             Options.Create(new PiWorkerOptions()),
             Options.Create(new NodeOptions { RequireCleanStart = false }),
@@ -87,7 +95,8 @@ public class PiRootSessionSupervisorTests : IDisposable
             spool,
             new StubInspector(),
             new RequestWorkspaceTracker(),
-            new StubCrash(),
+            crashRecovery ?? new StubCrash(),
+            terminalizer ?? new FakeRootSessionTerminalizer(),
             TimeProvider.System,
             new FileLogger<PiRootSessionSupervisor>(logPath));
         return (supervisor, spool, handler);
@@ -114,23 +123,27 @@ public class PiRootSessionSupervisorTests : IDisposable
     }
 
     [Fact]
-    public async Task A_claimed_assignment_starts_a_root_session_through_the_fake_worker()
+    public async Task An_assignment_starts_a_root_session_through_the_fake_worker()
     {
         var (supervisor, spool, handler) = CreateWorld("fake-pi-worker.mjs");
         await using var _ = supervisor;
-        var claim = MakeClaim(Directory.CreateDirectory(Path.Combine(_root, "repo")).FullName);
+        var assignment = MakeAssignment(
+            Directory.CreateDirectory(Path.Combine(_root, "repo")).FullName);
 
-        var sessionId = await supervisor.StartForClaimAsync(claim, CancellationToken.None);
+        var sessionId = await supervisor.StartForAssignmentAsync(
+            assignment,
+            CancellationToken.None);
 
         Assert.StartsWith(PiRuntimeAdapter.RootSessionIdPrefix, sessionId);
 
         var pending = await SpoolAwaitingAsync(spool, events => events.Any(e => e.Type == "turn.started"));
 
+        Assert.All(pending, message => Assert.Equal(assignment.ClaimToken, message.ClaimToken));
         // The spool is the durability boundary: registration first, then every runtime event.
         Assert.Equal("session.registered", pending[0].Type);
         Assert.Equal(0, pending[0].Sequence);
-        Assert.Equal(claim.RequestId, pending[0].RequestId);
-        Assert.Equal(claim.NodeId, pending[0].NodeId);
+        Assert.Equal(assignment.RequestId, pending[0].RequestId);
+        Assert.Equal(assignment.NodeIdSnapshot, pending[0].NodeId);
         Assert.Equal(sessionId, pending[0].SessionId);
         Assert.Contains("codex/default", pending[0].PayloadJson);
         Assert.Contains("fake-provider-session", pending[0].PayloadJson);
@@ -147,8 +160,11 @@ public class PiRootSessionSupervisorTests : IDisposable
     {
         var (supervisor, spool, _) = CreateWorld("fake-pi-worker.mjs");
         await using var _ = supervisor;
-        var claim = MakeClaim(Directory.CreateDirectory(Path.Combine(_root, "cancel-repo")).FullName);
-        var sessionId = await supervisor.StartForClaimAsync(claim, CancellationToken.None);
+        var assignment = MakeAssignment(
+            Directory.CreateDirectory(Path.Combine(_root, "cancel-repo")).FullName);
+        var sessionId = await supervisor.StartForAssignmentAsync(
+            assignment,
+            CancellationToken.None);
 
         Assert.True(await supervisor.CancelSessionAsync(sessionId, "operator_cancel"));
         Assert.DoesNotContain(sessionId, supervisor.ActiveSessionIds);
@@ -164,10 +180,15 @@ public class PiRootSessionSupervisorTests : IDisposable
     [Fact]
     public async Task Hung_graceful_cancel_still_forces_terminal_close()
     {
-        var (supervisor, spool, _) = CreateWorld("fake-pi-worker-hung-cancel.mjs", requestTimeoutSeconds: 1);
+        var (supervisor, spool, _) = CreateWorld(
+            "fake-pi-worker-hung-cancel.mjs",
+            requestTimeoutSeconds: 1);
         await using var _ = supervisor;
-        var claim = MakeClaim(Directory.CreateDirectory(Path.Combine(_root, "hung-cancel-repo")).FullName);
-        var sessionId = await supervisor.StartForClaimAsync(claim, CancellationToken.None);
+        var assignment = MakeAssignment(
+            Directory.CreateDirectory(Path.Combine(_root, "hung-cancel-repo")).FullName);
+        var sessionId = await supervisor.StartForAssignmentAsync(
+            assignment,
+            CancellationToken.None);
 
         Assert.True(await supervisor.CancelSessionAsync(sessionId, "operator_cancel"));
         Assert.DoesNotContain(sessionId, supervisor.ActiveSessionIds);
@@ -178,32 +199,73 @@ public class PiRootSessionSupervisorTests : IDisposable
     }
 
     [Fact]
-    public async Task A_worker_crash_is_synthesized_into_failed_and_closed_events()
+    public async Task A_worker_crash_is_failed_only_after_recovery_handling()
     {
-        var (supervisor, spool, _) = CreateWorld("fake-pi-worker-crash.mjs");
+        var trace = new List<string>();
+        var crashRecovery = new StubCrash(() => trace.Add("recovery"));
+        var terminalizer = new FakeRootSessionTerminalizer
+        {
+            Failing = () => trace.Add("terminalize"),
+        };
+        var (supervisor, spool, _) = CreateWorld(
+            "fake-pi-worker-crash.mjs",
+            terminalizer: terminalizer,
+            crashRecovery: crashRecovery);
         await using var _ = supervisor;
-        var claim = MakeClaim(Directory.CreateDirectory(Path.Combine(_root, "repo")).FullName);
+        var assignment = MakeAssignment(
+            Directory.CreateDirectory(Path.Combine(_root, "repo")).FullName);
 
-        await supervisor.StartForClaimAsync(claim, CancellationToken.None);
+        var sessionId = await supervisor.StartForAssignmentAsync(
+            assignment,
+            CancellationToken.None);
 
         var pending = await SpoolAwaitingAsync(
             spool, events => events.Any(e => e.Type == "session.closed"));
 
+        Assert.Equal(["recovery", "terminalize"], trace);
+        var failure = Assert.Single(terminalizer.Failures);
+        Assert.Equal(assignment, failure.Assignment);
+        Assert.Equal(sessionId, failure.SessionId);
+        Assert.False(string.IsNullOrWhiteSpace(failure.Reason));
+        Assert.Contains("3", failure.Reason);
         Assert.Contains(pending, e => e.Type == "session.failed");
         Assert.Contains(pending, e => e.Type == "session.closed");
-        var failed = pending.Single(e => e.Type == "session.failed");
-        Assert.Contains("3", failed.PayloadJson); // the fake worker's exit code
+        Assert.All(pending, message => Assert.Equal(assignment.ClaimToken, message.ClaimToken));
+    }
+
+    [Theory]
+    [InlineData(RootTerminalizationOutcome.Uncertain)]
+    [InlineData(RootTerminalizationOutcome.Rejected)]
+    public async Task An_unaccepted_failure_still_preserves_the_session_history(
+        RootTerminalizationOutcome outcome)
+    {
+        var terminalizer = new FakeRootSessionTerminalizer { Outcome = outcome };
+        var (supervisor, spool, _) = CreateWorld(
+            "fake-pi-worker-crash.mjs",
+            terminalizer: terminalizer);
+        await using var _ = supervisor;
+        var assignment = MakeAssignment(
+            Directory.CreateDirectory(Path.Combine(_root, $"repo-{outcome}")).FullName);
+
+        await supervisor.StartForAssignmentAsync(assignment, CancellationToken.None);
+        await terminalizer.FailureInvoked.Task.WaitAsync(TimeSpan.FromSeconds(20));
+
+        var pending = await SpoolAwaitingAsync(
+            spool, events => events.Any(e => e.Type == "session.closed"));
+        Assert.Single(terminalizer.Failures);
+        Assert.Contains(pending, e => e.Type == "session.failed");
+        Assert.Contains(pending, e => e.Type == "session.closed");
     }
 
     [Fact]
-    public async Task A_claim_whose_repository_does_not_exist_never_starts_a_session()
+    public async Task An_assignment_whose_repository_snapshot_does_not_exist_never_starts_a_session()
     {
         var (supervisor, spool, _) = CreateWorld("fake-pi-worker.mjs");
         await using var _ = supervisor;
-        var claim = MakeClaim(Path.Combine(_root, "does-not-exist"));
+        var assignment = MakeAssignment(Path.Combine(_root, "does-not-exist"));
 
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => supervisor.StartForClaimAsync(claim, CancellationToken.None));
+            () => supervisor.StartForAssignmentAsync(assignment, CancellationToken.None));
 
         Assert.Empty(await spool.PeekPendingAsync(100, CancellationToken.None));
         Assert.Empty(supervisor.ActiveSessionIds);
@@ -264,10 +326,13 @@ public class PiRootSessionSupervisorTests : IDisposable
             => Task.CompletedTask;
     }
 
-    private sealed class StubCrash : IRuntimeCrashRecovery
+    private sealed class StubCrash(Action? marked = null) : IRuntimeCrashRecovery
     {
         public Task MarkOwnedLeasesRecoveryRequiredAsync(
             Guid nodeId, Guid projectId, Guid? requestId, string ownerSessionId, string reason, CancellationToken cancellationToken)
-            => Task.CompletedTask;
+        {
+            marked?.Invoke();
+            return Task.CompletedTask;
+        }
     }
 }

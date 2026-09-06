@@ -3,8 +3,10 @@ using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using PiCommandCenter.Node.Child;
+using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Node.Child;
+using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.SystemResources;
 
 namespace PiCommandCenter.Node;
@@ -21,6 +23,9 @@ public interface INodeHubOps : IAsyncDisposable
     /// <summary>Raised when the Control Plane commands this node to cancel a session.</summary>
     event Func<CancelSessionCommand, Task>? CancelSessionReceived;
 
+    /// <summary>Raised when the Control Plane cancels a durable assignment owned by this node.</summary>
+    event Func<CancelAssignmentCommand, Task>? CancelAssignmentReceived;
+
     HubConnectionState State { get; }
 
     Task StartAsync(CancellationToken cancellationToken);
@@ -30,24 +35,32 @@ public interface INodeHubOps : IAsyncDisposable
     Task HeartbeatAsync(
         IReadOnlyList<string> activeSessionIds,
         NodeResourceSnapshotMessage resources,
+        NodeExecutionStatusMessage executionStatus,
         CancellationToken cancellationToken);
 
-    Task<RequestClaimMessage?> ClaimNextAsync(int leaseSeconds, CancellationToken cancellationToken);
+    Task<ExecutionAssignmentMessage?> ClaimNextAsync(int leaseSeconds, CancellationToken cancellationToken);
 
-    /// <summary>Returns the new lease expiry, or null when the claim was lost.</summary>
-    Task<DateTimeOffset?> RenewClaimAsync(RequestClaimMessage claim, CancellationToken cancellationToken);
+    /// <summary>Returns the new lease expiry, or null when the assignment was lost.</summary>
+    Task<DateTimeOffset?> RenewAssignmentAsync(
+        ExecutionAssignmentMessage assignment,
+        CancellationToken cancellationToken);
+    Task<ReconcileAssignmentsResultMessage> ReconcileAssignmentsAsync(
+        IReadOnlyList<ExecutionAssignmentInventoryItemMessage> assignments,
+        CancellationToken cancellationToken);
 
     Task<NodeEventAcknowledgementMessage> PublishEventsAsync(
         IReadOnlyList<NodeEventMessage> events,
         CancellationToken cancellationToken);
 }
 
-/// <summary>Starts and tracks root Pi sessions for claimed requests.</summary>
+/// <summary>Starts and tracks root Pi sessions for execution assignments.</summary>
 public interface IRootSessionSupervisor
 {
     IReadOnlyList<string> ActiveSessionIds { get; }
 
-    Task<string> StartForClaimAsync(RequestClaimMessage claim, CancellationToken cancellationToken);
+    Task<string> StartForAssignmentAsync(
+        ExecutionAssignmentMessage assignment,
+        CancellationToken cancellationToken);
 
     Task<bool> CancelSessionAsync(string sessionId, string reason);
     Guid? FindRequestId(string sessionId);
@@ -55,12 +68,12 @@ public interface IRootSessionSupervisor
 
 
 /// <summary>
-/// Cancels one locally running agent session by id. Implemented by the child session
-/// supervisor; abstracted so the worker loop stays testable.
+/// Cancels one locally running child session by id and reports all active sessions for heartbeats.
+/// Root cancellation is handled by <see cref="IRootSessionTerminalizer"/>.
 /// </summary>
 public interface ISessionCanceller
 {
-    Task<bool> CancelSessionAsync(string sessionId, string reason);
+    Task<bool> CancelChildSessionAsync(string sessionId, string reason);
 
     IReadOnlyList<string> ActiveSessionIds { get; }
 }
@@ -68,11 +81,12 @@ public interface ISessionCanceller
 /// <summary>
 /// Node background service: connects outbound to the Control Plane, registers on
 /// every connection, replays locally spooled unacknowledged events, heartbeats, and
-/// holds up to <see cref="NodeOptions.MaxConcurrentRequests"/> concurrent claims.
-/// Claims are renewed before expiry and reconciled (never dropped silently) after a
-/// reconnect so locally running sessions keep running across Control Plane restarts.
+/// holds up to <see cref="NodeOptions.MaxConcurrentRequests"/> concurrent assignments.
+/// Assignments are renewed before expiry and reconciled periodically (never dropped silently) so
+/// locally running sessions keep running across Control Plane restarts.
 /// </summary>
-public sealed class NodeWorker : BackgroundService
+public sealed class NodeWorker
+    : BackgroundService, INodeAssignmentTerminalizationOrchestrator
 {
     internal const int ReplayBatchSize = 100;
     private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(1);
@@ -81,66 +95,211 @@ public sealed class NodeWorker : BackgroundService
     private readonly NodeOptions _options;
     private readonly INodeHubOps _transport;
     private readonly INodeEventSpool _spool;
+    private readonly INodeAssignmentJournal _journal;
     private readonly ISessionCanceller _sessionCanceller;
     private readonly IRootSessionSupervisor _rootSessions;
+    private readonly IRootSessionTerminalizer _rootTerminalizer;
     private readonly TimeProvider _timeProvider;
     private readonly INodeSystemResourceMonitor _resourceMonitor;
+    private readonly IRuntimeReadinessProvider _readinessProvider;
+    private readonly NodeAssignmentCredentialSource _assignmentCredentials;
     private readonly ILogger<NodeWorker> _logger;
-    private readonly object _claimsLock = new();
-    private readonly Dictionary<Guid, RequestClaimMessage> _activeClaims = new();
+    private readonly object _assignmentsLock = new();
+    private readonly SemaphoreSlim _dispatchGate = new(1, 1);
+    private readonly Dictionary<Guid, NodeAssignmentJournalEntry> _activeAssignments = new();
+    private readonly Dictionary<Guid, PendingAssignmentCancellation> _pendingAssignmentCancellations = new();
+    private readonly CancellationTokenSource _cancellationShutdown = new();
     private DateTimeOffset _lastHeartbeat = DateTimeOffset.MinValue;
-    private DateTimeOffset? _nextClaimEligibleAt;
+    private DateTimeOffset _lastReconciliation = DateTimeOffset.MinValue;
+    private DateTimeOffset? _nextAssignmentEligibleAt;
+    private bool _journalLoaded;
+    private bool _dispatchEnabled = true;
+    private int _pendingCancellations;
 
     public NodeWorker(
         IOptions<NodeOptions> options,
         INodeHubOps transport,
         INodeEventSpool spool,
+        INodeAssignmentJournal journal,
         TimeProvider timeProvider,
         INodeSystemResourceMonitor resourceMonitor,
+        IRuntimeReadinessProvider readinessProvider,
         ISessionCanceller sessionCanceller,
+        IRootSessionTerminalizer rootTerminalizer,
+        NodeAssignmentCredentialSource assignmentCredentials,
         IRootSessionSupervisor rootSessions,
         ILogger<NodeWorker> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(spool);
+        ArgumentNullException.ThrowIfNull(journal);
         ArgumentNullException.ThrowIfNull(timeProvider);
         ArgumentNullException.ThrowIfNull(resourceMonitor);
+        ArgumentNullException.ThrowIfNull(readinessProvider);
+        ArgumentNullException.ThrowIfNull(assignmentCredentials);
         ArgumentNullException.ThrowIfNull(sessionCanceller);
+        ArgumentNullException.ThrowIfNull(rootTerminalizer);
         ArgumentNullException.ThrowIfNull(rootSessions);
         ArgumentNullException.ThrowIfNull(logger);
         _options = options.Value;
         _transport = transport;
         _spool = spool;
+        _journal = journal;
         _timeProvider = timeProvider;
         _resourceMonitor = resourceMonitor;
+        _readinessProvider = readinessProvider;
+        _assignmentCredentials = assignmentCredentials;
         _sessionCanceller = sessionCanceller;
+        _rootTerminalizer = rootTerminalizer;
         _rootSessions = rootSessions;
         _logger = logger;
 
         _transport.Connected += HandleConnectedAsync;
         _transport.CancelSessionReceived += OnCancelSessionReceivedAsync;
+        _transport.CancelAssignmentReceived += OnCancelAssignmentReceivedAsync;
     }
 
     private async Task OnCancelSessionReceivedAsync(CancelSessionCommand command)
     {
-        _logger.LogInformation(
-            "Control Plane requested cancellation of session {SessionId}: {Reason}",
-            command.SessionId,
-            command.Reason);
-        var rootRequestId = _rootSessions.FindRequestId(command.SessionId);
-        var stopped = await _sessionCanceller
-            .CancelSessionAsync(command.SessionId, command.Reason)
-            .ConfigureAwait(false);
-        if (stopped && rootRequestId is { } requestId)
+        Interlocked.Increment(ref _pendingCancellations);
+        try
         {
-            RemoveClaim(requestId);
-        }
-        if (!stopped)
-        {
+            await _dispatchGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            _dispatchGate.Release();
+
+            _logger.LogInformation(
+                "Control Plane requested cancellation of session {SessionId}: {Reason}",
+                command.SessionId,
+                command.Reason);
+
+            var rootRequestId = _rootSessions.FindRequestId(command.SessionId);
+            if (rootRequestId is not { } requestId)
+            {
+                var childStopped = await _sessionCanceller
+                    .CancelChildSessionAsync(command.SessionId, command.Reason)
+                    .ConfigureAwait(false);
+                if (!childStopped)
+                {
+                    _logger.LogWarning(
+                        "Child session {SessionId} could not be cancelled locally; it may have already stopped.",
+                        command.SessionId);
+                }
+
+                return;
+            }
+
+            ExecutionAssignmentMessage? assignment;
+            lock (_assignmentsLock)
+            {
+                assignment = _activeAssignments.TryGetValue(requestId, out var entry)
+                    ? entry.Assignment
+                    : null;
+            }
+
+            if (assignment is null)
+            {
+                _logger.LogWarning(
+                    "Root session {SessionId} has no active assignment; cancellation was not started.",
+                    command.SessionId);
+                return;
+            }
+
+            var outcome = await _rootTerminalizer
+                .CancelAsync(assignment, command.SessionId, command.Reason, CancellationToken.None)
+                .ConfigureAwait(false);
+            if (outcome == RootTerminalizationOutcome.Accepted)
+            {
+                await RemoveAssignmentAsync(requestId, CancellationToken.None).ConfigureAwait(false);
+                return;
+            }
+
             _logger.LogWarning(
-                "Session {SessionId} could not be cancelled locally; it may have already stopped.",
-                command.SessionId);
+                "Root cancellation for request {RequestId} was {Outcome}; assignment ownership was retained.",
+                requestId,
+                outcome);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _pendingCancellations);
+        }
+    }
+
+    private async Task OnCancelAssignmentReceivedAsync(CancelAssignmentCommand command)
+    {
+        Interlocked.Increment(ref _pendingCancellations);
+        try
+        {
+            await _dispatchGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                await RegisterPendingAssignmentCancellationAsync(
+                    command.RequestId,
+                    rootSessionId: null,
+                    command.Reason,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            finally
+            {
+                _dispatchGate.Release();
+            }
+
+            var attempt = StartPendingAssignmentCancellation(command.RequestId);
+            if (attempt is not null)
+            {
+                await attempt.ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _pendingCancellations);
+        }
+    }
+
+    public async Task<CompletionGateDecision> BeginTerminalizationAsync(
+        Guid requestId,
+        TerminalizationIntent intent,
+        Func<CancellationToken, Task<CompletionGateDecision>> beginAsync,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(beginAsync);
+        var localState = intent switch
+        {
+            TerminalizationIntent.Complete or TerminalizationIntent.Fail => "Finalizing",
+            TerminalizationIntent.Cancel => "Cancelling",
+            _ => throw new ArgumentOutOfRangeException(nameof(intent), intent, "Unknown terminalization intent."),
+        };
+
+        await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            NodeAssignmentJournalEntry entry;
+            lock (_assignmentsLock)
+            {
+                if (!_activeAssignments.TryGetValue(requestId, out entry!))
+                {
+                    throw new InvalidOperationException(
+                        $"No active assignment exists for request '{requestId}'.");
+                }
+            }
+
+            var decision = await beginAsync(cancellationToken).ConfigureAwait(false);
+            if (!decision.Accepted || entry.Assignment.State == localState)
+            {
+                return decision;
+            }
+
+            var terminalizing = entry with
+            {
+                Assignment = entry.Assignment with { State = localState },
+            };
+            await _journal.UpsertAsync(terminalizing, CancellationToken.None).ConfigureAwait(false);
+            ReplaceAssignment(terminalizing);
+            return decision;
+        }
+        finally
+        {
+            _dispatchGate.Release();
         }
     }
 
@@ -148,6 +307,7 @@ public sealed class NodeWorker : BackgroundService
     {
         try
         {
+            await LoadJournalAsync(stoppingToken).ConfigureAwait(false);
             while (!stoppingToken.IsCancellationRequested)
             {
                 try
@@ -169,8 +329,6 @@ public sealed class NodeWorker : BackgroundService
                     _logger.LogWarning(ex, "Node loop failed; retrying in {Backoff}.", ReconnectBackoff);
                 }
 
-                // Active local sessions are never stopped on disconnect; their events
-                // keep spooling locally and claims are reconciled on the next connect.
                 await _transport.StopAsync(CancellationToken.None).ConfigureAwait(false);
                 await SafeDelayAsync(ReconnectBackoff, stoppingToken).ConfigureAwait(false);
             }
@@ -179,21 +337,54 @@ public sealed class NodeWorker : BackgroundService
         {
             _transport.Connected -= HandleConnectedAsync;
             _transport.CancelSessionReceived -= OnCancelSessionReceivedAsync;
+            _transport.CancelAssignmentReceived -= OnCancelAssignmentReceivedAsync;
+            _cancellationShutdown.Cancel();
+            await AwaitPendingAssignmentCancellationsAsync().ConfigureAwait(false);
             await _transport.StopAsync(CancellationToken.None).ConfigureAwait(false);
             await _spool.DisposeAsync().ConfigureAwait(false);
+            await _journal.DisposeAsync().ConfigureAwait(false);
+            _cancellationShutdown.Dispose();
+            _dispatchGate.Dispose();
             _logger.LogInformation("Node {NodeId} stopped.", _options.Id);
         }
     }
 
-    /// <summary>
-    /// Reconnect handler: replay spooled events and reconcile every active claim by
-    /// renewing it. Claims the server no longer recognises are dropped; the rest
-    /// keep their (running) sessions alive untouched.
-    /// </summary>
+    internal async Task LoadJournalAsync(CancellationToken cancellationToken)
+    {
+        if (_journalLoaded)
+        {
+            return;
+        }
+
+        var entries = await _journal.LoadAsync(cancellationToken).ConfigureAwait(false);
+        lock (_assignmentsLock)
+        {
+            foreach (var entry in entries)
+            {
+                _activeAssignments.Add(entry.Assignment.RequestId, entry);
+                _assignmentCredentials.Track(ToCredential(entry.Assignment));
+            }
+
+            _journalLoaded = true;
+        }
+    }
+
     internal async Task HandleConnectedAsync()
     {
-        await ReconcileClaimsAsync(CancellationToken.None).ConfigureAwait(false);
-        await ReplayPendingEventsAsync(CancellationToken.None).ConfigureAwait(false);
+        await _dispatchGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            _dispatchEnabled = false;
+            await ReconcileAssignmentsAsync(CancellationToken.None).ConfigureAwait(false);
+            _lastReconciliation = _timeProvider.GetUtcNow();
+            await ReplayPendingEventsAsync(CancellationToken.None).ConfigureAwait(false);
+            _dispatchEnabled = true;
+        }
+        finally
+        {
+            _dispatchGate.Release();
+            StartPendingAssignmentCancellations();
+        }
     }
 
     internal async Task RunConnectedLoopAsync(CancellationToken stoppingToken)
@@ -209,17 +400,33 @@ public sealed class NodeWorker : BackgroundService
     /// <summary>One deterministic unit of worker work at a point in time.</summary>
     internal async Task RunTickAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {
-        await RenewDueClaimsAsync(now, cancellationToken).ConfigureAwait(false);
-        await ReplayPendingEventsAsync(cancellationToken).ConfigureAwait(false);
-        await ClaimIfCapacityAsync(cancellationToken).ConfigureAwait(false);
-
-        if (now - _lastHeartbeat >= TimeSpan.FromSeconds(_options.HeartbeatSeconds))
+        await _dispatchGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            var resources = _resourceMonitor.Capture();
-            await _transport
-                .HeartbeatAsync(_sessionCanceller.ActiveSessionIds, resources, cancellationToken)
-                .ConfigureAwait(false);
-            _lastHeartbeat = now;
+            await RenewDueAssignmentsAsync(now, cancellationToken).ConfigureAwait(false);
+            await ReplayPendingEventsAsync(cancellationToken).ConfigureAwait(false);
+            await ReconcileAssignmentsIfDueAsync(now, cancellationToken).ConfigureAwait(false);
+            await StartNextAssignmentIfCapacityAsync(cancellationToken).ConfigureAwait(false);
+
+            if (now - _lastHeartbeat >= TimeSpan.FromSeconds(_options.HeartbeatSeconds))
+            {
+                var resources = _resourceMonitor.Capture();
+                var activeAssignmentIds = ActiveAssignmentRequestIdsSnapshot();
+                var executionStatus = _readinessProvider.Capture(activeAssignmentIds);
+                await _transport
+                    .HeartbeatAsync(
+                        _sessionCanceller.ActiveSessionIds,
+                        resources,
+                        executionStatus,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                _lastHeartbeat = now;
+            }
+        }
+        finally
+        {
+            _dispatchGate.Release();
+            StartPendingAssignmentCancellations();
         }
     }
 
@@ -250,108 +457,151 @@ public sealed class NodeWorker : BackgroundService
         }
     }
 
-    private async Task RenewDueClaimsAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    private async Task RenewDueAssignmentsAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
     {
-        List<RequestClaimMessage> due;
-        lock (_claimsLock)
+        List<NodeAssignmentJournalEntry> due;
+        lock (_assignmentsLock)
         {
-            // Renew strictly before expiry: once one-third of the requested lease
-            // remains (i.e. two-thirds elapsed).
             var renewalThreshold = TimeSpan.FromSeconds(_options.ClaimLeaseSeconds / 3.0);
-            due = _activeClaims.Values
-                .Where(claim => now >= claim.LeaseExpiresAt - renewalThreshold)
+            due = _activeAssignments.Values
+                .Where(entry => now >= entry.Assignment.LeaseExpiresAt - renewalThreshold)
                 .ToList();
         }
 
-        foreach (var claim in due)
+        foreach (var entry in due)
         {
-            var newExpiry = await _transport.RenewClaimAsync(claim, cancellationToken).ConfigureAwait(false);
+            var assignment = entry.Assignment;
+            var newExpiry = await _transport
+                .RenewAssignmentAsync(assignment, cancellationToken)
+                .ConfigureAwait(false);
             if (newExpiry is DateTimeOffset expiry && expiry > now)
             {
-                _logger.LogDebug("Renewed claim for request {RequestId} until {LeaseExpiresAt}.", claim.RequestId, expiry);
-                ReplaceClaim(claim with { LeaseExpiresAt = expiry });
+                _logger.LogDebug(
+                    "Renewed assignment for request {RequestId} until {LeaseExpiresAt}.",
+                    assignment.RequestId,
+                    expiry);
+                var renewed = entry with
+                {
+                    Assignment = assignment with { LeaseExpiresAt = expiry },
+                };
+                await _journal.UpsertAsync(renewed, cancellationToken).ConfigureAwait(false);
+                ReplaceAssignment(renewed);
             }
             else
             {
                 _logger.LogInformation(
-                    "Claim for request {RequestId} was not renewed; it was lost or expired.",
-                    claim.RequestId);
-                RemoveClaim(claim.RequestId);
+                    "Assignment for request {RequestId} was not renewed; ownership was retained.",
+                    assignment.RequestId);
             }
         }
     }
 
-    private async Task ClaimIfCapacityAsync(CancellationToken cancellationToken)
+    private async Task StartNextAssignmentIfCapacityAsync(CancellationToken cancellationToken)
     {
         int activeCount;
-        lock (_claimsLock)
+        lock (_assignmentsLock)
         {
-            activeCount = _activeClaims.Count;
+            activeCount = _activeAssignments.Count;
         }
 
-        if (activeCount >= _options.MaxConcurrentRequests)
-        {
-            return;
-        }
-
-        // Back off briefly after a failed claim to avoid hammering the queue.
-        if (_nextClaimEligibleAt is DateTimeOffset eligibleAt && _timeProvider.GetUtcNow() < eligibleAt)
+        if (!_dispatchEnabled
+            || Volatile.Read(ref _pendingCancellations) != 0
+            || activeCount >= _options.MaxConcurrentRequests)
         {
             return;
         }
 
-        var newClaim = await _transport.ClaimNextAsync(_options.ClaimLeaseSeconds, cancellationToken)
+        if (_nextAssignmentEligibleAt is DateTimeOffset eligibleAt
+            && _timeProvider.GetUtcNow() < eligibleAt)
+        {
+            return;
+        }
+
+        var assignment = await _transport
+            .ClaimNextAsync(_options.ClaimLeaseSeconds, cancellationToken)
             .ConfigureAwait(false);
-        if (newClaim is not null)
+        if (assignment is null)
         {
-            if (TrackClaim(newClaim))
-            {
-                try
-                {
-                    await _rootSessions.StartForClaimAsync(newClaim, cancellationToken).ConfigureAwait(false);
-                    _logger.LogInformation(
-                        "Claimed request {RequestId} (project {ProjectId}) until {LeaseExpiresAt}.",
-                        newClaim.RequestId,
-                        newClaim.ProjectId,
-                        newClaim.LeaseExpiresAt);
-                }
-                catch (InvalidOperationException ex)
-                {
-                    await AppendStartupBlockedAsync(newClaim, ex, cancellationToken).ConfigureAwait(false);
-                    RemoveClaim(newClaim.RequestId);
-                    _logger.LogWarning(
-                        "Request {RequestId} was blocked during root startup: {Reason}",
-                        newClaim.RequestId,
-                        Security.DiagnosticSanitizer.Sanitize(ex.Message, 512));
-                }
-                catch
-                {
-                    RemoveClaim(newClaim.RequestId);
-                    throw;
-                }
-            }
-
-            _nextClaimEligibleAt = null;
+            _nextAssignmentEligibleAt = _timeProvider.GetUtcNow().AddSeconds(1);
+            return;
         }
-        else
+
+        _nextAssignmentEligibleAt = null;
+        if (ContainsAssignment(assignment.RequestId))
         {
-            _nextClaimEligibleAt = _timeProvider.GetUtcNow().AddSeconds(1);
+            return;
+        }
+
+        var initialEntry = new NodeAssignmentJournalEntry(
+            assignment,
+            AssignmentSupervisorState.Unknown,
+            RepositoryKnown: false,
+            PendingEventCount: await _spool
+                .CountPendingForRequestAsync(assignment.RequestId, cancellationToken)
+                .ConfigureAwait(false));
+        await _journal.UpsertAsync(initialEntry, cancellationToken).ConfigureAwait(false);
+        if (!TrackAssignment(initialEntry))
+        {
+            return;
+        }
+
+        try
+        {
+            await _rootSessions
+                .StartForAssignmentAsync(assignment, cancellationToken)
+                .ConfigureAwait(false);
+            var runningEntry = initialEntry with
+            {
+                SupervisorState = AssignmentSupervisorState.Running,
+                RepositoryKnown = true,
+                PendingEventCount = await _spool
+                    .CountPendingForRequestAsync(assignment.RequestId, cancellationToken)
+                    .ConfigureAwait(false),
+            };
+            await _journal.UpsertAsync(runningEntry, cancellationToken).ConfigureAwait(false);
+            ReplaceAssignment(runningEntry);
+            _logger.LogInformation(
+                "Started assignment for request {RequestId} (project {ProjectId}) until {LeaseExpiresAt}.",
+                assignment.RequestId,
+                assignment.ProjectId,
+                assignment.LeaseExpiresAt);
+        }
+        catch (InvalidOperationException ex)
+        {
+            await AppendStartupBlockedAsync(assignment, ex, cancellationToken).ConfigureAwait(false);
+            await RefreshPendingEventCountAsync(assignment.RequestId, cancellationToken)
+                .ConfigureAwait(false);
+            _logger.LogWarning(
+                "Request {RequestId} was blocked during root startup: {Reason}",
+                assignment.RequestId,
+                Security.DiagnosticSanitizer.Sanitize(ex.Message, 512));
         }
     }
 
     private Task AppendStartupBlockedAsync(
-        RequestClaimMessage claim,
+        ExecutionAssignmentMessage assignment,
         Exception exception,
         CancellationToken cancellationToken)
     {
-        var sessionId = $"root-start-{claim.RequestId:N}";
+        if (!_assignmentCredentials.TryGetByRequest(assignment.RequestId, out var credential)
+            || credential.RequestId != assignment.RequestId
+            || credential.ProjectId != assignment.ProjectId)
+        {
+            throw new InvalidOperationException(
+                $"No active assignment credential is available for request {assignment.RequestId} in project {assignment.ProjectId}.");
+        }
+
+        var sessionId = $"root-start-{assignment.RequestId:N}";
         var reason = Security.DiagnosticSanitizer.Sanitize(exception.Message, 512);
         return _spool.AppendAsync(
             new NodeEventMessage(
                 EventId: $"{sessionId}-1-request.blocked",
-                NodeId: claim.NodeId,
-                ProjectId: claim.ProjectId,
-                RequestId: claim.RequestId,
+                NodeId: assignment.NodeIdSnapshot,
+                ProjectId: assignment.ProjectId,
+                RequestId: assignment.RequestId,
+                ClaimToken: credential.ClaimToken,
                 SessionId: sessionId,
                 Sequence: 1,
                 Type: "request.blocked",
@@ -365,68 +615,418 @@ public sealed class NodeWorker : BackgroundService
             cancellationToken);
     }
 
-    /// <summary>Renews every active claim after a reconnect; drops only rejected ones.</summary>
-    private async Task ReconcileClaimsAsync(CancellationToken cancellationToken)
+    private async Task ReconcileAssignmentsIfDueAsync(
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
     {
-        RequestClaimMessage[] claims;
-        lock (_claimsLock)
+        if (now - _lastReconciliation < TimeSpan.FromSeconds(_options.HeartbeatSeconds))
         {
-            claims = [.. _activeClaims.Values];
+            return;
         }
 
-        foreach (var claim in claims)
+        await ReconcileAssignmentsAsync(cancellationToken).ConfigureAwait(false);
+        _lastReconciliation = now;
+    }
+
+    private async Task ReconcileAssignmentsAsync(CancellationToken cancellationToken)
+    {
+        NodeAssignmentJournalEntry[] entries;
+        lock (_assignmentsLock)
         {
-            var newExpiry = await _transport.RenewClaimAsync(claim, cancellationToken).ConfigureAwait(false);
-            if (newExpiry is DateTimeOffset expiry && expiry > _timeProvider.GetUtcNow())
+            entries = [.. _activeAssignments.Values];
+        }
+
+        var inventory = new List<ExecutionAssignmentInventoryItemMessage>(entries.Length);
+        foreach (var entry in entries)
+        {
+            var current = entry with
             {
-                ReplaceClaim(claim with { LeaseExpiresAt = expiry });
+                SupervisorState = ObserveSupervisorState(entry),
+                PendingEventCount = await _spool
+                    .CountPendingForRequestAsync(entry.Assignment.RequestId, cancellationToken)
+                    .ConfigureAwait(false),
+            };
+            await _journal.UpsertAsync(current, cancellationToken).ConfigureAwait(false);
+            ReplaceAssignment(current);
+            inventory.Add(new ExecutionAssignmentInventoryItemMessage(
+                current.Assignment,
+                current.SupervisorState,
+                current.RepositoryKnown,
+                current.PendingEventCount));
+        }
+
+        var reconciliation = await _transport
+            .ReconcileAssignmentsAsync(inventory, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var result in reconciliation.Assignments)
+        {
+            NodeAssignmentJournalEntry? current;
+            lock (_assignmentsLock)
+            {
+                _activeAssignments.TryGetValue(result.RequestId, out current);
             }
-            else
+
+            if (current is null)
             {
-                _logger.LogInformation(
-                    "Claim for request {RequestId} was rejected on reconnect and released.",
-                    claim.RequestId);
-                RemoveClaim(claim.RequestId);
+                continue;
+            }
+
+            switch (result.Disposition)
+            {
+                case AssignmentReconciliationDisposition.Resume:
+                {
+                    var resumed = current with { Assignment = result.Assignment! };
+                    await _journal.UpsertAsync(resumed, cancellationToken).ConfigureAwait(false);
+                    ReplaceAssignment(resumed);
+                    break;
+                }
+                case AssignmentReconciliationDisposition.Cancel:
+                    if (result.Assignment is not null)
+                    {
+                        var cancelling = current with { Assignment = result.Assignment };
+                        await _journal.UpsertAsync(cancelling, cancellationToken).ConfigureAwait(false);
+                        ReplaceAssignment(cancelling);
+                        await RegisterPendingAssignmentCancellationAsync(
+                            result.RequestId,
+                            rootSessionId: null,
+                            "control-plane-reconciliation",
+                            cancellationToken).ConfigureAwait(false);
+                    }
+
+                    break;
+                case AssignmentReconciliationDisposition.RecoveryRequired:
+                    break;
+                case AssignmentReconciliationDisposition.Terminal:
+                    await RemoveAssignmentAsync(result.RequestId, cancellationToken).ConfigureAwait(false);
+                    break;
             }
         }
     }
 
-    private bool TrackClaim(RequestClaimMessage claim)
+    private async Task RegisterPendingAssignmentCancellationAsync(
+        Guid requestId,
+        string? rootSessionId,
+        string reason,
+        CancellationToken cancellationToken)
     {
-        lock (_claimsLock)
+        NodeAssignmentJournalEntry? entry;
+        lock (_assignmentsLock)
         {
-            if (_activeClaims.ContainsKey(claim.RequestId))
+            _activeAssignments.TryGetValue(requestId, out entry);
+        }
+
+        if (entry is null)
+        {
+            _logger.LogWarning(
+                "Cancellation requested for unknown assignment {RequestId}; no local work was released.",
+                requestId);
+            return;
+        }
+
+        var cancelling = entry;
+        if (entry.Assignment.State != "Cancelling")
+        {
+            cancelling = entry with { Assignment = entry.Assignment with { State = "Cancelling" } };
+            await _journal.UpsertAsync(cancelling, cancellationToken).ConfigureAwait(false);
+            ReplaceAssignment(cancelling);
+        }
+
+        rootSessionId ??= _rootSessions.ActiveSessionIds.SingleOrDefault(
+            sessionId => _rootSessions.FindRequestId(sessionId) == requestId);
+
+        lock (_assignmentsLock)
+        {
+            if (_pendingAssignmentCancellations.TryGetValue(requestId, out var pending))
+            {
+                pending.RootSessionId ??= rootSessionId;
+                pending.Reason = reason;
+                if (pending.Attempt is { IsCompleted: true })
+                {
+                    pending.Attempt = null;
+                }
+
+                return;
+            }
+
+            _pendingAssignmentCancellations.Add(
+                requestId,
+                new PendingAssignmentCancellation(rootSessionId, reason));
+            Interlocked.Increment(ref _pendingCancellations);
+        }
+    }
+
+    private void StartPendingAssignmentCancellations()
+    {
+        Guid[] requestIds;
+        lock (_assignmentsLock)
+        {
+            requestIds = [.. _pendingAssignmentCancellations.Keys];
+        }
+
+        foreach (var requestId in requestIds)
+        {
+            StartPendingAssignmentCancellation(requestId);
+        }
+    }
+
+    private Task? StartPendingAssignmentCancellation(Guid requestId)
+    {
+        Task attempt;
+        lock (_assignmentsLock)
+        {
+            if (_cancellationShutdown.IsCancellationRequested
+                || !_pendingAssignmentCancellations.TryGetValue(requestId, out var pending))
+            {
+                return null;
+            }
+
+            if (pending.Attempt is not null)
+            {
+                return pending.Attempt;
+            }
+
+            var rootSessionId = pending.RootSessionId;
+            var reason = pending.Reason;
+            attempt = Task.Run(
+                () => TerminalizePendingAssignmentCancellationAsync(
+                    requestId,
+                    pending,
+                    rootSessionId,
+                    reason,
+                    _cancellationShutdown.Token));
+            pending.Attempt = attempt;
+        }
+
+        _ = ObservePendingAssignmentCancellationAsync(requestId, attempt);
+        return attempt;
+    }
+
+    private async Task TerminalizePendingAssignmentCancellationAsync(
+        Guid requestId,
+        PendingAssignmentCancellation pending,
+        string? rootSessionId,
+        string reason,
+        CancellationToken cancellationToken)
+    {
+        NodeAssignmentJournalEntry? entry;
+        bool terminalAccepted;
+        lock (_assignmentsLock)
+        {
+            _activeAssignments.TryGetValue(requestId, out entry);
+            terminalAccepted = pending.TerminalAccepted;
+        }
+
+        if (entry is null)
+        {
+            return;
+        }
+
+        if (!terminalAccepted)
+        {
+            if (rootSessionId is null)
+            {
+                _logger.LogWarning(
+                    "Cancellation for request {RequestId} remains durable because no active root session could be identified.",
+                    requestId);
+                return;
+            }
+
+            var outcome = await _rootTerminalizer
+                .CancelAsync(entry.Assignment, rootSessionId, reason, cancellationToken)
+                .ConfigureAwait(false);
+            if (outcome != RootTerminalizationOutcome.Accepted)
+            {
+                _logger.LogWarning(
+                    "Root cancellation for request {RequestId} was {Outcome}; assignment ownership was retained.",
+                    requestId,
+                    outcome);
+                return;
+            }
+
+            lock (_assignmentsLock)
+            {
+                if (!_pendingAssignmentCancellations.TryGetValue(requestId, out var current)
+                    || !ReferenceEquals(current, pending))
+                {
+                    return;
+                }
+
+                pending.TerminalAccepted = true;
+            }
+        }
+
+        await _dispatchGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            await RemoveAssignmentAsync(requestId, CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            _dispatchGate.Release();
+        }
+    }
+
+    private async Task ObservePendingAssignmentCancellationAsync(Guid requestId, Task attempt)
+    {
+        try
+        {
+            await attempt.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_cancellationShutdown.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "Root cancellation attempt for request {RequestId} failed; assignment ownership was retained.",
+                requestId);
+        }
+    }
+
+    private async Task AwaitPendingAssignmentCancellationsAsync()
+    {
+        Task[] attempts;
+        lock (_assignmentsLock)
+        {
+            attempts =
+            [
+                .. _pendingAssignmentCancellations.Values
+                    .Select(pending => pending.Attempt)
+                    .OfType<Task>(),
+            ];
+        }
+
+        foreach (var attempt in attempts)
+        {
+            try
+            {
+                await attempt.ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Every attempt is observed and logged when it completes.
+            }
+        }
+    }
+
+    private AssignmentSupervisorState ObserveSupervisorState(NodeAssignmentJournalEntry entry)
+    {
+        if (entry.SupervisorState == AssignmentSupervisorState.Unknown)
+        {
+            return AssignmentSupervisorState.Unknown;
+        }
+
+        return _rootSessions.ActiveSessionIds.Any(
+            sessionId => _rootSessions.FindRequestId(sessionId) == entry.Assignment.RequestId)
+            ? AssignmentSupervisorState.Running
+            : AssignmentSupervisorState.Stopped;
+    }
+
+    private bool ContainsAssignment(Guid requestId)
+    {
+        lock (_assignmentsLock)
+        {
+            return _activeAssignments.ContainsKey(requestId);
+        }
+    }
+
+    private bool TrackAssignment(NodeAssignmentJournalEntry entry)
+    {
+        lock (_assignmentsLock)
+        {
+            if (_activeAssignments.ContainsKey(entry.Assignment.RequestId))
             {
                 return false;
             }
 
-            _activeClaims[claim.RequestId] = claim;
+            _assignmentCredentials.Track(ToCredential(entry.Assignment));
+            _activeAssignments[entry.Assignment.RequestId] = entry;
             return true;
         }
     }
 
-    private void ReplaceClaim(RequestClaimMessage claim)
+    private void ReplaceAssignment(NodeAssignmentJournalEntry entry)
     {
-        lock (_claimsLock)
+        lock (_assignmentsLock)
         {
-            _activeClaims[claim.RequestId] = claim;
+            _assignmentCredentials.Track(ToCredential(entry.Assignment));
+            _activeAssignments[entry.Assignment.RequestId] = entry;
         }
     }
 
-    private void RemoveClaim(Guid requestId)
+    private async Task RefreshPendingEventCountAsync(
+        Guid requestId,
+        CancellationToken cancellationToken)
     {
-        lock (_claimsLock)
+        NodeAssignmentJournalEntry? entry;
+        lock (_assignmentsLock)
         {
-            _activeClaims.Remove(requestId);
+            _activeAssignments.TryGetValue(requestId, out entry);
+        }
+
+        if (entry is null)
+        {
+            return;
+        }
+
+        var updated = entry with
+        {
+            PendingEventCount = await _spool
+                .CountPendingForRequestAsync(requestId, cancellationToken)
+                .ConfigureAwait(false),
+        };
+        await _journal.UpsertAsync(updated, cancellationToken).ConfigureAwait(false);
+        ReplaceAssignment(updated);
+    }
+
+    private async Task RemoveAssignmentAsync(Guid requestId, CancellationToken cancellationToken)
+    {
+        await _journal.DeleteAsync(requestId, cancellationToken).ConfigureAwait(false);
+        var pendingCancellationRemoved = false;
+        lock (_assignmentsLock)
+        {
+            if (_activeAssignments.Remove(requestId, out var entry))
+            {
+                _assignmentCredentials.Remove(ToCredential(entry.Assignment));
+            }
+
+            pendingCancellationRemoved = _pendingAssignmentCancellations.Remove(requestId);
+        }
+
+        if (pendingCancellationRemoved)
+        {
+            Interlocked.Decrement(ref _pendingCancellations);
         }
     }
 
-    internal IReadOnlyDictionary<Guid, RequestClaimMessage> ActiveClaimsSnapshot()
+    private static NodeAssignmentCredential ToCredential(ExecutionAssignmentMessage assignment)
+        => new(assignment.RequestId, assignment.ProjectId, assignment.ClaimToken);
+
+    internal IReadOnlyDictionary<Guid, ExecutionAssignmentMessage> ActiveAssignmentsSnapshot()
     {
-        lock (_claimsLock)
+        lock (_assignmentsLock)
         {
-            return new Dictionary<Guid, RequestClaimMessage>(_activeClaims);
+            return _activeAssignments.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value.Assignment);
         }
+    }
+
+    private Guid[] ActiveAssignmentRequestIdsSnapshot()
+    {
+        lock (_assignmentsLock)
+        {
+            return [.. _activeAssignments.Keys];
+        }
+    }
+
+    private sealed class PendingAssignmentCancellation(string? rootSessionId, string reason)
+    {
+        public string? RootSessionId { get; set; } = rootSessionId;
+        public string Reason { get; set; } = reason;
+        public Task? Attempt { get; set; }
+        public bool TerminalAccepted { get; set; }
     }
 
     private static async Task SafeDelayAsync(TimeSpan delay, CancellationToken cancellationToken)

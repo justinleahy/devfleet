@@ -6,18 +6,6 @@ using PiCommandCenter.Domain.Nodes;
 namespace PiCommandCenter.ControlPlane.Hosting;
 
 /// <summary>
-/// Options for the node liveness sweeper. <see cref="HeartbeatSeconds"/> mirrors the
-/// node-side heartbeat cadence; a node is stale after three missed heartbeats.
-/// </summary>
-public sealed class NodeLivenessOptions
-{
-    public const string SectionName = "Node";
-
-    /// <summary>Configured heartbeat cadence in seconds (default 10).</summary>
-    public int HeartbeatSeconds { get; set; } = 10;
-}
-
-/// <summary>
 /// Periodically sweeps the fleet and marks nodes whose last heartbeat is older than
 /// three heartbeat intervals as offline. Uses the registered <see cref="TimeProvider"/>
 /// so time is injectable and testable; never throws out of the background loop.
@@ -34,7 +22,7 @@ public sealed class NodeLivenessService(
         // promptly after the third missed heartbeat rather than minutes later.
         var heartbeatSeconds = Math.Max(1, options.Value.HeartbeatSeconds);
         var period = TimeSpan.FromSeconds(Math.Clamp(heartbeatSeconds / 3d, 2, 15));
-        var staleAfter = TimeSpan.FromSeconds(heartbeatSeconds * 3);
+        var staleAfter = options.Value.StaleAfter;
         using var timer = new PeriodicTimer(period, timeProvider);
 
         while (!stoppingToken.IsCancellationRequested

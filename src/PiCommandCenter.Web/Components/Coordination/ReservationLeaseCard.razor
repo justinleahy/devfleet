@@ -12,7 +12,10 @@
 
 <article class="lease @StateClass()">
     <header class="lease-head">
-        <h3>@OwnerLabel</h3>
+        <div class="lease-identity">
+            <p class="lease-eyebrow">Lease group</p>
+            <h3>@OwnerLabel</h3>
+        </div>
         <div class="badge-row">
             <FluentBadge Appearance="@(State == ReservationLeaseState.Active ? Appearance.Accent : Appearance.Neutral)">
                 @Lease.StateName
@@ -23,6 +26,12 @@
             </FluentBadge>
         </div>
     </header>
+
+    @* Countdown first: on a phone the deadline is the one fact that decides whether to act. *@
+    <p class="lease-clock @(IsOverdue ? "is-overdue" : null)">
+        <span class="clock-label">@ClockLabel</span>
+        <span class="clock-value">@ClockValue</span>
+    </p>
 
     @if (State == ReservationLeaseState.RecoveryRequired)
     {
@@ -44,47 +53,72 @@
     }
 
     <dl class="facts">
-        <dt>Lease id</dt>
-        <dd class="mono">@Lease.LeaseId</dd>
-        <dt>Owner session</dt>
-        <dd class="mono">@Lease.OwnerSessionId</dd>
-        <dt>Reason</dt>
-        <dd>@(string.IsNullOrWhiteSpace(Lease.Reason) ? "none recorded" : Lease.Reason)</dd>
-        <dt>Acquired</dt>
-        <dd>
-            @Lease.AcquiredAt.ToString("u")
-            <span class="hint">(@TimeText.Relative(Lease.AcquiredAt, Now))</span>
-        </dd>
-        <dt>Expires</dt>
-        <dd>
-            @Lease.ExpiresAt.ToString("u")
-            <span class="@(Lease.ExpiresAt <= Now ? "lease-overdue" : "hint")">
-                (@TimeText.Deadline(Lease.ExpiresAt, Now))
-            </span>
-        </dd>
+        <div class="fact">
+            <dt>Lease id</dt>
+            <dd class="mono">@Lease.LeaseId</dd>
+        </div>
+        <div class="fact">
+            <dt>Request</dt>
+            <dd class="mono">@Lease.RequestId</dd>
+        </div>
+        <div class="fact">
+            <dt>Owner session</dt>
+            <dd class="mono">@Lease.OwnerSessionId</dd>
+        </div>
+        <div class="fact fact-wide">
+            <dt>Reason</dt>
+            <dd>@(string.IsNullOrWhiteSpace(Lease.Reason) ? "none recorded" : Lease.Reason)</dd>
+        </div>
+        <div class="fact">
+            <dt>Acquired</dt>
+            <dd class="num">
+                <span class="stamp">@Lease.AcquiredAt.ToString("u")</span>
+                <span class="hint">(@TimeText.Relative(Lease.AcquiredAt, Now))</span>
+            </dd>
+        </div>
+        <div class="fact">
+            <dt>Expires</dt>
+            <dd class="num">
+                <span class="stamp">@Lease.ExpiresAt.ToString("u")</span>
+                <span class="@(Lease.ExpiresAt <= Now ? "lease-overdue" : "hint")">
+                    (@TimeText.Deadline(Lease.ExpiresAt, Now))
+                </span>
+            </dd>
+        </div>
         @if (Lease.ReleasedAt is { } released)
         {
-            <dt>Released</dt>
-            <dd>
-                @released.ToString("u")
-                <span class="hint">(@TimeText.Relative(released, Now))</span>
-            </dd>
+            <div class="fact">
+                <dt>Released</dt>
+                <dd class="num">
+                    <span class="stamp">@released.ToString("u")</span>
+                    <span class="hint">(@TimeText.Relative(released, Now))</span>
+                </dd>
+            </div>
         }
     </dl>
 
-    <ul class="scope-list">
-        @foreach (var scope in Lease.Scopes)
-        {
-            <li class="scope">
-                <span class="scope-kind">@scope.KindName</span>
-                <span class="scope-path mono">@scope.Path</span>
-            </li>
-        }
-    </ul>
+    @* A lease group always covers at least one scope; guard anyway so an empty group cannot
+       render a heading over an empty bordered list. *@
+    @if (Lease.Scopes.Count > 0)
+    {
+        <section class="scopes" aria-labelledby="@ScopeHeadingId">
+            <h4 class="section-label" id="@ScopeHeadingId">Blocked scopes</h4>
+            <ul class="scope-list">
+                @foreach (var scope in Lease.Scopes)
+                {
+                    <li class="scope">
+                        <span class="scope-kind">@scope.KindName</span>
+                        <span class="scope-path mono">@scope.Path</span>
+                    </li>
+                }
+            </ul>
+        </section>
+    }
 
     @if (State == ReservationLeaseState.RecoveryRequired)
     {
         <section class="force-release" aria-labelledby="@ForceReleaseHeadingId">
+            <p class="force-release-eyebrow">Destructive recovery</p>
             <h4 id="@ForceReleaseHeadingId">Force release (human only)</h4>
             <p class="force-release-lead">
                 Releasing this lease group issues a fresh fencing token, so any surviving process of
@@ -122,12 +156,19 @@
                             Placeholder="git status --porcelain output at the time of the release"
                             Class="field field-wide" />
 
-            <FluentCheckbox @bind-Value="_confirmed"
-                            Label="I confirm this force release and its fencing-token increment" />
+            <div class="confirm-row">
+                <FluentCheckbox @bind-Value="_confirmed"
+                                Label="I confirm this force release and its fencing-token increment" />
+            </div>
 
-            <FluentButton Appearance="Appearance.Accent" OnClick="ForceReleaseAsync" Loading="@_forcing">
-                Force release lease
-            </FluentButton>
+            <div class="force-release-actions">
+                <FluentButton Appearance="Appearance.Accent"
+                              OnClick="ForceReleaseAsync"
+                              Loading="@_forcing"
+                              Class="force-release-button">
+                    Force release lease
+                </FluentButton>
+            </div>
         </section>
     }
 </article>
@@ -157,6 +198,24 @@
     public EventCallback OnForceReleased { get; set; }
 
     private string ForceReleaseHeadingId => $"force-release-{Lease.LeaseId:N}";
+
+    private string ScopeHeadingId => $"lease-scopes-{Lease.LeaseId:N}";
+
+    /// <summary>True once the deadline has passed or ownership already needs recovery.</summary>
+    private bool IsOverdue =>
+        State == ReservationLeaseState.RecoveryRequired
+        || (State == ReservationLeaseState.Active && Lease.ExpiresAt <= Now);
+
+    private string ClockLabel => State switch
+    {
+        ReservationLeaseState.Released => "Released",
+        ReservationLeaseState.RecoveryRequired => "Deadline",
+        _ => Lease.ExpiresAt <= Now ? "Deadline" : "Expires",
+    };
+
+    private string ClockValue => State == ReservationLeaseState.Released && Lease.ReleasedAt is { } released
+        ? TimeText.Relative(released, Now)
+        : TimeText.Deadline(Lease.ExpiresAt, Now);
 
     /// <summary>
     /// Human-only force release (SPEC §17.10). Only offered for recovery-required leases: an

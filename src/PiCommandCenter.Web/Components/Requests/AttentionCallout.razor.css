@@ -1,8 +1,13 @@
+/* Attention callout: mobile-first. Severity is stated three ways — glyph, marker shape, and the
+   spelled-out word — so the border tint is reinforcement, never the only signal. Actions stack
+   full-width with proper touch targets on phone and collapse to a dense inline row on desktop. */
+
 .callout {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 2px);
-    padding: calc(var(--design-unit) * 4px);
+    min-width: 0;
+    padding: calc(var(--design-unit) * 3px);
     border-radius: calc(var(--control-corner-radius) * 1px);
     border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
     border-inline-start: calc(var(--design-unit) * 1px) solid var(--neutral-stroke-strong-rest);
@@ -17,13 +22,13 @@
     border-inline-start-color: var(--warning);
 }
 
+/* Marker stays in its own column so long titles wrap under themselves, not under the glyph. */
 .callout-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    align-items: start;
     gap: calc(var(--design-unit) * 2px);
 }
-
 
 .callout-mark {
     display: inline-flex;
@@ -31,6 +36,7 @@
     justify-content: center;
     inline-size: calc(var(--design-unit) * 6px);
     block-size: calc(var(--design-unit) * 6px);
+    /* Round marker = warning. */
     border-radius: 50%;
     font-weight: 700;
     color: var(--neutral-fill-inverse-rest);
@@ -38,18 +44,58 @@
 }
 
 .callout.is-error .callout-mark {
+    /* Square marker = error: shape distinguishes severity without relying on hue. */
+    border-radius: calc(var(--control-corner-radius) * 1px);
     background-color: var(--error);
 }
+
+.callout-titles {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1.5px);
+    min-width: 0;
+}
+
 .callout-head h3 {
     margin: 0;
     font-size: var(--type-ramp-plus-1-font-size);
     line-height: var(--type-ramp-plus-1-line-height);
     font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.callout-tags {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: calc(var(--design-unit) * 1.5px);
+    min-width: 0;
+}
+
+.callout-severity {
+    padding: 0 calc(var(--design-unit) * 1.5px);
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-strong-rest);
+    border-radius: calc(var(--control-corner-radius) * 1px);
+    color: var(--neutral-foreground-rest);
+    font-size: var(--type-ramp-minus-2-font-size);
+    line-height: calc(var(--design-unit) * 5px);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+}
+
+.callout.is-error .callout-severity {
+    border-color: var(--error);
+}
+
+.callout.is-warning .callout-severity {
+    border-color: var(--warning);
 }
 
 .callout-detail {
     margin: 0;
-    max-width: 76ch;
+    max-width: 68ch;
+    overflow-wrap: anywhere;
 }
 
 .callout-evidence {
@@ -57,11 +103,67 @@
     color: var(--neutral-foreground-hint);
     font-family: var(--monospace-font-family, ui-monospace, monospace);
     font-size: var(--type-ramp-minus-2-font-size);
+    font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
 }
 
 .mono {
     font-family: var(--monospace-font-family, ui-monospace, monospace);
+}
+
+.callout-actions {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+    margin-block-start: calc(var(--design-unit) * 1px);
+}
+
+/* Stacked links fill the row and hold a ~44px touch target on phone. */
+.callout-actions ::deep fluent-anchor,
+.callout-actions ::deep fluent-anchor::part(control) {
+    width: 100%;
+}
+
+.callout-actions ::deep fluent-anchor::part(control) {
+    min-height: calc(var(--design-unit) * 11px);
+}
+
+/* Focus is an offset ring: geometry the operator can see regardless of colour perception. */
+.callout-actions ::deep fluent-anchor:focus-within::part(control) {
+    outline: calc(var(--focus-stroke-width, 2) * 1px) solid var(--accent-fill-rest);
+    outline-offset: 2px;
+}
+
+@media (min-width: 600px) {
+    .callout {
+        padding: calc(var(--design-unit) * 4px);
+    }
+
+    .callout-titles {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        column-gap: calc(var(--design-unit) * 2px);
+    }
+
+    .callout-actions {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+    }
+
+    .callout-actions ::deep fluent-anchor,
+    .callout-actions ::deep fluent-anchor::part(control) {
+        width: auto;
+    }
+}
+
+@media (min-width: 960px) {
+    /* Pointer-driven widths: the row tightens once touch is no longer the primary input. */
+    .callout-actions ::deep fluent-anchor::part(control) {
+        min-height: calc(var(--design-unit) * 8px);
+    }
 }
 
 .visually-hidden {

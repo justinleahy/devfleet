@@ -30,7 +30,8 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
     private readonly ControlPlaneFixture _fixture;
     private readonly HttpClient _client;
     private readonly HubConnection _connection;
-    private readonly Guid _nodeId = Guid.NewGuid();
+    private const string ClaimToken = "mail-coordination-fixture-token";
+    private readonly Guid _nodeId;
     private Guid _projectId;
     private Guid _requestId;
     private string _rootSession = default!;
@@ -39,6 +40,7 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
     public MailCoordinationTests(ControlPlaneFixture fixture)
     {
         _fixture = fixture;
+        _nodeId = fixture.AuthenticatedNodeId;
         _client = fixture.CreateClient();
         _connection = fixture.CreateNodeHubConnection();
         _connection.StartAsync().GetAwaiter().GetResult();
@@ -55,7 +57,7 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
         await SeedSessionAsync(_childSession);
 
         var delivery = await _connection.InvokeAsync<MailDeliveryMessage>("SendMail", new SendMailMessage(
-            _projectId, _requestId, _requestId.ToString(), sender,
+            _projectId, _requestId, ClaimToken, _requestId.ToString(), sender,
             [_childSession], "Reservation handoff requested",
             "I need src/DependencyInjection.cs.", MailImportance.High, AckRequired: true));
 
@@ -63,7 +65,7 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
         Assert.Equal([_childSession], delivery.DeliveredTo);
 
         var inbox = await _connection.InvokeAsync<MailInboxMessage>("FetchInbox",
-            new FetchMailInboxMessage(_projectId, _childSession, 50));
+            new FetchMailInboxMessage(_projectId, _requestId, ClaimToken, _childSession, 50));
         var message = Assert.Single(inbox.Messages);
         Assert.Equal(delivery.MessageId, message.MessageId);
         Assert.Equal(sender, message.SenderSessionId);
@@ -73,23 +75,23 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
         Assert.Null(message.AcknowledgedAtUtc);
 
         var thread = await _connection.InvokeAsync<MailInboxMessage>("FetchThread",
-            new FetchMailThreadMessage(_projectId, _childSession, _requestId.ToString()));
+            new FetchMailThreadMessage(_projectId, _requestId, ClaimToken, _childSession, _requestId.ToString()));
         Assert.Contains(thread.Messages, m => m.MessageId == delivery.MessageId);
 
         var read = await _connection.InvokeAsync<MailReceiptMessage>("MarkMailRead",
-            new MarkMailReadMessage(_childSession, delivery.MessageId));
+            new MarkMailReadMessage(_projectId, _requestId, ClaimToken, _childSession, delivery.MessageId));
         Assert.NotNull(read.ReadAtUtc);
         Assert.Null(read.AcknowledgedAtUtc);
 
         var ack = await _connection.InvokeAsync<MailReceiptMessage>("AcknowledgeMail",
-            new AcknowledgeMailMessage(_childSession, delivery.MessageId));
+            new AcknowledgeMailMessage(_projectId, _requestId, ClaimToken, _childSession, delivery.MessageId));
         Assert.NotNull(ack.AcknowledgedAtUtc);
 
         // Re-reading and re-acknowledging is idempotent.
         await _connection.InvokeAsync<MailReceiptMessage>("MarkMailRead",
-            new MarkMailReadMessage(_childSession, delivery.MessageId));
+            new MarkMailReadMessage(_projectId, _requestId, ClaimToken, _childSession, delivery.MessageId));
         var ackAgain = await _connection.InvokeAsync<MailReceiptMessage>("AcknowledgeMail",
-            new AcknowledgeMailMessage(_childSession, delivery.MessageId));
+            new AcknowledgeMailMessage(_projectId, _requestId, ClaimToken, _childSession, delivery.MessageId));
         Assert.Equal(ack.AcknowledgedAtUtc, ackAgain.AcknowledgedAtUtc);
     }
 
@@ -102,14 +104,14 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
         await SeedSessionAsync(third, parentSessionId: _rootSession);
 
         var delivery = await _connection.InvokeAsync<MailDeliveryMessage>("SendMail", new SendMailMessage(
-            _projectId, _requestId, _requestId.ToString(), sender,
+            _projectId, _requestId, ClaimToken, _requestId.ToString(), sender,
             [_childSession, third], "All hands", "Status update.", MailImportance.Normal, AckRequired: false));
 
         Assert.Equal(2, delivery.DeliveredTo.Count);
         foreach (var recipient in new[] { _childSession, third })
         {
             var inbox = await _connection.InvokeAsync<MailInboxMessage>("FetchInbox",
-                new FetchMailInboxMessage(_projectId, recipient, 50));
+                new FetchMailInboxMessage(_projectId, _requestId, ClaimToken, recipient, 50));
             Assert.Contains(inbox.Messages, m => m.MessageId == delivery.MessageId && m.RecipientSessionId == recipient);
         }
     }
@@ -119,17 +121,18 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
     {
         await SeedAsync();
         var original = await _connection.InvokeAsync<MailDeliveryMessage>("SendMail", new SendMailMessage(
-            _projectId, _requestId, _requestId.ToString(), _rootSession,
+            _projectId, _requestId, ClaimToken, _requestId.ToString(), _rootSession,
             [_childSession], "Plan check", "Please review the plan.", MailImportance.Normal, AckRequired: false));
 
         var reply = await _connection.InvokeAsync<MailDeliveryMessage>("ReplyMail", new ReplyMailMessage(
-            _projectId, _requestId.ToString(), _childSession, "Plan reviewed, approved.", MailImportance.Normal, AckRequired: false));
+            _projectId, _requestId, ClaimToken, _requestId.ToString(), _childSession,
+            "Plan reviewed, approved.", MailImportance.Normal, AckRequired: false));
 
         Assert.Equal(reply.ThreadId, original.ThreadId);
         Assert.Equal([_rootSession], reply.DeliveredTo);
 
         var thread = await _connection.InvokeAsync<MailInboxMessage>("FetchThread",
-            new FetchMailThreadMessage(_projectId, _rootSession, original.ThreadId));
+            new FetchMailThreadMessage(_projectId, _requestId, ClaimToken, _rootSession, original.ThreadId));
         Assert.Equal(2, thread.Messages.Count);
     }
 
@@ -180,14 +183,19 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
 
         // Registering and heartbeating the same node id joins this connection to the
         // recipient session's live group.
-        var liveNodeId = Guid.NewGuid();
+        var liveNodeId = _nodeId;
         await recipientConnection.InvokeAsync<NodeDto>("Register",
             new NodeRegistrationMessage(liveNodeId, "mail-live-node", "1.0.0", "{}"));
         await recipientConnection.InvokeAsync<NodeDto>("Heartbeat",
             new NodeHeartbeatMessage(liveNodeId, [_childSession]));
 
+
+        // Recipient Register on the same node id takes the live assignment; the sending
+        // hub must Register again before SendMail so fail-closed auth still holds.
+        await _connection.InvokeAsync<NodeDto>("Register",
+            new NodeRegistrationMessage(_nodeId, "mail-coordination-node", "1.0.0", "{}"));
         var delivery = await _connection.InvokeAsync<MailDeliveryMessage>("SendMail", new SendMailMessage(
-            _projectId, _requestId, _requestId.ToString(), _rootSession,
+            _projectId, _requestId, ClaimToken, _requestId.ToString(), _rootSession,
             [_childSession], "Live", "Delivered in real time.", MailImportance.High, AckRequired: false));
 
         var completed = await Task.WhenAny(pushed.Task, Task.Delay(TimeSpan.FromSeconds(10)));
@@ -219,7 +227,7 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
             firstPush.TrySetResult(message);
         });
 
-        var liveNodeId = Guid.NewGuid();
+        var liveNodeId = _nodeId;
         await recipientConnection.InvokeAsync<NodeDto>("Register",
             new NodeRegistrationMessage(liveNodeId, "mail-http-live-node", "1.0.0", "{}"));
         await recipientConnection.InvokeAsync<NodeDto>("Heartbeat",
@@ -313,7 +321,7 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
         // A node heartbeating the session active joins its live group and receives the
         // cancellation command; it reports the outcome by publishing the real event.
         var cancelReceived = new TaskCompletionSource<CancelSessionCommand>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var nodeId = Guid.NewGuid();
+        var nodeId = _nodeId;
         _connection.On<CancelSessionCommand>("CancelSession", command =>
         {
             cancelReceived.TrySetResult(command);
@@ -341,6 +349,7 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
                 NodeId: nodeId,
                 ProjectId: _projectId,
                 RequestId: _requestId,
+                ClaimToken: ClaimToken,
                 SessionId: _childSession,
                 Sequence: 1,
                 Type: "session.cancelled",
@@ -361,21 +370,46 @@ public sealed class MailCoordinationTests : IClassFixture<ControlPlaneFixture>, 
         {
             return;
         }
+        _ = await _connection.InvokeAsync<NodeDto>(
+            "Register", new NodeRegistrationMessage(_nodeId, "mail-coordination-node", "1.0.0", "{}"));
 
         using var scope = _fixture.Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
         var now = DateTimeOffset.UtcNow;
-        var nodeId = new NodeId(_nodeId);
         var project = Project.Register(
-            nodeId, "Mail project " + Guid.NewGuid().ToString("N")[..6],
-            Path.Combine(Path.GetTempPath(), "pi-cc-integration", Guid.NewGuid().ToString("N")),
+            "Mail project " + Guid.NewGuid().ToString("N")[..6],
             "main", enabled: true, maxActiveWriteRequests: 2, maxReadOnlyRequests: 4,
             maxChildAgentsPerRequest: 2, requireCleanStart: false, createRequestBranch: false,
             createRequestCommit: false, autoMerge: false, now);
-        db.Projects.Add(project);
+        var nodeId = new NodeId(_nodeId);
+        var repositoryPath = _fixture.CreateGitRepository();
+        var binding = WorkspaceBinding.Designate(project.Id, nodeId, repositoryPath, now);
+        Assert.True(binding.ApplyValidationResult(
+            nodeId,
+            binding.ValidationRevision,
+            WorkspaceBindingStatus.Valid,
+            WorkspaceBinding.ValidValidationCode,
+            "Seeded for mail coordination tests.",
+            repositoryPath,
+            now));
         var request = WorkRequest.Enqueue(project.Id, WorkRequestKind.Development, RequestPriority.Normal,
             RiskLevel.Standard, "Mail request", "Do mail work", now);
+        request.Start(now);
+        var assignment = ExecutionAssignment.Create(
+            request.Id,
+            project.Id,
+            binding.Id,
+            nodeId,
+            binding.CanonicalRepositoryPath!,
+            project.DefaultBranch,
+            binding.ValidationRevision,
+            ClaimToken,
+            now,
+            TimeSpan.FromMinutes(5));
+        db.Projects.Add(project);
+        db.WorkspaceBindings.Add(binding);
         db.WorkRequests.Add(request);
+        db.ExecutionAssignments.Add(assignment);
         await db.SaveChangesAsync();
         _projectId = project.Id.Value;
         _requestId = request.Id.Value;

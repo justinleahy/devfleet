@@ -2,8 +2,10 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using PiCommandCenter.Application.Live;
 using PiCommandCenter.Application.Nodes;
+using PiCommandCenter.Application.Runtime;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
+using PiCommandCenter.Domain.Requests;
 using PiCommandCenter.Infrastructure.Persistence;
 
 namespace PiCommandCenter.Infrastructure.Nodes;
@@ -17,7 +19,11 @@ public sealed class NodeRegistry(
     ControlPlaneDbContext db,
     IProjectionNotifier notifier) : INodeRegistry
 {
-    private static readonly JsonSerializerOptions ResourceSnapshotJsonOptions = new(JsonSerializerDefaults.Web);
+    private const int MaxAssignmentCount = 200;
+    private const int MaxRouteCount = 200;
+    private const int MaxStatusTextLength = 128;
+    private const int MaxExecutionStatusJsonLength = 131072;
+    private static readonly JsonSerializerOptions SnapshotJsonOptions = new(JsonSerializerDefaults.Web);
 
     public async Task<IReadOnlyList<NodeDto>> ListAsync(CancellationToken cancellationToken = default)
     {
@@ -63,11 +69,12 @@ public sealed class NodeRegistry(
 
         // Re-registration from a live node refreshes identity metadata and brings it online.
         existing.RefreshRegistration(command.DisplayName, command.AgentVersion, command.CapabilitiesJson, at);
+        var eligibilityChanges = await GetEligibilityChangesAsync(existing.Id, cancellationToken);
         await SaveWithConcurrencyRetryAsync(
             existing,
             now => existing.RefreshRegistration(command.DisplayName, command.AgentVersion, command.CapabilitiesJson, now),
             cancellationToken);
-        notifier.Publish(ProjectionChange.Fleet());
+        PublishFleetAndEligibilityChanges(eligibilityChanges);
         return ToDto(existing);
     }
 
@@ -77,17 +84,28 @@ public sealed class NodeRegistry(
         CancellationToken cancellationToken = default)
     {
         var resourceSnapshotJson = SerializeResources(command.Resources);
-
+        var executionStatusJson = SerializeExecutionStatus(command.ExecutionStatus);
         var node = await db.FleetNodes
             .SingleOrDefaultAsync(n => n.Id == command.Id, cancellationToken)
             ?? throw new NodeNotFoundException(command.Id);
 
-        node.Heartbeat(node.AgentVersion, node.CapabilitiesJson, at, resourceSnapshotJson);
+        node.Heartbeat(
+            node.AgentVersion,
+            node.CapabilitiesJson,
+            at,
+            resourceSnapshotJson,
+            executionStatusJson);
+        var eligibilityChanges = await GetEligibilityChangesAsync(node.Id, cancellationToken);
         await SaveWithConcurrencyRetryAsync(
             node,
-            now => node.Heartbeat(node.AgentVersion, node.CapabilitiesJson, now, resourceSnapshotJson),
+            now => node.Heartbeat(
+                node.AgentVersion,
+                node.CapabilitiesJson,
+                now,
+                resourceSnapshotJson,
+                executionStatusJson),
             cancellationToken);
-        notifier.Publish(ProjectionChange.Fleet());
+        PublishFleetAndEligibilityChanges(eligibilityChanges);
         return ToDto(node);
     }
 
@@ -107,8 +125,50 @@ public sealed class NodeRegistry(
         node.MarkOffline(at);
         if (db.Entry(node).State == EntityState.Modified)
         {
+            var eligibilityChanges = await GetEligibilityChangesAsync(node.Id, cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
-            notifier.Publish(ProjectionChange.Fleet());
+            PublishFleetAndEligibilityChanges(eligibilityChanges);
+        }
+    }
+
+    private async Task<IReadOnlyList<ProjectionChange>> GetEligibilityChangesAsync(
+        NodeId nodeId,
+        CancellationToken cancellationToken)
+    {
+        var projectIds = await db.WorkspaceBindings
+            .AsNoTracking()
+            .Where(binding => binding.NodeId == nodeId)
+            .Select(binding => binding.ProjectId)
+            .Distinct()
+            .ToListAsync(cancellationToken);
+        var queuedRequests = await db.WorkRequests
+            .AsNoTracking()
+            .Where(request => projectIds.Contains(request.ProjectId)
+                && request.Status == WorkRequestStatus.Queued)
+            .Select(request => new { request.ProjectId, RequestId = request.Id })
+            .ToListAsync(cancellationToken);
+        var changes = new List<ProjectionChange>(projectIds.Count + queuedRequests.Count);
+        foreach (var projectId in projectIds)
+        {
+            changes.Add(ProjectionChange.Project(projectId.Value));
+        }
+
+        foreach (var request in queuedRequests)
+        {
+            changes.Add(ProjectionChange.Request(
+                request.ProjectId.Value,
+                request.RequestId.Value));
+        }
+
+        return changes;
+    }
+
+    private void PublishFleetAndEligibilityChanges(IReadOnlyList<ProjectionChange> changes)
+    {
+        notifier.Publish(ProjectionChange.Fleet());
+        foreach (var change in changes)
+        {
+            notifier.Publish(change);
         }
     }
 
@@ -144,7 +204,8 @@ public sealed class NodeRegistry(
         node.Status,
         node.CapabilitiesJson,
         node.Version,
-        DeserializeResources(node.ResourceSnapshotJson));
+        DeserializeResources(node.ResourceSnapshotJson),
+        DeserializeExecutionStatus(node.ExecutionStatusJson));
 
     private static string? SerializeResources(NodeResourceSnapshotDto? resources)
     {
@@ -154,7 +215,7 @@ public sealed class NodeRegistry(
         }
 
         ValidateResources(resources);
-        return JsonSerializer.Serialize(resources, ResourceSnapshotJsonOptions);
+        return JsonSerializer.Serialize(resources, SnapshotJsonOptions);
     }
 
     private static NodeResourceSnapshotDto? DeserializeResources(string? resourceSnapshotJson)
@@ -168,7 +229,7 @@ public sealed class NodeRegistry(
         {
             var resources = JsonSerializer.Deserialize<NodeResourceSnapshotDto>(
                 resourceSnapshotJson,
-                ResourceSnapshotJsonOptions);
+                SnapshotJsonOptions);
             return resources is not null && ResourcesAreValid(resources) ? resources : null;
         }
         catch (JsonException)
@@ -176,6 +237,103 @@ public sealed class NodeRegistry(
             return null;
         }
     }
+
+    private static string? SerializeExecutionStatus(NodeExecutionStatusDto? executionStatus)
+    {
+        if (executionStatus is null)
+        {
+            return null;
+        }
+
+        if (!ExecutionStatusIsValid(executionStatus))
+        {
+            throw new ArgumentException("Execution status values are invalid.", nameof(executionStatus));
+        }
+
+        var json = JsonSerializer.Serialize(executionStatus, SnapshotJsonOptions);
+        if (json.Length > MaxExecutionStatusJsonLength)
+        {
+            throw new ArgumentException("Execution status is too large.", nameof(executionStatus));
+        }
+
+        return json;
+    }
+
+    private static NodeExecutionStatusDto? DeserializeExecutionStatus(string? executionStatusJson)
+    {
+        if (executionStatusJson is null || executionStatusJson.Length > MaxExecutionStatusJsonLength)
+        {
+            return null;
+        }
+
+        try
+        {
+            var executionStatus = JsonSerializer.Deserialize<NodeExecutionStatusDto>(
+                executionStatusJson,
+                SnapshotJsonOptions);
+            return executionStatus is not null && ExecutionStatusIsValid(executionStatus)
+                ? executionStatus
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool ExecutionStatusIsValid(NodeExecutionStatusDto status)
+    {
+        if (status.ObservedAt.Offset != TimeSpan.Zero
+            || status.AvailableRequestSlots < 0
+            || status.ActiveAssignmentIds is null
+            || status.ActiveAssignmentIds.Count > MaxAssignmentCount
+            || !IsBoundedStableText(status.RoutingRevision)
+            || status.Routes is null
+            || status.Routes.Count > MaxRouteCount)
+        {
+            return false;
+        }
+
+        var assignmentIds = new HashSet<Guid>();
+        foreach (var assignmentId in status.ActiveAssignmentIds)
+        {
+            if (assignmentId == Guid.Empty || !assignmentIds.Add(assignmentId))
+            {
+                return false;
+            }
+        }
+
+        var routeKeys = new HashSet<(string Role, string CanonicalModel)>();
+        foreach (var route in status.Routes)
+        {
+            if (route is null
+                || !RouteIsValid(route, status.RoutingRevision)
+                || !routeKeys.Add((route.Role, route.CanonicalModel)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool RouteIsValid(RuntimeRouteReadinessDto route, string routingRevision) =>
+        IsBoundedCanonicalText(route.Role)
+        && route.CanonicalModel is { Length: <= MaxStatusTextLength }
+        && AgentModelSelector.TryParse(route.CanonicalModel, out var model)
+        && model.Value == route.CanonicalModel
+        && route.Readiness is "ready" or "unavailable" or "unknown"
+        && IsBoundedStableText(route.EvidenceSource)
+        && route.ObservedAt.Offset == TimeSpan.Zero
+        && string.Equals(route.RoutingRevision, routingRevision, StringComparison.Ordinal);
+
+    private static bool IsBoundedCanonicalText(string? value) =>
+        value is { Length: > 0 and <= MaxStatusTextLength }
+        && !char.IsWhiteSpace(value[0])
+        && !char.IsWhiteSpace(value[^1]);
+
+    private static bool IsBoundedStableText(string? value) =>
+        IsBoundedCanonicalText(value);
 
     private static void ValidateResources(NodeResourceSnapshotDto resources)
     {

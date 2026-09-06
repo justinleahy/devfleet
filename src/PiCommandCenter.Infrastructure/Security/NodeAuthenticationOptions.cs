@@ -1,7 +1,7 @@
 namespace PiCommandCenter.Infrastructure.Security;
 
 /// <summary>
-/// Node-to-control-plane token authentication. Bound from <c>NodeAuthentication</c>.
+/// Per-node control-plane authentication. Bound from <c>NodeAuthentication</c>.
 /// </summary>
 public sealed class NodeAuthenticationOptions
 {
@@ -11,8 +11,8 @@ public sealed class NodeAuthenticationOptions
 
     public const string DefaultScheme = "Bearer";
 
-    /// <summary>Path to a 0600 file containing the 256-bit node credential (hex).</summary>
-    public string CredentialFile { get; set; } = "~/.config/pi-command-center/node.token";
+    /// <summary>Owner-only directory containing one credential file per node.</summary>
+    public string CredentialDirectory { get; set; } = "~/.config/pi-command-center/node-credentials";
 
     /// <summary>HTTP header that carries the node credential.</summary>
     public string Header { get; set; } = DefaultHeader;

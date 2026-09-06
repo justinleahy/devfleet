@@ -42,7 +42,14 @@ public sealed class ControlPlaneFixture : IDisposable
         {
         }
 
-        (PasswordFile, CredentialFile) = AuthTestMaterial.WriteTo(Path.Combine(_tempRoot, "auth"));
+        PasswordFile = Path.Combine(_tempRoot, "auth", "admin.password.hash");
+        PrivateFileAccess.WritePrivateFile(PasswordFile, AuthMaterialLoader.HashPassword(AuthTestMaterial.Password));
+
+        CredentialDirectory = Path.Combine(_tempRoot, "node-credentials");
+        PrivateFileAccess.CreatePrivateDirectory(CredentialDirectory);
+        NodeCredentialFile = WriteNodeCredential(AuthenticatedNodeId, NodeTokenHex);
+        SecondaryNodeCredentialFile = WriteNodeCredential(SecondaryNodeId, SecondaryNodeTokenHex);
+
         DataProtectionKeysDirectory = Path.Combine(_tempRoot, "data-protection-keys");
         PrivateFileAccess.CreatePrivateDirectory(DataProtectionKeysDirectory);
 
@@ -61,10 +68,22 @@ public sealed class ControlPlaneFixture : IDisposable
 
     public string PasswordFile { get; }
 
-    public string CredentialFile { get; }
+    public string CredentialDirectory { get; }
+
+    public string NodeCredentialFile { get; }
+
+    public string SecondaryNodeCredentialFile { get; }
+
     public string DataProtectionKeysDirectory { get; }
 
+    public Guid AuthenticatedNodeId { get; } = Guid.Parse("16a9c414-dc4b-482a-91be-4f3b947894ff");
+
+    public Guid SecondaryNodeId { get; } = Guid.Parse("e4582f39-10ed-4de3-b036-0415d70a269a");
+
     public string NodeTokenHex => AuthTestMaterial.NodeTokenHex;
+
+    public string SecondaryNodeTokenHex { get; } = Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData("pi-command-center-test-secondary-node"u8));
 
     public HttpClient CreateClient() => CreateAuthenticatedClient();
 
@@ -76,7 +95,7 @@ public sealed class ControlPlaneFixture : IDisposable
             builder.UseSetting("Projects:ApprovedRoots:0", ApprovedRoot);
             builder.UseTestAuthFiles(
                 PasswordFile,
-                CredentialFile,
+                CredentialDirectory,
                 dataProtectionKeysDirectory: DataProtectionKeysDirectory);
         });
     }
@@ -174,19 +193,49 @@ public sealed class ControlPlaneFixture : IDisposable
             ?? throw new InvalidOperationException("Native token response body was empty.");
     }
 
-    public void ConfigureNodeHub(HttpConnectionOptions options)
+    public void ConfigureNodeHub(HttpConnectionOptions options) =>
+        ConfigureNodeHub(options, AuthenticatedNodeId);
+
+    public void ConfigureNodeHub(HttpConnectionOptions options, Guid nodeId)
     {
         options.HttpMessageHandlerFactory = _ => Factory.Server.CreateHandler();
         options.Transports = HttpTransportType.LongPolling;
-        options.AccessTokenProvider = () => Task.FromResult<string?>(NodeTokenHex);
+        var token = GetNodeToken(nodeId);
+        options.AccessTokenProvider = () => Task.FromResult<string?>(token);
     }
 
-    public HubConnection CreateNodeHubConnection()
+    public HubConnection CreateNodeHubConnection() => CreateNodeHubConnection(AuthenticatedNodeId);
+
+    public HubConnection CreateNodeHubConnection(Guid nodeId)
     {
         _ = Factory.CreateClient();
         return new HubConnectionBuilder()
-            .WithUrl(new Uri(Factory.Server.BaseAddress, "nodeHub"), ConfigureNodeHub)
+            .WithUrl(
+                new Uri(Factory.Server.BaseAddress, "nodeHub"),
+                options => ConfigureNodeHub(options, nodeId))
             .Build();
+    }
+
+    private string WriteNodeCredential(Guid nodeId, string token)
+    {
+        var path = Path.Combine(CredentialDirectory, $"{nodeId:D}.token");
+        PrivateFileAccess.WritePrivateFile(path, token);
+        return path;
+    }
+
+    private string GetNodeToken(Guid nodeId)
+    {
+        if (nodeId == AuthenticatedNodeId)
+        {
+            return NodeTokenHex;
+        }
+
+        if (nodeId == SecondaryNodeId)
+        {
+            return SecondaryNodeTokenHex;
+        }
+
+        throw new ArgumentOutOfRangeException(nameof(nodeId), nodeId, "No test credential is provisioned for this node.");
     }
 
     /// <summary>Initializes a fresh real Git repository inside the fixture's approved root.</summary>

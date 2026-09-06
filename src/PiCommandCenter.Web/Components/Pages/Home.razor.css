@@ -1,17 +1,30 @@
-.page-head ::deep .page-head-row,
-.page-head ::deep .page-head-copy {
+/* Fleet overview.
+
+   Mobile-first: everything below the first media query is the 320-430px layout —
+   one column, stacked headings, two metric tiles per row, telemetry as
+   label/value rows. Wider viewports add columns at ~600px (tablet), ~960px
+   (four-metric strip) and ~1280px (node identity beside its telemetry). */
+
+/* Page head: title block over a full-width primary action on a phone, one
+   baseline-aligned row once there is room for both. */
+.page-head {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: calc(var(--design-unit) * 4px);
     min-width: 0;
 }
 
-/* The button's shadow-root content keeps its intrinsic width, so a shrunken
-   host clips the label: let the copy absorb the squeeze instead. */
-.page-head ::deep .page-head-action {
-    flex-shrink: 0;
+.page-head-copy {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
 }
 
 .page-head h1 {
-    font-size: var(--type-ramp-plus-4-font-size);
-    line-height: var(--type-ramp-plus-4-line-height);
+    font-size: var(--type-ramp-plus-3-font-size);
+    line-height: var(--type-ramp-plus-3-line-height);
     letter-spacing: -0.02em;
     margin: 0;
 }
@@ -20,22 +33,69 @@
     margin: 0;
     max-width: 68ch;
     color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-plus-1-font-size);
-    line-height: var(--type-ramp-plus-1-line-height);
+    font-size: var(--type-ramp-base-font-size);
+    line-height: var(--type-ramp-base-line-height);
+}
+
+/* Snapshot instant: compact metadata, not prose. */
+.page-snapshot {
+    margin: calc(var(--design-unit) * 1px) 0 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-variant-numeric: tabular-nums;
+}
+
+/* The button's shadow-root content keeps its intrinsic width, so a shrunken
+   host clips the label: let the copy absorb the squeeze instead. */
+.page-head ::deep .page-head-action {
+    flex-shrink: 0;
+}
+
+/* Section heads share one shape: title on the left, secondary matter (node
+   counts, Reload) opposite it. On a phone they stack instead. */
+.section-head {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: calc(var(--design-unit) * 2px);
+    margin-block-end: calc(var(--design-unit) * 3px);
+    min-width: 0;
 }
 
 h2 {
     margin: 0;
-    font-size: var(--type-ramp-plus-2-font-size);
-    line-height: var(--type-ramp-plus-2-line-height);
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
     font-weight: 600;
     letter-spacing: -0.015em;
 }
 
-/* Summary metrics: a dense strip, not hero tiles */
+.section-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: calc(var(--design-unit) * 2px);
+    margin: 0;
+    min-width: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.section-count {
+    color: var(--neutral-foreground-rest);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Summary metrics: a dense strip, not hero tiles. Two tiles per row is the
+   widest a 320px viewport takes without breaking the labels. */
 .metric-row {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: calc(var(--design-unit) * 1px);
     margin: 0;
     border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
@@ -48,7 +108,8 @@ h2 {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 1px);
-    padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 5px);
+    padding: calc(var(--design-unit) * 3px);
+    min-width: 0;
     background-color: var(--neutral-layer-1);
 }
 
@@ -68,6 +129,19 @@ h2 {
     font-variant-numeric: tabular-nums;
 }
 
+/* A count that links somewhere keeps a thumb-sized target on a phone. */
+.metric dd a {
+    display: inline-flex;
+    align-items: center;
+    min-height: calc(var(--design-unit) * 11px);
+    color: inherit;
+}
+
+/* Status emphasis, only when the fleet is actually asking for something. */
+.metric.is-alert dd a {
+    color: var(--error, var(--accent-foreground-rest));
+}
+
 .metric-note {
     margin: 0;
     color: var(--neutral-foreground-hint);
@@ -75,12 +149,18 @@ h2 {
     line-height: var(--type-ramp-minus-1-line-height);
 }
 
+.metric-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: calc(var(--design-unit) * 11px);
+}
+
 /* Loading / empty */
 .state-block {
     display: flex;
     align-items: center;
     gap: calc(var(--design-unit) * 3px);
-    padding-block: calc(var(--design-unit) * 6px);
+    padding-block: calc(var(--design-unit) * 5px);
     color: var(--neutral-foreground-hint);
 }
 
@@ -89,7 +169,7 @@ h2 {
     flex-direction: column;
     align-items: flex-start;
     gap: calc(var(--design-unit) * 3px);
-    padding: calc(var(--design-unit) * 6px);
+    padding: calc(var(--design-unit) * 4px);
 }
 
 .state-empty h3 {
@@ -101,7 +181,7 @@ h2 {
 
 .state-empty p {
     margin: 0;
-    max-width: 56ch;
+    max-width: 60ch;
     color: var(--neutral-foreground-hint);
 }
 
@@ -112,16 +192,35 @@ h2 {
     gap: calc(var(--design-unit) * 3px);
     height: 100%;
     padding: calc(var(--design-unit) * 4px);
+    min-width: 0;
+}
+
+.project-head {
+    display: flex;
+    align-items: flex-start;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
 }
 
 .project-card h3 {
+    flex: 1 1 auto;
     margin: 0;
+    min-width: 0;
     font-size: var(--type-ramp-plus-1-font-size);
     line-height: var(--type-ramp-plus-1-line-height);
     font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+/* The status badge keeps its intrinsic width; the title absorbs the squeeze. */
+.project-head ::deep fluent-badge {
+    flex: 0 0 auto;
 }
 
 .project-card h3 a {
+    display: inline-flex;
+    align-items: center;
+    min-height: calc(var(--design-unit) * 11px);
     color: var(--neutral-foreground-rest);
     text-decoration: none;
 }
@@ -142,10 +241,12 @@ h2 {
     color: var(--neutral-foreground-rest);
 }
 
+/* Facts stack label-over-value on a phone, where a label column would leave a
+   repository path a few characters wide, and pair up from tablet width. */
 .facts {
     display: grid;
-    grid-template-columns: auto 1fr;
-    gap: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 4px);
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 2px);
     margin: 0;
 }
 
@@ -155,7 +256,6 @@ h2 {
     line-height: var(--type-ramp-minus-1-line-height);
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    align-self: center;
 }
 
 .facts dd {
@@ -169,7 +269,9 @@ h2 {
     overflow-wrap: anywhere;
 }
 
-.project-card ::deep .card-action {
+.project-card .card-action {
+    display: flex;
+    gap: calc(var(--design-unit) * 2px);
     margin-block-start: auto;
 }
 
@@ -194,40 +296,59 @@ h2 {
     color: var(--neutral-foreground-hint);
 }
 
-.panel-lead {
-    margin: 0 0 calc(var(--design-unit) * 2px);
-    max-width: 68ch;
-    color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-minus-1-font-size);
-    line-height: var(--type-ramp-minus-1-line-height);
-}
-
+/* The node list is one grouped surface with divided rows rather than a card per
+   node: an operator scans identities down a single edge. */
 .node-list {
     display: flex;
     flex-direction: column;
-    margin: calc(var(--design-unit) * 2px) 0 0;
+    margin: 0;
     padding: 0;
     list-style: none;
-    border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--layer-corner-radius) * 1px);
+    background-color: var(--neutral-layer-1);
+    overflow: hidden;
 }
 
 .node-row {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 2px);
-    padding-block: calc(var(--design-unit) * 3px);
+    padding: calc(var(--design-unit) * 3px);
+    min-width: 0;
     border-block-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.node-row:last-child {
+    border-block-end: none;
 }
 
 .node-head {
     display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
+}
+
+.node-ident {
+    display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+.node-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 3px);
+    min-width: 0;
 }
 
 .node-name {
     font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
 .node-version {
@@ -237,10 +358,11 @@ h2 {
 }
 
 .node-seen {
-    margin-inline-start: auto;
     display: flex;
+    flex-wrap: wrap;
     align-items: baseline;
     gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
     font-variant-numeric: tabular-nums;
@@ -251,27 +373,26 @@ h2 {
     opacity: 0.75;
 }
 
-/* Latest system snapshot: a dense telemetry strip under each node's identity row.
-   The exact figure is always text; the bar is a decorative glance aid. */
+/* Latest system snapshot. On a phone each reading is a label/value row with the
+   glance bar under it; the exact figure is always text, the bar is decorative. */
 .node-metrics {
     display: grid;
-    /* Capped tracks keep the strip dense and left-aligned on wide screens instead
-       of stretching five bars across the whole viewport. */
-    grid-template-columns: repeat(auto-fit, minmax(136px, 184px));
-    gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 5px);
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 2px);
     margin: 0;
 }
 
 .node-metric {
-    display: flex;
-    flex-direction: column;
-    gap: calc(var(--design-unit) * 0.5px);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: baseline;
+    column-gap: calc(var(--design-unit) * 3px);
     min-width: 0;
 }
 
 .node-metric dt {
     color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-minus-2-font-size);
+    font-size: var(--type-ramp-minus-1-font-size);
     line-height: var(--type-ramp-minus-1-line-height);
     text-transform: uppercase;
     letter-spacing: 0.06em;
@@ -280,14 +401,17 @@ h2 {
 .node-metric dd {
     display: flex;
     flex-direction: column;
+    align-items: flex-end;
     gap: calc(var(--design-unit) * 1px);
     margin: 0;
-    min-width: 0;
+    /* The meter has no intrinsic width, so the value column keeps a floor. */
+    min-width: calc(var(--design-unit) * 24px);
+    text-align: end;
 }
 
 .node-metric-value {
-    font-size: var(--type-ramp-plus-1-font-size);
-    line-height: var(--type-ramp-plus-1-line-height);
+    font-size: var(--type-ramp-base-font-size);
+    line-height: var(--type-ramp-base-line-height);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
 }
@@ -302,11 +426,12 @@ h2 {
 .node-metric-none {
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
-    line-height: var(--type-ramp-plus-1-line-height);
+    line-height: var(--type-ramp-base-line-height);
 }
 
 .node-meter {
     display: block;
+    align-self: stretch;
     height: calc(var(--design-unit) * 1px);
     border-radius: calc(var(--design-unit) * 1px);
     background-color: var(--neutral-fill-secondary-rest);
@@ -330,7 +455,6 @@ h2 {
     background-color: var(--error, var(--accent-fill-rest));
 }
 
-
 .node-resources-none {
     margin: 0;
     max-width: 68ch;
@@ -344,10 +468,7 @@ h2 {
     flex-wrap: wrap;
     align-items: center;
     gap: calc(var(--design-unit) * 2px);
-}
-
-.node-inline .node-seen {
-    margin-inline-start: 0;
+    min-width: 0;
 }
 
 .node-missing {
@@ -367,11 +488,14 @@ h2 {
    --dialog-width/--dialog-height. Styling only the light-DOM shell left the
    content wider than that surface, so the size is declared on the host (where
    the component's defaults live, and where it inherits into the shadow tree)
-   and the part is bound to it. */
+   and the part is bound to it.
+
+   Phone default: the surface takes the viewport it can get, minus a hairline of
+   inset so the rounded corners still read as a sheet. */
 .dialog-host ::deep fluent-dialog.register-dialog {
-    --dialog-width: min(680px, calc(100vw - calc(var(--design-unit) * 12px))) !important;
+    --dialog-width: calc(100vw - calc(var(--design-unit) * 4px)) !important;
     --dialog-height: auto;
-    --dialog-max-block-size: calc(100vh - calc(var(--design-unit) * 12px));
+    --dialog-max-block-size: calc(100vh - calc(var(--design-unit) * 6px));
 }
 
 .dialog-host ::deep fluent-dialog.register-dialog::part(control) {
@@ -397,8 +521,13 @@ h2 {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 1px);
-    padding: calc(var(--design-unit) * 6px) calc(var(--design-unit) * 6px) calc(var(--design-unit) * 4px);
+    padding: calc(var(--design-unit) * 4px);
     border-block-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.dialog-header h2 {
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
 }
 
 .dialog-lead {
@@ -415,9 +544,14 @@ h2 {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 5px);
-    padding: calc(var(--design-unit) * 5px) calc(var(--design-unit) * 6px);
+    padding: calc(var(--design-unit) * 4px);
     min-height: 0;
     overflow-y: auto;
+}
+
+/* Thumb-sized inputs: the shadow control, not the host, carries the height. */
+.dialog-body ::deep .field::part(control) {
+    min-height: calc(var(--design-unit) * 11px);
 }
 
 .form-section {
@@ -438,14 +572,15 @@ h2 {
     letter-spacing: 0.06em;
 }
 
+/* One field per row until there is width for a pair. */
 .form-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
 }
 
 .form-grid-compact {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
 }
 
 .dialog-shell ::deep .field {
@@ -463,7 +598,7 @@ h2 {
     display: block;
     margin: 0;
     min-width: 0;
-    padding: calc(var(--design-unit) * 4px);
+    padding: calc(var(--design-unit) * 3px);
     border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
     border-radius: calc(var(--control-corner-radius) * 1px);
     background-color: var(--neutral-layer-2);
@@ -475,24 +610,32 @@ h2 {
 
 .switch-grid {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 4px);
 }
 
-/* The actions sit on their own band so the primary path reads first and Cancel
-   stays anchored opposite it at every width the surface can take. */
+/* Toggles are the smallest targets in the form; a phone row gives them height. */
+.switch-grid ::deep fluent-switch {
+    display: flex;
+    align-items: center;
+    min-height: calc(var(--design-unit) * 11px);
+}
+
+/* The actions sit on their own band so the primary path reads first. On a phone
+   they stack full width, primary first, with nothing stranded on its own line. */
 .dialog-actions {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
     gap: calc(var(--design-unit) * 2px);
-    padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 6px);
+    padding: calc(var(--design-unit) * 4px);
     border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
     background-color: var(--neutral-layer-1);
 }
 
-.dialog-actions ::deep .action-cancel {
-    margin-inline-start: auto;
+.dialog-actions ::deep fluent-button,
+.dialog-actions ::deep fluent-button::part(control) {
+    width: 100%;
 }
 
 .error-list {
@@ -500,63 +643,200 @@ h2 {
     padding-inline-start: calc(var(--design-unit) * 4px);
 }
 
-@media (max-width: 620px) {
-    /* Phone widths: the surface takes the viewport it can get, the bands lose a
-       step of inline padding, and every grid collapses to one column. */
-    .dialog-host ::deep fluent-dialog.register-dialog {
-        --dialog-width: calc(100vw - calc(var(--design-unit) * 4px)) !important;
-        --dialog-max-block-size: calc(100vh - calc(var(--design-unit) * 6px));
+/* Phone-only touch sizing for the page's own controls. */
+@media (max-width: 599.98px) {
+    .page-head ::deep .page-head-action,
+    .page-head ::deep .page-head-action::part(control) {
+        width: 100%;
     }
 
-    .dialog-header,
-    .dialog-body,
-    .dialog-actions {
-        padding-inline: calc(var(--design-unit) * 4px);
+    .page-head ::deep .page-head-action::part(control),
+    .section-head ::deep .section-action::part(control),
+    .state-empty ::deep fluent-button::part(control),
+    .card-action ::deep fluent-anchor::part(control),
+    .dialog-actions ::deep fluent-button::part(control) {
+        min-height: calc(var(--design-unit) * 11px);
+    }
+}
+
+/* Tablet and up: headings pair with their actions, facts pair with their
+   labels, and telemetry returns to a dense left-aligned strip. */
+@media (min-width: 600px) {
+    .page-head {
+        flex-direction: row;
+        align-items: flex-end;
+        gap: calc(var(--design-unit) * 4px);
     }
 
-    .form-grid,
-    .form-grid-compact,
-    .switch-grid {
-        grid-template-columns: 1fr;
+    .page-head-copy {
+        flex: 1 1 auto;
     }
 
-    /* Stacked buttons: full width, primary first, and no auto margin stranding
-       Cancel on a line of its own. */
-    .dialog-actions {
+    .page-head h1 {
+        font-size: var(--type-ramp-plus-4-font-size);
+        line-height: var(--type-ramp-plus-4-line-height);
+    }
+
+    .page-lead {
+        font-size: var(--type-ramp-plus-1-font-size);
+        line-height: var(--type-ramp-plus-1-line-height);
+    }
+
+    .section-head {
+        flex-direction: row;
+        align-items: baseline;
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    h2 {
+        font-size: var(--type-ramp-plus-2-font-size);
+        line-height: var(--type-ramp-plus-2-line-height);
+    }
+
+    .section-meta,
+    .section-head ::deep .section-action {
+        margin-inline-start: auto;
+    }
+
+    .section-head ::deep .section-action {
+        align-self: center;
+    }
+
+    .metric {
+        padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 5px);
+    }
+
+    .metric dd a,
+    .metric-link,
+    .project-card h3 a {
+        min-height: 0;
+    }
+
+    .facts {
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 4px);
+    }
+
+    .facts dt {
+        align-self: center;
+    }
+
+    .node-row {
+        padding: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
+    }
+
+    .node-head {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+    }
+
+    .node-meta {
+        margin-inline-start: auto;
+    }
+
+    .node-metrics {
+        /* Capped tracks keep the strip dense and left-aligned on wide screens
+           instead of stretching five bars across the whole viewport. */
+        grid-template-columns: repeat(auto-fit, minmax(136px, 184px));
+        gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 5px);
+    }
+
+    .node-metric {
+        display: flex;
         flex-direction: column;
-        align-items: stretch;
+        gap: calc(var(--design-unit) * 0.5px);
     }
 
-    .dialog-actions ::deep .action-cancel {
-        margin-inline-start: 0;
+    .node-metric dd {
+        align-items: stretch;
+        min-width: 0;
+        text-align: start;
+    }
+
+    .node-metric-value {
+        font-size: var(--type-ramp-plus-1-font-size);
+        line-height: var(--type-ramp-plus-1-line-height);
+    }
+
+    /* Dialog: a sheet with room for paired fields and a single action row. */
+    .dialog-host ::deep fluent-dialog.register-dialog {
+        --dialog-width: min(680px, calc(100vw - calc(var(--design-unit) * 12px))) !important;
+        --dialog-max-block-size: calc(100vh - calc(var(--design-unit) * 12px));
+    }
+
+    .dialog-header {
+        padding: calc(var(--design-unit) * 6px) calc(var(--design-unit) * 6px) calc(var(--design-unit) * 4px);
+    }
+
+    .dialog-body {
+        padding: calc(var(--design-unit) * 5px) calc(var(--design-unit) * 6px);
+    }
+
+    .dialog-body ::deep .field::part(control) {
+        min-height: 0;
+    }
+
+    .switch-set {
+        padding: calc(var(--design-unit) * 4px);
+    }
+
+    .switch-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .switch-grid ::deep fluent-switch {
+        min-height: 0;
+    }
+
+    .form-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    /* Cancel stays anchored opposite the primary path at every width the
+       surface can take. */
+    .dialog-actions {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 6px);
     }
 
     .dialog-actions ::deep fluent-button,
     .dialog-actions ::deep fluent-button::part(control) {
-        width: 100%;
+        width: auto;
     }
 
-    /* Phone widths cannot hold heading + action side by side: stack them.
-       align-items is inline on the FluentStack host, hence !important. */
-    .page-head ::deep .page-head-row {
+    .dialog-actions ::deep .action-cancel {
+        margin-inline-start: auto;
+    }
+}
+
+/* Desktop: the four summary figures read as one strip. */
+@media (min-width: 960px) {
+    .metric-row {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
+/* Wide desktop: node identity sits beside its telemetry so a rack of nodes
+   stays scannable in one screen instead of one tall block each. */
+@media (min-width: 1280px) {
+    .node-row {
+        display: grid;
+        grid-template-columns: minmax(0, 26ch) minmax(0, 1fr);
+        column-gap: calc(var(--design-unit) * 6px);
+        align-items: start;
+    }
+
+    .node-head {
         flex-direction: column;
-        align-items: flex-start !important;
-        row-gap: calc(var(--design-unit) * 3px);
+        align-items: flex-start;
+        gap: calc(var(--design-unit) * 1px);
     }
 
-    /* Phone widths hold two telemetry columns at most, and pushing the heartbeat
-       stamp to the far edge only strands it on a line of its own. */
-    .node-metrics {
-        grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
-        gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 3px);
-    }
-
-    .node-head .node-seen {
+    .node-meta {
         margin-inline-start: 0;
-    }
-
-    .node-metric-value {
-        font-size: var(--type-ramp-base-font-size);
-        line-height: var(--type-ramp-base-line-height);
     }
 }

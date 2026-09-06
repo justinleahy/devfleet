@@ -1,3 +1,6 @@
+using PiCommandCenter.Domain;
+using PiCommandCenter.Domain.Projects;
+
 namespace PiCommandCenter.Application.Projects;
 
 /// <summary>
@@ -16,18 +19,36 @@ public sealed class ProjectValidationException : Exception
 }
 
 /// <summary>
-/// Raised when a project with the same id or canonical repository path already exists
+/// Raised when a node already has a workspace binding for a requested or canonical repository path
 /// (maps deterministically to HTTP 409).
 /// </summary>
-public sealed class DuplicateProjectException : Exception
+public sealed class WorkspaceBindingConflictException : Exception
 {
-    public DuplicateProjectException(string repositoryPath)
-        : base($"A project with repository path '{repositoryPath}' is already registered.")
+    public WorkspaceBindingConflictException(NodeId nodeId, string repositoryPath)
+        : base($"Node '{nodeId}' already has a workspace binding for repository path '{repositoryPath}'.")
     {
+        NodeId = nodeId;
         RepositoryPath = repositoryPath;
     }
 
+    public NodeId NodeId { get; }
+
     public string RepositoryPath { get; }
+}
+
+/// <summary>
+/// Raised when an active or recovery-required assignment still owns a workspace binding
+/// (maps deterministically to HTTP 409).
+/// </summary>
+public sealed class WorkspaceBindingInUseException : Exception
+{
+    public WorkspaceBindingInUseException(WorkspaceBindingId bindingId)
+        : base($"Workspace binding '{bindingId}' is referenced by an active or recovery-required execution assignment.")
+    {
+        BindingId = bindingId;
+    }
+
+    public WorkspaceBindingId BindingId { get; }
 }
 
 /// <summary>

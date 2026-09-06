@@ -84,6 +84,14 @@ public static class AgentSessionProjector
         }
 
         var aggregate = Rehydrate(row);
+        // Runtime completion notifications can trail the close event that made the projection
+        // terminal. They remain durable history, but cannot revise the terminal snapshot.
+        if (aggregate.IsTerminal
+            && (@event.Type is "tool.completed" or "turn.completed"))
+        {
+            return row;
+        }
+
         aggregate.Apply(@event);
         CopyTo(aggregate, row);
         return row;

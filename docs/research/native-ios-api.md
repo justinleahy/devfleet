@@ -73,7 +73,7 @@ Validate username against AdminOptions.Username like AccountEndpoints. PasswordS
 Native resources require IdentityConstants.BearerScheme (ApiAuthorizationPolicies.NativeApi on the `/api/v1` group):
 
 - GET/POST /api/v1/projects and /api/v1/projects/{id} plus validate
-- GET/POST /api/v1/requests and result, events, messages, reply, guidance
+- GET/POST /api/v1/requests and result, events, messages, reply, guidance; POST /api/v1/requests/{id}/cancel
 - POST /api/v1/sessions/{id}/message and cancel
 - POST /api/v1/messages/{id}/acknowledge
 - POST /api/v1/reservations/{leaseId}/force-release

@@ -165,6 +165,12 @@ public sealed class RuntimeModelDiscovery : IRuntimeModelDiscovery, IDisposable
         new("claude-code/opus", "Opus (latest)", AgentModelSelector.ClaudeCode),
         new("claude-code/haiku", "Haiku (latest)", AgentModelSelector.ClaudeCode),
     ];
+
+    internal static bool IsMaintainedClaudeCodeModel(AgentModelSelector selector)
+        => selector.Provider == AgentModelSelector.ClaudeCode
+           && ClaudeCodeModels.Any(model =>
+               string.Equals(model.Id, selector.Value, StringComparison.Ordinal));
+
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
     private readonly PiWorkerOptions _pi;
     private readonly AntigravityOptions _antigravity;

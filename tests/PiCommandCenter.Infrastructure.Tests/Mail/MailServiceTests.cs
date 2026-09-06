@@ -27,7 +27,7 @@ public class MailServiceTests : IDisposable
     {
         using var db = CreateContext();
         TestNodes.SeedNode(db, TestNodes.NewNodeId(), _clock);
-        var project = TestNodes.SeedProject(db, TestNodes.NewNodeId(), _clock);
+        var project = TestNodes.SeedProject(db, _clock);
         var request = TestNodes.SeedRequest(db, project, _clock);
         TestNodes.SaveAsync(db).GetAwaiter().GetResult();
         _projectId = project.Id.Value;

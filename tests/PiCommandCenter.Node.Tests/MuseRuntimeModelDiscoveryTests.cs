@@ -18,7 +18,10 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
     [Fact]
     public async Task Reports_reader_selectors_as_muse_catalog_in_deterministic_order()
     {
-        var reader = new FakeMuseReader(new MuseModelCatalogResult(["muse/llama-b", "muse/llama-a"], null));
+        var reader = new FakeMuseReader(new MuseModelCatalogResult(
+            ["muse/llama-b", "muse/llama-a"],
+            [],
+            null));
 
         var catalogs = await Discover(reader);
 
@@ -37,7 +40,7 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
     [Fact]
     public async Task Empty_catalog_fails_closed_with_a_stable_error()
     {
-        var muse = await DiscoverMuse(new FakeMuseReader(new MuseModelCatalogResult([], null)));
+        var muse = await DiscoverMuse(new FakeMuseReader(new MuseModelCatalogResult([], [], null)));
 
         Assert.Empty(muse.Models);
         Assert.Equal("Muse model discovery returned no models.", muse.Error);
@@ -58,7 +61,10 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
     public async Task Duplicate_selectors_collapse_to_one_model()
     {
         var muse = await DiscoverMuse(new FakeMuseReader(
-            new MuseModelCatalogResult(["muse/llama-a", " muse/llama-a ", "muse/llama-a"], null)));
+            new MuseModelCatalogResult(
+                ["muse/llama-a", " muse/llama-a ", "muse/llama-a"],
+                [],
+                null)));
 
         Assert.Null(muse.Error);
         var model = Assert.Single(muse.Models);
@@ -70,6 +76,7 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
     {
         var muse = await DiscoverMuse(new FakeMuseReader(new MuseModelCatalogResult(
             ["codex/gpt-test", "llama-a", "", "   ", "muse/", "/llama-a", "muse/default", "muse/llama-ok"],
+            [],
             null)));
 
         Assert.Null(muse.Error);
@@ -80,7 +87,10 @@ public sealed class MuseRuntimeModelDiscoveryTests : IDisposable
     public async Task Only_malformed_rows_fails_closed()
     {
         var muse = await DiscoverMuse(new FakeMuseReader(
-            new MuseModelCatalogResult(["llama-a", "codex/gpt-test", "muse/default"], null)));
+            new MuseModelCatalogResult(
+                ["llama-a", "codex/gpt-test", "muse/default"],
+                [],
+                null)));
 
         Assert.Empty(muse.Models);
         Assert.Equal("Muse model discovery returned no models.", muse.Error);

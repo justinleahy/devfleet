@@ -31,6 +31,8 @@ namespace PiCommandCenter.EndToEndTests;
 /// </summary>
 public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
 {
+    private const string FixtureClaimToken = "external-runtime-projection-fixture-token";
+
     private readonly string _root = Directory.CreateDirectory(Path.Combine(
         Path.GetTempPath(), "pi-cc-ext-e2e", Guid.NewGuid().ToString("N"))).FullName;
 
@@ -166,7 +168,7 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
             EventSpoolPath = spoolPath,
         }));
 
-        var messages = events.Select((e, i) => ToMessage(e, nodeId, projectId, requestId, runtime)).ToList();
+        var messages = events.Select(e => ToMessage(e, nodeId, projectId, requestId, runtime)).ToList();
         foreach (var message in messages)
         {
             await spool.AppendAsync(message, CancellationToken.None);
@@ -178,11 +180,11 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
 
         var sqlitePath = Path.Combine(_root, runtime + "-cp.db");
         File.Create(sqlitePath).Dispose();
-        var (passwordFile, credentialFile) = AuthTestMaterial.WriteTo(Path.Combine(_root, "auth"));
+        var auth = AuthTestMaterial.WriteTo(Path.Combine(_root, "auth"));
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseSetting("ConnectionStrings:ControlPlane", $"Data Source={sqlitePath}");
-            builder.UseTestAuthFiles(passwordFile, credentialFile);
+            builder.UseTestAuthFiles(auth.PasswordFile, auth.CredentialDirectory);
         });
         using (var migrate = factory.Services.CreateScope())
         {
@@ -227,15 +229,16 @@ public sealed class ExternalRuntimeProjectionEndToEndTests : IDisposable
         }
 
         return new NodeEventMessage(
-            e.EventId,
-            nodeId,
-            projectId,
-            requestId,
-            e.SessionId,
-            e.Sequence,
-            e.Type,
-            e.OccurredAt,
-            JsonSerializer.Serialize(payload));
+            EventId: e.EventId,
+            NodeId: nodeId,
+            ProjectId: projectId,
+            RequestId: requestId,
+            ClaimToken: FixtureClaimToken,
+            SessionId: e.SessionId,
+            Sequence: e.Sequence,
+            Type: e.Type,
+            OccurredAt: e.OccurredAt,
+            PayloadJson: JsonSerializer.Serialize(payload));
     }
 
     private static NodeEventDto ToDto(NodeEventMessage m) => new(

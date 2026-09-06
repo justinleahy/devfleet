@@ -1,38 +1,38 @@
-using PiCommandCenter.Infrastructure.Security;
-using Microsoft.Extensions.Configuration;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Configuration;
+using PiCommandCenter.Infrastructure.Security;
 
 namespace PiCommandCenter.Infrastructure.Tests;
 
 public sealed class AuthMaterialTests
 {
     [Fact]
-    public void Setup_writes_owner_only_hash_and_token_files()
+    public void Setup_writes_an_owner_only_admin_password_hash()
     {
         var root = Path.Combine(Path.GetTempPath(), "pi-cc-auth-setup", Guid.NewGuid().ToString("N"));
         var passwordFile = Path.Combine(root, "admin.password.hash");
-        var tokenFile = Path.Combine(root, "node.token");
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Admin:Username"] = "admin",
                 ["Admin:PasswordFile"] = passwordFile,
-                ["NodeAuthentication:CredentialFile"] = tokenFile,
             })
             .Build();
 
         var result = ControlPlaneAuthSetup.Run(configuration);
+        var passwordHash = File.ReadAllText(passwordFile);
+        var verification = new PasswordHasher<IdentityUser>().VerifyHashedPassword(
+            new IdentityUser(),
+            passwordHash,
+            result.OneTimePassword);
 
         Assert.Equal("admin", result.Username);
         Assert.False(string.IsNullOrWhiteSpace(result.OneTimePassword));
-        Assert.True(File.Exists(passwordFile));
-        Assert.True(File.Exists(tokenFile));
-        Assert.Equal(64, File.ReadAllText(tokenFile).Trim().Length);
-        Assert.DoesNotContain(result.OneTimePassword, File.ReadAllText(passwordFile), StringComparison.Ordinal);
+        Assert.Equal(passwordFile, result.PasswordFile);
+        Assert.NotEqual(PasswordVerificationResult.Failed, verification);
         if (!OperatingSystem.IsWindows())
         {
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(passwordFile));
-            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(tokenFile));
         }
 
         Assert.Throws<InvalidOperationException>(() => ControlPlaneAuthSetup.Run(configuration));
@@ -47,7 +47,6 @@ public sealed class AuthMaterialTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Admin:PasswordFile"] = passwordFile,
-                ["NodeAuthentication:CredentialFile"] = Path.Combine(root, "node.token"),
             })
             .Build();
         const string password = "SmallerPass!";
@@ -70,7 +69,6 @@ public sealed class AuthMaterialTests
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Admin:PasswordFile"] = Path.Combine(root, "admin.password.hash"),
-                ["NodeAuthentication:CredentialFile"] = Path.Combine(root, "node.token"),
             })
             .Build();
 

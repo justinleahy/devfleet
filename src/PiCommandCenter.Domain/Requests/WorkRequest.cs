@@ -216,16 +216,26 @@ public sealed class WorkRequest
         Version++;
     }
 
-    /// <summary>Cancels a request that has not reached a terminal state.</summary>
-    public void Cancel(DateTimeOffset at)
+    /// <summary>Cancels a queued request before any execution assignment exists.</summary>
+    public void CancelQueued(DateTimeOffset at)
     {
-        if (Status is WorkRequestStatus.Completed or WorkRequestStatus.Failed or WorkRequestStatus.Cancelled)
-        {
-            throw new InvalidOperationException($"Request in status '{Status}' can no longer be cancelled.");
-        }
-
+        EnsureCurrentStatus(WorkRequestStatus.Queued, nameof(CancelQueued));
         Transition(WorkRequestStatus.Cancelled, at);
+    }
+
+    /// <summary>Closes normal execution admission while assigned work is cancelled.</summary>
+    public void BeginCancelling(DateTimeOffset at)
+    {
+        EnsureInFlight(nameof(BeginCancelling));
+        Transition(WorkRequestStatus.Cancelling, at);
         BlockedPhase = null;
+    }
+
+    /// <summary>Records cancellation after the assigned execution has proved quiescence.</summary>
+    public void ConfirmCancellation(DateTimeOffset at)
+    {
+        EnsureCurrentStatus(WorkRequestStatus.Cancelling, nameof(ConfirmCancellation));
+        Transition(WorkRequestStatus.Cancelled, at);
     }
 
     /// <summary>
@@ -235,7 +245,10 @@ public sealed class WorkRequest
     /// </summary>
     public bool TryCatchUpTo(WorkRequestStatus target, DateTimeOffset at)
     {
-        if (Status is WorkRequestStatus.Completed or WorkRequestStatus.Failed or WorkRequestStatus.Cancelled)
+        if (Status is WorkRequestStatus.Cancelling
+            or WorkRequestStatus.Completed
+            or WorkRequestStatus.Failed
+            or WorkRequestStatus.Cancelled)
         {
             return Status == target;
         }
@@ -243,12 +256,6 @@ public sealed class WorkRequest
         if (target is WorkRequestStatus.Failed)
         {
             Fail(at);
-            return true;
-        }
-
-        if (target is WorkRequestStatus.Cancelled)
-        {
-            Cancel(at);
             return true;
         }
 

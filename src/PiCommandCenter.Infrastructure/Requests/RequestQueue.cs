@@ -16,6 +16,7 @@ namespace PiCommandCenter.Infrastructure.Requests;
 public sealed class RequestQueue(
     TimeProvider clock,
     ControlPlaneDbContext db,
+    IRequestEligibilityEvaluator eligibilityEvaluator,
     IProjectionNotifier notifier) : IRequestQueue
 {
     public async Task<IReadOnlyList<WorkRequestDto>> ListAsync(
@@ -31,7 +32,13 @@ public sealed class RequestQueue(
             .ThenBy(r => r.CreatedAt)
             .ToListAsync(cancellationToken);
 
-        return requests.Select(ToDto).ToList();
+        var decisions = await eligibilityEvaluator.EvaluateBatchAsync(
+            requests.Select(request => request.Id).ToArray(),
+            cancellationToken);
+
+        return requests
+            .Select(request => ToDto(request, decisions[request.Id]))
+            .ToList();
     }
 
     public async Task<WorkRequestDto> GetAsync(
@@ -43,7 +50,10 @@ public sealed class RequestQueue(
             .SingleOrDefaultAsync(r => r.Id == requestId, cancellationToken)
             ?? throw new RequestNotFoundException(requestId);
 
-        return ToDto(request);
+        var decision = await eligibilityEvaluator.EvaluateAsync(
+            requestId,
+            cancellationToken: cancellationToken);
+        return ToDto(request, decision);
     }
 
     public async Task<WorkRequestDto> EnqueueAsync(
@@ -75,7 +85,10 @@ public sealed class RequestQueue(
 
         notifier.Publish(ProjectionChange.Project(projectId.Value));
 
-        return ToDto(request);
+        var decision = await eligibilityEvaluator.EvaluateAsync(
+            request.Id,
+            cancellationToken: cancellationToken);
+        return ToDto(request, decision);
     }
 
     private async Task EnsureProjectExistsAsync(ProjectId projectId, CancellationToken cancellationToken)
@@ -86,7 +99,7 @@ public sealed class RequestQueue(
         }
     }
 
-    private static WorkRequestDto ToDto(WorkRequest request) => new(
+    private static WorkRequestDto ToDto(WorkRequest request, EligibilityDecision decision) => new(
         request.Id.Value,
         request.ProjectId.Value,
         (int)request.Kind,
@@ -103,5 +116,9 @@ public sealed class RequestQueue(
         request.Prompt,
         request.CreatedAt,
         request.UpdatedAt,
-        request.Version);
+        request.Version,
+        request.Status == WorkRequestStatus.Queued && decision.Assignment is null
+            ? decision.Status
+            : null,
+        decision.Assignment);
 }

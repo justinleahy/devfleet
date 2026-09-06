@@ -8,8 +8,15 @@
 <article class="callout @(Signal.Severity == AttentionSeverity.Error ? "is-error" : "is-warning")">
     <header class="callout-head">
         <span class="callout-mark" aria-hidden="true">@(Signal.Severity == AttentionSeverity.Error ? "!" : "?")</span>
-        <h3>@Signal.Title</h3>
-        <FluentBadge Appearance="Appearance.Neutral">@Label(Signal.Kind)</FluentBadge>
+        <div class="callout-titles">
+            <h3>@Signal.Title</h3>
+            <div class="callout-tags">
+                <span class="callout-severity">
+                    @(Signal.Severity == AttentionSeverity.Error ? "error" : "warning")
+                </span>
+                <FluentBadge Appearance="Appearance.Neutral">@Label(Signal.Kind)</FluentBadge>
+            </div>
+        </div>
     </header>
 
     <p class="callout-detail">@Signal.Detail</p>
@@ -23,7 +30,7 @@
         }
     </p>
 
-    <FluentStack Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
+    <div class="callout-actions">
         @if (ShowRequestLink)
         {
             <FluentAnchor Href="@RequestHref()" Appearance="Appearance.Outline">
@@ -33,7 +40,7 @@
         <FluentAnchor Href="@ActionHref()" Appearance="Appearance.Accent">
             @ActionLabel()
         </FluentAnchor>
-    </FluentStack>
+    </div>
 </article>
 
 @code {

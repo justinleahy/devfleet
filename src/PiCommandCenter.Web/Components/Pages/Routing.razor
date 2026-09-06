@@ -13,27 +13,21 @@
 
 <PageTitle>Model routing &middot; DevFleet</PageTitle>
 
-<FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+<div class="page">
 
     <header class="page-head">
-        <h1>Model routing</h1>
-        <p class="page-lead">
-            Each role starts on the first model selector in its list that can run; the next
-            candidate is tried only when the one before it fails. A selector is
-            <code>&lt;provider&gt;/&lt;model&gt;</code> — for example <code>codex/gpt-5.6-sol</code> or
-            <code>zai/glm-4.7</code> — so it names the provider and the model at once. Pi is the
-            runtime adapter behind every provider except the official harnesses
-            <code>claude-code</code>, <code>antigravity</code>, and <code>muse</code>. The models and
-            the commands behind them live on the node, so this page only reorders what the node
-            reports it can do.
-        </p>
+        <div class="page-head-text">
+            <h1>Model routing</h1>
+            <p class="page-lead">Set the ordered model fallback for each agent role.</p>
+        </div>
+        <code class="selector-format">&lt;provider&gt;/&lt;model&gt;</code>
     </header>
 
-    <section aria-labelledby="node-heading">
-        <h2 id="node-heading">Node</h2>
-        <p class="panel-lead">
-            Routing is stored on the node. Pick an online node to read its live configuration.
-        </p>
+    <section class="node-section" aria-labelledby="node-heading">
+        <div class="section-heading">
+            <h2 id="node-heading">Node</h2>
+            <span>Configuration is stored on the selected node.</span>
+        </div>
 
         @if (_nodeError is not null)
         {
@@ -72,10 +66,7 @@
                               @bind-Value:after="OnNodeChangedAsync"
                               Disabled="@Busy"
                               Class="field" />
-                <FluentStack Class="node-picker-actions"
-                             Orientation="Orientation.Horizontal"
-                             HorizontalGap="8"
-                             Width="auto">
+                <div class="node-picker-actions">
                     <FluentButton Appearance="Appearance.Stealth"
                                   OnClick="ReloadConfigurationAsync"
                                   Loading="@_loadingConfig"
@@ -88,7 +79,7 @@
                                   Disabled="@(Busy || _configuration is null)">
                         Refresh models
                     </FluentButton>
-                </FluentStack>
+                </div>
             </div>
 
             <p class="node-seen node-status" role="status" aria-live="polite">@StatusLine()</p>
@@ -113,53 +104,57 @@
     }
     else if (_configuration is not null)
     {
-        <section aria-labelledby="models-heading">
-            <h2 id="models-heading">Model catalogs</h2>
-            <p class="panel-lead">
-                The node reports one catalog per provider: Pi contributes one for each of its
-                authenticated providers, while Claude Code, Antigravity, and Muse use their own
-                adapters (Claude Code's list is a curated set of stable aliases maintained by
-                DevFleet). You can still type any canonical selector by hand.
-            </p>
+        @* Refresh models failures belong outside the disclosure: the catalogs
+           default to collapsed, so an error rendered inside is never seen. *@
+        @if (_discoveryError is not null)
+        {
+            <FluentMessageBar Intent="MessageIntent.Error"
+                              Title="Could not refresh models"
+                              AllowDismiss="false">
+                @_discoveryError
+            </FluentMessageBar>
+        }
 
-            @if (_discoveryError is not null)
-            {
-                <FluentMessageBar Intent="MessageIntent.Error"
-                                  Title="Could not refresh models"
-                                  AllowDismiss="false">
-                    @_discoveryError
-                </FluentMessageBar>
-            }
+        <details class="catalog-panel">
+            <summary>
+                <span>Model catalogs</span>
+                <span class="catalog-summary">@CatalogSummary()</span>
+            </summary>
 
-            @if (_catalogs.Count == 0)
-            {
-                <p class="panel-empty">
-                    No catalog has been fetched yet. Refresh models to ask this node what each
-                    provider can serve; until then every selector stays free text.
+            <div class="catalog-content">
+                <p class="panel-lead">
+                    Models reported by this node. You can still enter any canonical selector.
                 </p>
-            }
-            else
-            {
-                <ul class="catalog-list">
-                    @foreach (var catalog in _catalogs.Values)
-                    {
-                        <li class="catalog-row">
-                            <span class="node-name">@catalog.Provider</span>
-                            @if (catalog.Error is not null)
-                            {
-                                <FluentBadge Appearance="Appearance.Neutral">Unavailable</FluentBadge>
-                                <span class="catalog-error">@catalog.Error</span>
-                            }
-                            else
-                            {
-                                <FluentBadge Appearance="Appearance.Accent">@catalog.Models.Count models</FluentBadge>
-                                <span class="catalog-sample">@SampleModels(catalog)</span>
-                            }
-                        </li>
-                    }
-                </ul>
-            }
-        </section>
+
+                @if (_catalogs.Count == 0)
+                {
+                    <p class="panel-empty">
+                        No catalog fetched. Use <strong>Refresh models</strong> to discover available selectors.
+                    </p>
+                }
+                else
+                {
+                    <ul class="catalog-list">
+                        @foreach (var catalog in _catalogs.Values)
+                        {
+                            <li class="catalog-row">
+                                <span class="node-name">@catalog.Provider</span>
+                                @if (catalog.Error is not null)
+                                {
+                                    <FluentBadge Appearance="Appearance.Neutral">Unavailable</FluentBadge>
+                                    <span class="catalog-error">@catalog.Error</span>
+                                }
+                                else
+                                {
+                                    <FluentBadge Appearance="Appearance.Accent">@catalog.Models.Count models</FluentBadge>
+                                    <span class="catalog-sample">@SampleModels(catalog)</span>
+                                }
+                            </li>
+                        }
+                    </ul>
+                }
+            </div>
+        </details>
 
         @if (_roles.Count == 0)
         {
@@ -168,19 +163,16 @@
             </p>
         }
 
+        <div class="roles-grid">
         @foreach (var role in _roles)
         {
             var headingId = $"role-{Slug(role.Role)}";
-            <FluentCard>
+            <FluentCard Class="role-card">
                 <section class="panel" aria-labelledby="@headingId">
-                    <FluentStack Orientation="Orientation.Horizontal"
-                                 VerticalAlignment="VerticalAlignment.Center"
-                                 HorizontalGap="12"
-                                 Width="100%">
+                    <div class="role-head">
                         <h2 id="@headingId">@role.Role</h2>
-                        <FluentSpacer />
                         <span class="node-seen">@CandidateSummary(role)</span>
-                    </FluentStack>
+                    </div>
 
                     @if (role.Candidates.Count == 0)
                     {
@@ -262,17 +254,18 @@
                         </ol>
                     }
 
-                    <FluentStack Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
+                    <div class="panel-actions">
                         <FluentButton Appearance="Appearance.Outline"
                                       OnClick="@(() => Add(role))"
                                       Disabled="@Busy"
                                       aria-label="@($"Add a candidate to {role.Role}")">
                             Add candidate
                         </FluentButton>
-                    </FluentStack>
+                    </div>
                 </section>
             </FluentCard>
         }
+        </div>
 
         <section class="save-bar" aria-labelledby="save-heading">
             <h2 id="save-heading" class="visually-hidden">Save routing</h2>
@@ -295,23 +288,20 @@
                 </div>
             }
 
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="12"
-                         Width="100%">
+            <div class="save-actions">
                 <FluentButton Appearance="Appearance.Accent"
                               OnClick="SaveAsync"
                               Loading="@_saving"
                               Disabled="@(Busy || !HasCompleteRoutes)">
                     Save routing
                 </FluentButton>
-                <span class="node-seen" role="status" aria-live="polite">
+                <span class="node-seen save-note" role="status" aria-live="polite">
                     Saving writes every role on the node; new child agents pick it up on their next start.
                 </span>
-            </FluentStack>
+            </div>
         </section>
     }
-</FluentStack>
+</div>
 
 @code {
     private const string FallbackSelector = $"{AgentModelSelector.Codex}/{AgentModelSelector.DefaultModelId}";
@@ -662,11 +652,22 @@
             + $"{_selectors.Count} selector(s) \u00b7 {models}";
     }
 
+    private string CatalogSummary()
+    {
+        if (_catalogs.Count == 0)
+        {
+            return _discoveredAt is null ? "Not fetched" : "No catalogs";
+        }
+
+        var available = _catalogs.Values.Count(catalog => catalog.Error is null);
+        return $"{_selectors.Count} models across {available} provider(s)";
+    }
+
     private static string CandidateSummary(RoleEditor role) => role.Candidates.Count switch
     {
-        0 => "no candidate",
+        0 => "No candidates",
         1 => "1 candidate",
-        _ => $"{role.Candidates.Count} candidates in order",
+        _ => $"{role.Candidates.Count} candidates",
     };
 
     private static string Describe(CandidateEditor candidate) =>

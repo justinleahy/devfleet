@@ -1,11 +1,10 @@
 namespace PiCommandCenter.Application.Projects;
 
 /// <summary>
-/// Command to register a new project in the catalog.
+/// Command to register fleet-owned project metadata.
 /// </summary>
 public sealed record RegisterProjectCommand(
     string DisplayName,
-    string RepositoryPath,
     string DefaultBranch,
     bool Enabled,
     int MaxActiveWriteRequests,

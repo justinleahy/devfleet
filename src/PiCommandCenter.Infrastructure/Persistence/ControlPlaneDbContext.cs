@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Microsoft.EntityFrameworkCore;
+using PiCommandCenter.Application.Requests;
 using PiCommandCenter.Domain;
 using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Projects;
@@ -23,7 +24,9 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
 
     public DbSet<FleetNode> FleetNodes => Set<FleetNode>();
 
-    public DbSet<RequestClaim> RequestClaims => Set<RequestClaim>();
+    public DbSet<WorkspaceBinding> WorkspaceBindings => Set<WorkspaceBinding>();
+
+    public DbSet<ExecutionAssignment> ExecutionAssignments => Set<ExecutionAssignment>();
 
     public DbSet<SessionEvent> SessionEvents => Set<SessionEvent>();
     public DbSet<AgentSessionRow> AgentSessions => Set<AgentSessionRow>();
@@ -38,7 +41,6 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
 
     public DbSet<PiCommandCenter.Infrastructure.Completion.RequestResultRow> RequestResults => Set<PiCommandCenter.Infrastructure.Completion.RequestResultRow>();
 
-
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
     {
         base.ConfigureConventions(configurationBuilder);
@@ -46,6 +48,7 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
         configurationBuilder.Properties<ProjectId>().HaveConversion<ProjectIdConverter>();
         configurationBuilder.Properties<WorkRequestId>().HaveConversion<WorkRequestIdConverter>();
         configurationBuilder.Properties<NodeId>().HaveConversion<NodeIdConverter>();
+        configurationBuilder.Properties<WorkspaceBindingId>().HaveConversion<WorkspaceBindingIdConverter>();
     }
 
     protected override void OnModelCreating(ModelBuilder builder)
@@ -64,16 +67,9 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
                 .HasConversion(id => id.Value, value => new ProjectId(value))
                 .HasColumnType("TEXT");
 
-            project.Property(p => p.NodeId)
-                .HasColumnType("TEXT");
-
             project.Property(p => p.DisplayName)
                 .IsRequired()
                 .HasMaxLength(256);
-
-            project.Property(p => p.RepositoryPath)
-                .IsRequired()
-                .HasMaxLength(1024);
 
             project.Property(p => p.DefaultBranch)
                 .IsRequired()
@@ -89,10 +85,66 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
             project.Property(p => p.Version)
                 .IsConcurrencyToken()
                 .HasColumnType("INTEGER");
+        });
 
-            project.HasIndex(p => p.RepositoryPath)
+        builder.Entity<WorkspaceBinding>(binding =>
+        {
+            binding.ToTable("WorkspaceBindings");
+
+            binding.HasKey(b => b.Id);
+            binding.Property(b => b.Id).HasColumnType("TEXT");
+            binding.Property(b => b.ProjectId).HasColumnType("TEXT");
+            binding.Property(b => b.NodeId).HasColumnType("TEXT");
+
+            binding.Property(b => b.RepositoryPath)
+                .IsRequired()
+                .HasMaxLength(1024);
+            binding.Property(b => b.CanonicalRepositoryPath)
+                .HasMaxLength(1024);
+            binding.Property(b => b.Status)
+                .HasConversion<string>()
+                .HasMaxLength(32)
+                .HasColumnType("TEXT")
+                .IsRequired();
+            binding.Property(b => b.ValidationRevision).HasColumnType("INTEGER");
+            binding.Property(b => b.ValidationCode)
+                .HasMaxLength(WorkspaceBinding.MaxValidationCodeLength);
+            binding.Property(b => b.ValidationDetail)
+                .HasMaxLength(WorkspaceBinding.MaxValidationDetailLength);
+            binding.Property(b => b.ValidatedAt).HasConversion(
+                timestamp => timestamp.HasValue ? timestamp.Value.UtcTicks : (long?)null,
+                ticks => ticks.HasValue ? new DateTimeOffset(ticks.Value, TimeSpan.Zero) : null)
+                .HasColumnType("INTEGER");
+            binding.Property(b => b.CreatedAt).HasConversion(
+                timestamp => timestamp.UtcTicks,
+                ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
+            binding.Property(b => b.UpdatedAt).HasConversion(
+                timestamp => timestamp.UtcTicks,
+                ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
+            binding.Property(b => b.Version)
+                .IsConcurrencyToken()
+                .HasColumnType("INTEGER");
+
+            binding.HasOne<Project>()
+                .WithOne()
+                .HasForeignKey<WorkspaceBinding>(b => b.ProjectId)
+                .OnDelete(DeleteBehavior.Restrict)
+                .IsRequired();
+            binding.HasOne<FleetNode>()
+                .WithMany()
+                .HasForeignKey(b => b.NodeId)
+                .OnDelete(DeleteBehavior.Restrict)
+                .IsRequired();
+
+            binding.HasIndex(b => b.ProjectId)
                 .IsUnique()
-                .HasDatabaseName("IX_Projects_RepositoryPath");
+                .HasDatabaseName("IX_WorkspaceBindings_ProjectId");
+            binding.HasIndex(b => new { b.NodeId, b.RepositoryPath })
+                .IsUnique()
+                .HasDatabaseName("IX_WorkspaceBindings_NodeId_RepositoryPath");
+            binding.HasIndex(b => new { b.NodeId, b.CanonicalRepositoryPath })
+                .IsUnique()
+                .HasDatabaseName("IX_WorkspaceBindings_NodeId_CanonicalRepositoryPath");
         });
 
         builder.Entity<WorkRequest>(request =>
@@ -201,7 +253,9 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
             node.Property(n => n.CapabilitiesJson)
                 .IsRequired()
                 .HasMaxLength(16384);
-
+            node.Property(n => n.ExecutionStatusJson)
+                .HasColumnType("TEXT")
+                .HasMaxLength(131072);
             node.Property(n => n.CreatedAt).HasConversion(
                 timestamp => timestamp.UtcTicks,
                 ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
@@ -217,52 +271,76 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
                 .HasDatabaseName("IX_FleetNodes_DisplayName");
         });
 
-        builder.Entity<RequestClaim>(claim =>
+        builder.Entity<ExecutionAssignment>(assignment =>
         {
-            claim.ToTable("RequestClaims");
+            assignment.ToTable("ExecutionAssignments");
 
-            // Primary key on the request id: at most one claim can ever exist per request.
-            claim.HasKey(c => c.RequestId);
-            claim.Property(c => c.RequestId)
-                .HasConversion(id => id.Value, value => new WorkRequestId(value))
-                .HasColumnType("TEXT");
+            assignment.HasKey(a => a.RequestId);
+            assignment.Property(a => a.RequestId).HasColumnType("TEXT");
+            assignment.Property(a => a.ProjectId).HasColumnType("TEXT");
+            assignment.Property(a => a.WorkspaceBindingId).HasColumnType("TEXT");
+            assignment.Property(a => a.NodeIdSnapshot).HasColumnType("TEXT");
 
-            claim.Property(c => c.ProjectId)
-                .HasConversion(id => id.Value, value => new ProjectId(value))
-                .HasColumnType("TEXT");
-
-            claim.Property(c => c.NodeId)
-                .HasConversion(id => id.Value, value => new NodeId(value))
-                .HasColumnType("TEXT");
-
-            claim.Property(c => c.ClaimToken)
+            assignment.Property(a => a.CanonicalRepositoryPathSnapshot)
+                .IsRequired()
+                .HasMaxLength(1024);
+            assignment.Property(a => a.DefaultBranchSnapshot)
                 .IsRequired()
                 .HasMaxLength(128);
-
-            claim.Property(c => c.ClaimedAt).HasConversion(
+            assignment.Property(a => a.BindingValidationRevisionSnapshot)
+                .HasColumnType("INTEGER");
+            assignment.Property(a => a.State)
+                .HasConversion<string>()
+                .HasMaxLength(32)
+                .HasColumnType("TEXT")
+                .IsRequired();
+            assignment.Property(a => a.ClaimToken)
+                .IsRequired()
+                .HasMaxLength(128);
+            assignment.Property(a => a.AssignedAt).HasConversion(
                 timestamp => timestamp.UtcTicks,
                 ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
-            claim.Property(c => c.LeaseExpiresAt).HasConversion(
+            assignment.Property(a => a.LeaseExpiresAt).HasConversion(
                 timestamp => timestamp.UtcTicks,
                 ticks => new DateTimeOffset(ticks, TimeSpan.Zero)).HasColumnType("INTEGER");
-
-            claim.Property(c => c.Version)
+            assignment.Property(a => a.LastRenewedAt).HasConversion(
+                timestamp => timestamp.HasValue ? timestamp.Value.UtcTicks : (long?)null,
+                ticks => ticks.HasValue ? new DateTimeOffset(ticks.Value, TimeSpan.Zero) : null)
+                .HasColumnType("INTEGER");
+            assignment.Property(a => a.LastReconciledAt).HasConversion(
+                timestamp => timestamp.HasValue ? timestamp.Value.UtcTicks : (long?)null,
+                ticks => ticks.HasValue ? new DateTimeOffset(ticks.Value, TimeSpan.Zero) : null)
+                .HasColumnType("INTEGER");
+            assignment.Property(a => a.TerminalAt).HasConversion(
+                timestamp => timestamp.HasValue ? timestamp.Value.UtcTicks : (long?)null,
+                ticks => ticks.HasValue ? new DateTimeOffset(ticks.Value, TimeSpan.Zero) : null)
+                .HasColumnType("INTEGER");
+            assignment.Property(a => a.Version)
                 .IsConcurrencyToken()
                 .HasColumnType("INTEGER");
 
-            claim.HasOne<WorkRequest>()
+            assignment.HasOne<WorkRequest>()
                 .WithOne()
-                .HasPrincipalKey<WorkRequest>(r => r.Id)
-                .HasForeignKey<RequestClaim>(c => c.RequestId)
-                .OnDelete(DeleteBehavior.Cascade);
+                .HasForeignKey<ExecutionAssignment>(a => a.RequestId)
+                .OnDelete(DeleteBehavior.Restrict)
+                .IsRequired();
+            assignment.HasOne<Project>()
+                .WithMany()
+                .HasForeignKey(a => a.ProjectId)
+                .OnDelete(DeleteBehavior.Restrict)
+                .IsRequired();
+            assignment.HasOne<FleetNode>()
+                .WithMany()
+                .HasForeignKey(a => a.NodeIdSnapshot)
+                .OnDelete(DeleteBehavior.Restrict)
+                .IsRequired();
 
-            claim.HasIndex(c => c.RequestId)
-                .IsUnique()
-                .HasDatabaseName("IX_RequestClaims_RequestId");
-
-            // Capacity checks look up active (unexpired) claims per project and node.
-            claim.HasIndex(c => new { c.ProjectId, c.LeaseExpiresAt })
-                .HasDatabaseName("IX_RequestClaims_ProjectId_LeaseExpiresAt");
+            assignment.HasIndex(a => new { a.NodeIdSnapshot, a.State })
+                .HasDatabaseName("IX_ExecutionAssignments_NodeIdSnapshot_State");
+            assignment.HasIndex(a => new { a.ProjectId, a.State })
+                .HasDatabaseName("IX_ExecutionAssignments_ProjectId_State");
+            assignment.HasIndex(a => a.WorkspaceBindingId)
+                .HasDatabaseName("IX_ExecutionAssignments_WorkspaceBindingId");
         });
 
         builder.Entity<SessionEvent>(sessionEvent =>
@@ -273,7 +351,7 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
             sessionEvent.HasKey(e => e.EventId);
             sessionEvent.Property(e => e.EventId)
                 .HasColumnType("TEXT")
-                .HasMaxLength(64);
+                .HasMaxLength(AssignmentOperationLimits.MaxEventIdLength);
 
             sessionEvent.Property(e => e.NodeId).HasColumnType("TEXT");
             sessionEvent.Property(e => e.ProjectId).HasColumnType("TEXT");
@@ -384,6 +462,14 @@ public sealed class ControlPlaneDbContext(DbContextOptions<ControlPlaneDbContext
     {
         public NodeIdConverter()
             : base(id => id.Value, value => new NodeId(value))
+        {
+        }
+    }
+
+    private sealed class WorkspaceBindingIdConverter : ValueConverter<WorkspaceBindingId, Guid>
+    {
+        public WorkspaceBindingIdConverter()
+            : base(id => id.Value, value => new WorkspaceBindingId(value))
         {
         }
     }

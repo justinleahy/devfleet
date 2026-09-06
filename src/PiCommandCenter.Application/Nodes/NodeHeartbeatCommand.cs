@@ -8,7 +8,8 @@ namespace PiCommandCenter.Application.Nodes;
 public sealed record NodeHeartbeatCommand(
     NodeId Id,
     IReadOnlyList<string> ActiveSessionIds,
-    NodeResourceSnapshotDto? Resources = null);
+    NodeResourceSnapshotDto? Resources = null,
+    NodeExecutionStatusDto? ExecutionStatus = null);
 
 public sealed record NodeResourceSnapshotDto(
     DateTimeOffset ObservedAt,
@@ -19,3 +20,18 @@ public sealed record NodeResourceSnapshotDto(
     long? DiskTotalBytes,
     double? LoadAverageOneMinute,
     double? UptimeSeconds);
+
+public sealed record NodeExecutionStatusDto(
+    DateTimeOffset ObservedAt,
+    int AvailableRequestSlots,
+    IReadOnlyList<Guid> ActiveAssignmentIds,
+    string RoutingRevision,
+    IReadOnlyList<RuntimeRouteReadinessDto> Routes);
+
+public sealed record RuntimeRouteReadinessDto(
+    string Role,
+    string CanonicalModel,
+    string Readiness,
+    string EvidenceSource,
+    DateTimeOffset ObservedAt,
+    string RoutingRevision);

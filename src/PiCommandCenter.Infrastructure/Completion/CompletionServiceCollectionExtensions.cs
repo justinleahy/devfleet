@@ -13,7 +13,7 @@ public static class CompletionServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         services.AddScoped<IVerificationRunStore, VerificationRunStore>();
-        services.AddScoped<ICompletionGateService, CompletionGateService>();
+        services.AddScoped<IAssignmentTerminalizationService, AssignmentTerminalizationService>();
         return services;
     }
 }

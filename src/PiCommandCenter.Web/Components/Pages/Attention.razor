@@ -25,27 +25,23 @@
 
 <PageTitle>Attention &middot; DevFleet</PageTitle>
 
-<FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+<div class="page">
 
     <header class="page-head">
-        <FluentStack Orientation="Orientation.Horizontal"
-                     VerticalAlignment="VerticalAlignment.Bottom"
-                     HorizontalGap="16"
-                     Width="100%">
-            <FluentStack Orientation="Orientation.Vertical" VerticalGap="4" Width="auto">
-                <h1>Attention</h1>
-                <p class="page-lead">
-                    Every open request in the fleet, scanned for the six things only a human can
-                    answer: input and approval requests, reservation conflicts and handoffs, failed
-                    verification, external repository changes, and disconnected agents still holding
-                    leases. Each item cites the persisted fact it came from.
-                </p>
-            </FluentStack>
-            <FluentSpacer />
+        <div class="page-head-text">
+            <h1>Attention</h1>
+            <p class="page-lead">
+                Every open request in the fleet, scanned for the six things only a human can
+                answer: input and approval requests, reservation conflicts and handoffs, failed
+                verification, external repository changes, and disconnected agents still holding
+                leases. Each item cites the persisted fact it came from.
+            </p>
+        </div>
+        <div class="page-head-actions">
             <FluentButton Appearance="Appearance.Stealth" OnClick="ReloadAsync" Disabled="@_loading">
                 Reload
             </FluentButton>
-        </FluentStack>
+        </div>
     </header>
 
     @if (_loadError is not null)
@@ -84,17 +80,15 @@
     }
     else if (_signals.Count == 0 && _loadError is null)
     {
-        <FluentCard>
-            <div class="state-empty">
-                <h2>Nothing needs a human</h2>
-                <p>
-                    @(_scannedRequests == 0
-                        ? "No open request is queued in the fleet, so there is nothing to scan yet."
-                        : $"All {_scannedRequests} open request(s) are running without a recorded conflict, failed verification, external change, or abandoned lease.")
-                </p>
-                <FluentAnchor Href="/" Appearance="Appearance.Outline">Back to fleet</FluentAnchor>
-            </div>
-        </FluentCard>
+        <div class="state-empty">
+            <h2>Nothing needs a human</h2>
+            <p>
+                @(_scannedRequests == 0
+                    ? "No open request is queued in the fleet, so there is nothing to scan yet."
+                    : $"All {_scannedRequests} open request(s) are running without a recorded conflict, failed verification, external change, or abandoned lease.")
+            </p>
+            <FluentAnchor Href="/" Appearance="Appearance.Outline">Back to fleet</FluentAnchor>
+        </div>
     }
     else
     {
@@ -105,7 +99,7 @@
             }
         </section>
     }
-</FluentStack>
+</div>
 
 @code {
     private const int SafetySeconds = 30;

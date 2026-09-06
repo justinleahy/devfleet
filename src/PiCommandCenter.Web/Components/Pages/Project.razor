@@ -8,6 +8,7 @@
 @using PiCommandCenter.Application.Sessions
 @using PiCommandCenter.Domain
 @using PiCommandCenter.Domain.Nodes
+@using PiCommandCenter.Domain.Projects
 @using PiCommandCenter.Domain.Requests
 @using PiCommandCenter.Domain.Sessions
 @using PiCommandCenter.Application.Reservations
@@ -16,6 +17,7 @@
 @using PiCommandCenter.Web.Components.Live
 @implements IAsyncDisposable
 @inject IProjectCatalog Catalog
+@inject IWorkspaceBindingCatalog Bindings
 @inject IRequestQueue Queue
 @inject INodeRegistry NodeRegistry
 @inject IAgentSessionStore SessionStore
@@ -35,33 +37,38 @@
 }
 else if (_project is null)
 {
-    <FluentStack Orientation="Orientation.Vertical" VerticalGap="16" Width="100%">
-        <h1>Project not found</h1>
-        <p class="page-lead">No project is registered with that id.</p>
-        <a class="back-link" href="/">Back to fleet</a>
-    </FluentStack>
+    <div class="page">
+        <header class="page-head">
+            <a class="back-link" href="/">Back to fleet</a>
+            <h1>Project not found</h1>
+            <p class="page-lead">No project is registered with that id.</p>
+        </header>
+    </div>
 }
 else
 {
     var project = _project;
 
-    <FluentStack Orientation="Orientation.Vertical" VerticalGap="24" Width="100%">
+    <div class="page">
 
         <header class="page-head">
             <a class="back-link" href="/">Back to fleet</a>
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="12"
-                         Width="100%">
-                <h1>@project.DisplayName</h1>
-                <FluentBadge Appearance="@(project.Enabled ? Appearance.Accent : Appearance.Neutral)">
-                    @(project.Enabled ? "Enabled" : "Disabled")
-                </FluentBadge>
-                <FluentSpacer />
-                <FluentButton Appearance="Appearance.Stealth" OnClick="ReloadAsync" Disabled="@_submitting">
-                    Reload
-                </FluentButton>
-            </FluentStack>
+            <div class="head-bar">
+                <div class="head-identity">
+                    <h1>@project.DisplayName</h1>
+                    <FluentBadge Appearance="@(project.Enabled ? Appearance.Accent : Appearance.Neutral)">
+                        @(project.Enabled ? "Enabled" : "Disabled")
+                    </FluentBadge>
+                </div>
+                <div class="head-actions">
+                    <FluentButton Appearance="Appearance.Stealth"
+                                  OnClick="ReloadAsync"
+                                  Disabled="@_submitting"
+                                  Class="action">
+                        Reload
+                    </FluentButton>
+                </div>
+            </div>
             <p class="page-lead">
                 Queue ordering is priority first, then creation time. Snapshot @_snapshot.ToString("u").
             </p>
@@ -79,65 +86,218 @@ else
         <FluentCard>
             <section class="panel" aria-labelledby="metadata-heading">
                 <h2 id="metadata-heading" class="visually-hidden">Project metadata</h2>
-                <dl class="facts">
-                    <dt>Repository path</dt>
-                    <dd class="path">@project.RepositoryPath</dd>
-                    <dt>Default branch</dt>
-                    <dd>@project.DefaultBranch</dd>
-                    <dt>Node</dt>
-                    <dd>
-                        @if (_node is null)
+                <div class="split">
+                    <section class="fact-group" aria-labelledby="workspace-facts-heading">
+                        <h3 id="workspace-facts-heading" class="group-title">Workspace designation</h3>
+                        <dl class="facts">
+                            <dt>Default branch</dt>
+                            <dd>@project.DefaultBranch</dd>
+                            @if (project.Binding is { } binding)
+                            {
+                                <dt>Repository path</dt>
+                                <dd class="path">
+                                    @WorkspacePath(binding)
+                                    @if (binding.CanonicalRepositoryPath is { } canonical
+                                         && !string.Equals(canonical, binding.RepositoryPath, StringComparison.Ordinal))
+                                    {
+                                        <span class="node-seen">requested @binding.RepositoryPath</span>
+                                    }
+                                </dd>
+                                <dt>Workspace state</dt>
+                                <dd>
+                                    <span class="node-inline">
+                                        <FluentBadge Appearance="@BindingAppearance(binding.Status)">@binding.Status.ToString()</FluentBadge>
+                                        <FluentBadge Appearance="Appearance.Neutral">revision @binding.ValidationRevision</FluentBadge>
+                                        @if (binding.ValidationCode is { Length: > 0 } validationCode)
+                                        {
+                                            <FluentBadge Appearance="Appearance.Neutral">@validationCode</FluentBadge>
+                                        }
+                                    </span>
+                                    @if (binding.ValidationDetail is { Length: > 0 } detail)
+                                    {
+                                        <span class="node-seen">@detail</span>
+                                    }
+                                    <span class="node-seen">
+                                        @if (binding.ValidatedAt is { } validatedAt)
+                                        {
+                                            <span>validated @Relative(validatedAt, _snapshot)</span>
+                                            <span class="node-seen-utc">@validatedAt.ToString("u")</span>
+                                        }
+                                        else
+                                        {
+                                            <span>no node-local result for this revision yet</span>
+                                        }
+                                    </span>
+                                </dd>
+                                <dt>Node</dt>
+                                <dd>
+                                    @if (_node is null)
+                                    {
+                                        <span class="node-missing">Not registered</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="node-name">@_node.DisplayName</span>
+                                        <span class="node-version">agent @_node.AgentVersion</span>
+                                    }
+                                    <span class="path node-id">@binding.NodeId</span>
+                                </dd>
+                                <dt>Node status</dt>
+                                <dd>
+                                    @if (_nodeError is not null)
+                                    {
+                                        <span class="node-missing">Node registry unavailable</span>
+                                    }
+                                    else if (_node is null)
+                                    {
+                                        <span class="node-missing">Not registered</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="node-inline">
+                                            <FluentBadge Appearance="@BadgeAppearance(_node.Status)">@_node.Status.ToString()</FluentBadge>
+                                            <span class="node-seen">
+                                                <span class="visually-hidden">Last heartbeat</span>
+                                                @Relative(_node.LastHeartbeatAt, _snapshot)
+                                                <span class="node-seen-utc">@_node.LastHeartbeatAt.ToString("u")</span>
+                                            </span>
+                                        </span>
+                                    }
+                                </dd>
+                            }
+                            else
+                            {
+                                <dt>Workspace</dt>
+                                <dd>
+                                    <span class="node-missing">Unbound</span>
+                                    <span class="node-seen">
+                                        No node-local workspace is designated, so no node can claim this
+                                        project's work yet.
+                                    </span>
+                                </dd>
+                            }
+                        </dl>
+
+                        @if (_bindingLock is not null)
                         {
-                            <span class="node-missing">Not registered</span>
+                            <FluentMessageBar Intent="MessageIntent.Warning"
+                                              Title="Designation is held by an assignment"
+                                              AllowDismiss="false">
+                                @_bindingLock
+                            </FluentMessageBar>
                         }
-                        else
+
+                        @if (_bindingError is not null)
                         {
-                            <span class="node-name">@_node.DisplayName</span>
-                            <span class="node-version">agent @_node.AgentVersion</span>
+                            <FluentMessageBar Intent="MessageIntent.Error"
+                                              Title="Workspace action failed"
+                                              AllowDismiss="false">
+                                @_bindingError
+                            </FluentMessageBar>
                         }
-                        <span class="path node-id">@project.NodeId</span>
-                    </dd>
-                    <dt>Node status</dt>
-                    <dd>
+
+                        @if (_bindingNotice is not null)
+                        {
+                            <div role="status">
+                                <FluentMessageBar Intent="MessageIntent.Info" AllowDismiss="false">
+                                    @_bindingNotice
+                                </FluentMessageBar>
+                            </div>
+                        }
+
                         @if (_nodeError is not null)
                         {
-                            <span class="node-missing">Node registry unavailable</span>
+                            <p class="panel-empty">
+                                The node registry is unavailable, so no node can be selected:
+                                @_nodeError
+                            </p>
                         }
-                        else if (_node is null)
+                        else if (_nodes.Count == 0)
                         {
-                            <span class="node-missing">Not registered</span>
+                            <p class="panel-empty">
+                                No node has registered with this control plane, so there is nothing to
+                                designate yet. Start a node agent; queued work waits until a designated
+                                workspace is validated on it.
+                            </p>
                         }
                         else
                         {
-                            <span class="node-inline">
-                                <FluentBadge Appearance="@BadgeAppearance(_node.Status)">@_node.Status.ToString()</FluentBadge>
-                                <span class="node-seen">
-                                    <span class="visually-hidden">Last heartbeat</span>
-                                    @Relative(_node.LastHeartbeatAt, _snapshot)
-                                    <span class="node-seen-utc">@_node.LastHeartbeatAt.ToString("u")</span>
-                                </span>
-                            </span>
+                            <div class="form-grid">
+                                <FluentSelect TOption="NodeDto"
+                                              Label="Node"
+                                              Items="@_nodes"
+                                              OptionText="@(node => $"{node.DisplayName} \u00b7 {node.Status}")"
+                                              OptionValue="@(node => node.Id.ToString())"
+                                              @bind-Value="_bindingNodeId"
+                                              Disabled="@BindingWriteBlocked"
+                                              Class="field" />
+                                <FluentTextField @bind-Value="_bindingPath"
+                                                 Label="Repository path on that node"
+                                                 Required="true"
+                                                 Placeholder="/home/operator/src/devfleet"
+                                                 Disabled="@BindingWriteBlocked"
+                                                 Class="field field-wide" />
+                            </div>
+                            <p class="panel-lead">
+                                The path is interpreted by the selected node under its own approved
+                                roots; the control plane never reads it. Every edit starts a new
+                                validation revision and discards the previous result.
+                            </p>
                         }
-                    </dd>
-                    <dt>Write slots</dt>
-                    <dd>@project.MaxActiveWriteRequests</dd>
-                    <dt>Read-only slots</dt>
-                    <dd>@project.MaxReadOnlyRequests</dd>
-                    <dt>Child agents per request</dt>
-                    <dd>@project.MaxChildAgentsPerRequest</dd>
-                    <dt>Active agents</dt>
-                    <dd>
-                        @if (_sessionError is not null)
-                        {
-                            <span class="node-missing">Session projection unavailable</span>
-                        }
-                        else
-                        {
-                            @_activeSessions
-                            <span class="node-seen">of @_trackedSessions tracked sessions</span>
-                        }
-                    </dd>
-                </dl>
+
+                        <FluentStack HorizontalGap="8" VerticalGap="8" Wrap="true">
+                            @if (_nodeError is null && _nodes.Count > 0)
+                            {
+                                <FluentButton Appearance="Appearance.Accent"
+                                              OnClick="DesignateAsync"
+                                              Loading="@_bindingBusy"
+                                              Disabled="@BindingWriteBlocked"
+                                              Class="action">
+                                    @(project.Binding is null ? "Designate workspace" : "Update designation")
+                                </FluentButton>
+                            }
+                            @if (project.Binding is { } designated)
+                            {
+                                <FluentButton Appearance="Appearance.Outline"
+                                              OnClick="ValidateBindingAsync"
+                                              Disabled="@(_bindingBusy || _loading)"
+                                              Class="action">
+                                    @(designated.ValidatedAt is null ? "Validate workspace" : "Revalidate workspace")
+                                </FluentButton>
+                                <FluentButton Appearance="Appearance.Stealth"
+                                              OnClick="RemoveBindingAsync"
+                                              Disabled="@BindingWriteBlocked"
+                                              Class="action">
+                                    Remove designation
+                                </FluentButton>
+                            }
+                        </FluentStack>
+                    </section>
+
+                    <section class="fact-group" aria-labelledby="policy-facts-heading">
+                        <h3 id="policy-facts-heading" class="group-title">Concurrency policy</h3>
+                        <dl class="facts">
+                            <dt>Write slots</dt>
+                            <dd>@project.MaxActiveWriteRequests</dd>
+                            <dt>Read-only slots</dt>
+                            <dd>@project.MaxReadOnlyRequests</dd>
+                            <dt>Child agents per request</dt>
+                            <dd>@project.MaxChildAgentsPerRequest</dd>
+                            <dt>Active agents</dt>
+                            <dd>
+                                @if (_sessionError is not null)
+                                {
+                                    <span class="node-missing">Session projection unavailable</span>
+                                }
+                                else
+                                {
+                                    @_activeSessions
+                                    <span class="node-seen">of @_trackedSessions tracked sessions</span>
+                                }
+                            </dd>
+                        </dl>
+                    </section>
+                </div>
             </section>
         </FluentCard>
 
@@ -148,6 +308,14 @@ else
                     A queued request waits for a node to claim it. Development work may change files;
                     analysis and review are read-only.
                 </p>
+                @if (project.Binding is null)
+                {
+                    <p class="panel-lead">
+                        This project has no designated workspace. Queueing still works: the request
+                        stays <em>Queued</em> with a scheduling reason and is never assigned a node
+                        until a workspace is designated, validated, and its node is eligible.
+                    </p>
+                }
 
                 @if (_composerErrors.Count > 0)
                 {
@@ -179,79 +347,102 @@ else
                     </div>
                 }
 
-                <FluentTextField @bind-Value="_title"
-                                 Label="Title"
-                                 Required="true"
-                                 Placeholder="Add strict reservation handoff"
-                                 Class="field field-wide" />
+                <div class="composer">
+                    <div class="composer-main">
+                        <FluentTextField @bind-Value="_title"
+                                         Label="Title"
+                                         Required="true"
+                                         Placeholder="Add strict reservation handoff"
+                                         Class="field field-wide" />
 
-                <FluentTextArea @bind-Value="_prompt"
-                                Label="Prompt"
-                                Required="true"
-                                Rows="5"
-                                Placeholder="Implement atomic reservation handoff with stale-token rejection."
-                                Class="field field-wide" />
+                        <FluentTextArea @bind-Value="_prompt"
+                                        Label="Prompt"
+                                        Required="true"
+                                        Rows="5"
+                                        Placeholder="Implement atomic reservation handoff with stale-token rejection."
+                                        Class="field field-wide" />
+                    </div>
 
-                <div class="form-grid">
-                    <FluentSelect TOption="string"
-                                  Label="Kind"
-                                  Items="@KindNames"
-                                  OptionText="@(name => name)"
-                                  OptionValue="@(name => name)"
-                                  @bind-Value="_kind"
-                                  Class="field" />
-                    <FluentSelect TOption="string"
-                                  Label="Priority"
-                                  Items="@PriorityNames"
-                                  OptionText="@(name => name)"
-                                  OptionValue="@(name => name)"
-                                  @bind-Value="_priority"
-                                  Class="field" />
-                    <FluentSelect TOption="string"
-                                  Label="Risk"
-                                  Items="@RiskNames"
-                                  OptionText="@(name => name)"
-                                  OptionValue="@(name => name)"
-                                  @bind-Value="_risk"
-                                  Class="field" />
+                    <div class="composer-side">
+                        <div class="form-grid">
+                            <FluentSelect TOption="string"
+                                          Label="Kind"
+                                          Items="@KindNames"
+                                          OptionText="@(name => name)"
+                                          OptionValue="@(name => name)"
+                                          @bind-Value="_kind"
+                                          Class="field" />
+                            <FluentSelect TOption="string"
+                                          Label="Priority"
+                                          Items="@PriorityNames"
+                                          OptionText="@(name => name)"
+                                          OptionValue="@(name => name)"
+                                          @bind-Value="_priority"
+                                          Class="field" />
+                            <FluentSelect TOption="string"
+                                          Label="Risk"
+                                          Items="@RiskNames"
+                                          OptionText="@(name => name)"
+                                          OptionValue="@(name => name)"
+                                          @bind-Value="_risk"
+                                          Class="field" />
+                        </div>
+
+                        <div class="composer-actions">
+                            <FluentButton Appearance="Appearance.Accent"
+                                          OnClick="EnqueueAsync"
+                                          Loading="@_submitting"
+                                          Class="action action-primary">
+                                Queue request
+                            </FluentButton>
+                        </div>
+                    </div>
                 </div>
-
-                <FluentStack Orientation="Orientation.Horizontal" HorizontalGap="8" Width="auto">
-                    <FluentButton Appearance="Appearance.Accent" OnClick="EnqueueAsync" Loading="@_submitting">
-                        Queue request
-                    </FluentButton>
-                </FluentStack>
             </section>
         </FluentCard>
 
-        @foreach (var group in RequestGroups())
-        {
-            <section aria-labelledby="@group.HeadingId">
-                <h2 id="@group.HeadingId">@group.Heading</h2>
-                @if (group.Requests.Count == 0)
-                {
-                    <p class="panel-empty">@group.EmptyText</p>
-                }
-                else
-                {
-                    <ul class="request-list">
-                        @foreach (var request in group.Requests)
-                        {
-                            <li>
-                                <FluentCard>
+        <div class="queues">
+            @foreach (var group in RequestGroups())
+            {
+                <section class="queue" aria-labelledby="@group.HeadingId">
+                    <div class="queue-head">
+                        <h2 id="@group.HeadingId">@group.Heading</h2>
+                        <span class="queue-count">@group.Requests.Count</span>
+                    </div>
+                    @if (group.Requests.Count == 0)
+                    {
+                        <p class="panel-empty">@group.EmptyText</p>
+                    }
+                    else
+                    {
+                        <ul class="request-list">
+                            @foreach (var request in group.Requests)
+                            {
+                                <li>
                                     <article class="request-row">
-                                        <FluentStack Orientation="Orientation.Horizontal"
-                                                     VerticalAlignment="VerticalAlignment.Center"
-                                                     HorizontalGap="8">
+                                        <div class="request-head">
                                             <h3>
                                                 <a href="@($"/requests/{request.Id}")">@request.Title</a>
                                             </h3>
-                                            <FluentSpacer />
-                                            <FluentBadge Appearance="Appearance.Accent">@request.StatusName</FluentBadge>
-                                            <FluentBadge Appearance="Appearance.Neutral">@request.PriorityName</FluentBadge>
-                                            <FluentBadge Appearance="Appearance.Neutral">@request.KindName</FluentBadge>
-                                            <FluentBadge Appearance="Appearance.Neutral">@request.RiskLevelName</FluentBadge>
-                                        </FluentStack>
+                                            <div class="badge-row">
+                                                <FluentBadge Appearance="Appearance.Accent">@request.StatusName</FluentBadge>
+                                                <FluentBadge Appearance="Appearance.Neutral">@request.PriorityName</FluentBadge>
+                                                <FluentBadge Appearance="Appearance.Neutral">@request.KindName</FluentBadge>
+                                                <FluentBadge Appearance="Appearance.Neutral">@request.RiskLevelName</FluentBadge>
+                                                @if (request.SchedulingStatus is { } scheduling)
+                                                {
+                                                    <FluentBadge Appearance="@(scheduling.IsEligible ? Appearance.Accent : Appearance.Neutral)">
+                                                        @SchedulingLabel(scheduling.Code)
+                                                    </FluentBadge>
+                                                }
+                                                @if (request.Assignment is { } assigned)
+                                                {
+                                                    <FluentBadge Appearance="@(IsAssignmentTerminal(assigned.State) ? Appearance.Neutral : Appearance.Accent)">
+                                                        @assigned.State.ToString()
+                                                    </FluentBadge>
+                                                }
+                                            </div>
+                                        </div>
                                         <p class="request-prompt">@request.Prompt</p>
                                         <p class="request-meta">
                                             Created @request.CreatedAt.ToString("u")
@@ -261,28 +452,88 @@ else
                                             }
                                             <span>&nbsp;&middot; @AgentSummary(request.Id)</span>
                                         </p>
+                                        @if (request.SchedulingStatus is { } waiting)
+                                        {
+                                            <p class="request-meta">
+                                                @waiting.Detail
+                                                <span>&nbsp;&middot; @waiting.Action</span>
+                                            </p>
+                                        }
+                                        @if (request.Assignment is { } assignment)
+                                        {
+                                            @if (assignment.State == ExecutionAssignmentState.Finalizing)
+                                            {
+                                                <FluentMessageBar Intent="MessageIntent.Warning"
+                                                                  Title="Assignment is finalizing"
+                                                                  AllowDismiss="false">
+                                                    Completion was accepted, but ownership is not released: this
+                                                    assignment still holds project and node capacity while it
+                                                    quiesces.
+                                                </FluentMessageBar>
+                                            }
+                                            else if (assignment.State == ExecutionAssignmentState.Cancelling)
+                                            {
+                                                <FluentMessageBar Intent="MessageIntent.Warning"
+                                                                  Title="Assignment is cancelling"
+                                                                  AllowDismiss="false">
+                                                    Cancellation was delivered to the assigned node only. The
+                                                    writer slot and reservations stay held until it quiesces.
+                                                </FluentMessageBar>
+                                            }
+                                            else if (assignment.State == ExecutionAssignmentState.RecoveryRequired)
+                                            {
+                                                <FluentMessageBar Intent="MessageIntent.Warning"
+                                                                  Title="Assignment requires recovery"
+                                                                  AllowDismiss="false">
+                                                    Ownership is uncertain and no second writer is permitted. The
+                                                    assignment is durable, still occupies capacity, and holds this
+                                                    project's workspace designation.
+                                                </FluentMessageBar>
+                                            }
+                                            <p class="request-meta">
+                                                @(IsAssignmentTerminal(assignment.State)
+                                                    ? "Retained placement history"
+                                                    : "Immutable placement snapshot")
+                                                <span>&nbsp;&middot; binding revision @assignment.BindingValidationRevisionSnapshot</span>
+                                                <span>&nbsp;&middot; branch @assignment.DefaultBranchSnapshot</span>
+                                                <span>&nbsp;&middot; assigned @Relative(assignment.AssignedAt, _snapshot)</span>
+                                                @if (assignment.LastRenewedAt is { } renewed)
+                                                {
+                                                    <span>&nbsp;&middot; renewed @Relative(renewed, _snapshot)</span>
+                                                }
+                                                @if (assignment.LastReconciledAt is { } reconciled)
+                                                {
+                                                    <span>&nbsp;&middot; reconciled @Relative(reconciled, _snapshot)</span>
+                                                }
+                                                @if (assignment.TerminalAt is { } terminal)
+                                                {
+                                                    <span>&nbsp;&middot; terminal @terminal.ToString("u")</span>
+                                                }
+                                                else
+                                                {
+                                                    <span>&nbsp;&middot; lease expires @assignment.LeaseExpiresAt.ToString("u")</span>
+                                                }
+                                            </p>
+                                            <p class="request-meta">@assignment.CanonicalRepositoryPathSnapshot</p>
+                                        }
                                     </article>
-                                </FluentCard>
-                            </li>
-                        }
-                    </ul>
-                }
-            </section>
-        }
+                                </li>
+                            }
+                        </ul>
+                    }
+                </section>
+            }
+        </div>
 
-        <section aria-labelledby="reservations-heading">
-            <FluentStack Orientation="Orientation.Horizontal"
-                         VerticalAlignment="VerticalAlignment.Center"
-                         HorizontalGap="12"
-                         Width="100%">
+        <section class="queue" aria-labelledby="reservations-heading">
+            <div class="queue-head">
                 <h2 id="reservations-heading">Active reservations</h2>
-                <FluentSpacer />
-                <span class="node-seen" role="status" aria-live="polite">
+                <span class="queue-status" role="status" aria-live="polite">
                     @(_reservationError is not null
                         ? "reservation authority unavailable"
                         : $"{_leases.Count} lease group(s) held")
                 </span>
-            </FluentStack>
+            </div>
             @if (_reservationError is not null)
             {
                 <FluentMessageBar Intent="MessageIntent.Error"
@@ -300,22 +551,20 @@ else
             }
             else
             {
-                <ul class="request-list">
+                <ul class="request-list lease-list">
                     @foreach (var lease in _leases)
                     {
                         <li>
-                            <FluentCard>
-                                <ReservationLeaseCard Lease="lease"
-                                                      OwnerLabel="@OwnerLabel(lease.OwnerSessionId)"
-                                                      Now="_snapshot"
-                                                      OnForceReleased="ReloadAsync" />
-                            </FluentCard>
+                            <ReservationLeaseCard Lease="lease"
+                                                  OwnerLabel="@OwnerLabel(lease.OwnerSessionId)"
+                                                  Now="_snapshot"
+                                                  OnForceReleased="ReloadAsync" />
                         </li>
                     }
                 </ul>
             }
         </section>
-    </FluentStack>
+    </div>
 }
 
 @code {
@@ -333,6 +582,7 @@ else
     private IReadOnlyList<string> _composerErrors = Array.Empty<string>();
     private ProjectDto? _project;
     private NodeDto? _node;
+    private IReadOnlyList<NodeDto> _nodes = Array.Empty<NodeDto>();
     private DateTimeOffset _snapshot;
     private string? _loadError;
     private string? _nodeError;
@@ -350,6 +600,20 @@ else
     private int _trackedSessions;
     private IReadOnlyList<ReservationLeaseDto> _leases = Array.Empty<ReservationLeaseDto>();
     private string? _reservationError;
+
+    private string? _bindingNodeId;
+    private string? _bindingPath = string.Empty;
+    private string? _bindingError;
+    private string? _bindingNotice;
+    private string? _bindingLock;
+    private bool _bindingBusy;
+    private bool _bindingSeeded;
+
+    /// <summary>
+    /// The catalog rejects removal, and replacement discards a snapshot still in use, while a
+    /// nonterminal or recovery-required assignment references the designation.
+    /// </summary>
+    private bool BindingWriteBlocked => _bindingBusy || _loading || _bindingLock is not null;
 
     private LiveView? _live;
     private bool _busy;
@@ -414,6 +678,7 @@ else
         {
             _loading = true;
             _node = null;
+            _bindingSeeded = false;
             Partition(Array.Empty<WorkRequestDto>());
             ResetSessions();
             StateHasChanged();
@@ -432,7 +697,9 @@ else
             var requests = await Queue.ListAsync(id, CancellationToken.None);
             Partition(requests);
             await LoadSessionsAsync(requests);
-            await LoadNodeAsync(_project.NodeId);
+            await LoadNodesAsync(_project.Binding);
+            ComputeBindingLock(_project.Binding, requests);
+            SeedBindingForm(_project.Binding);
             await LoadReservationsAsync();
         }
         catch (ProjectNotFoundException)
@@ -451,18 +718,220 @@ else
         }
     }
 
-    private async Task LoadNodeAsync(Guid nodeId)
+    /// <summary>
+    /// Reads the registered nodes once: the selector needs the whole fleet, and the designated
+    /// node is resolved from the same list instead of a second lookup on a possibly absent id.
+    /// </summary>
+    private async Task LoadNodesAsync(WorkspaceBindingDto? binding)
     {
         try
         {
-            _node = await NodeRegistry.GetAsync(new NodeId(nodeId), CancellationToken.None);
+            _nodes = await NodeRegistry.ListAsync(CancellationToken.None);
         }
         catch (Exception ex)
         {
+            _nodes = Array.Empty<NodeDto>();
             _node = null;
             _nodeError = ex.Message;
+            return;
+        }
+
+        _node = binding is null
+            ? null
+            : _nodes.FirstOrDefault(node => node.Id == binding.NodeId);
+    }
+
+    /// <summary>
+    /// Mirrors the stored designation into the editor. A live refresh leaves an operator's
+    /// in-progress edit alone; an explicit reload or a completed action re-seeds from the server.
+    /// </summary>
+    private void SeedBindingForm(WorkspaceBindingDto? binding)
+    {
+        if (_bindingSeeded && _bindingNodeId is { Length: > 0 })
+        {
+            return;
+        }
+
+        _bindingNodeId = binding is null
+            ? _nodes.FirstOrDefault()?.Id.ToString()
+            : binding.NodeId.ToString();
+        _bindingPath = binding?.RepositoryPath ?? string.Empty;
+        _bindingSeeded = true;
+    }
+
+    /// <summary>
+    /// Names the assignment that makes the catalog reject removal, so the actions are disabled
+    /// from the same projection the server decides on rather than after a failed round trip.
+    /// </summary>
+    private void ComputeBindingLock(
+        WorkspaceBindingDto? binding,
+        IReadOnlyList<WorkRequestDto> requests)
+    {
+        _bindingLock = null;
+        if (binding is null)
+        {
+            return;
+        }
+
+        foreach (var request in requests)
+        {
+            if (request.Assignment is { } assignment
+                && assignment.WorkspaceBindingId == binding.Id
+                && !IsAssignmentTerminal(assignment.State))
+            {
+                _bindingLock =
+                    $"Request \u201c{request.Title}\u201d holds a {assignment.State} assignment on this "
+                    + "workspace. The designation cannot be replaced or removed until that assignment "
+                    + "is terminal or recovered.";
+                return;
+            }
         }
     }
+
+    private static bool IsAssignmentTerminal(ExecutionAssignmentState state) =>
+        state is ExecutionAssignmentState.Completed
+            or ExecutionAssignmentState.Failed
+            or ExecutionAssignmentState.Cancelled;
+
+    /// <summary>
+    /// Operator label for a server-issued scheduling code. The server owns precedence, detail,
+    /// and action text; this only names the code it already chose.
+    /// </summary>
+    private static string SchedulingLabel(string code) => code switch
+    {
+        SchedulingReasonCodes.ProjectDisabled => "Project disabled",
+        SchedulingReasonCodes.WorkspaceBindingMissing => "No workspace",
+        SchedulingReasonCodes.WorkspaceValidationPending => "Validation pending",
+        SchedulingReasonCodes.WorkspaceInvalid => "Workspace invalid",
+        SchedulingReasonCodes.NodeOffline => "Node offline",
+        SchedulingReasonCodes.RuntimeUnavailable => "Runtime unavailable",
+        SchedulingReasonCodes.RuntimeUnknown => "Runtime unknown",
+        SchedulingReasonCodes.NodeCapacityUnavailable => "At capacity",
+        SchedulingReasonCodes.ProjectConcurrencyUnavailable => "Project at limit",
+        SchedulingReasonCodes.Eligible => "Ready",
+        _ => code,
+    };
+
+    /// <summary>
+    /// Creates or replaces the sole designation. The node interprets the path, so the control
+    /// plane only records it and waits for that node's validation of the new revision.
+    /// </summary>
+    private async Task DesignateAsync()
+    {
+        _bindingError = null;
+        _bindingNotice = null;
+
+        if (!Guid.TryParse(_bindingNodeId, out var nodeId) || nodeId == Guid.Empty)
+        {
+            _bindingError = "Select the node that owns the workspace.";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(_bindingPath))
+        {
+            _bindingError = "Repository path is required.";
+            return;
+        }
+
+        _bindingBusy = true;
+        try
+        {
+            var binding = await Bindings.DesignateAsync(
+                new ProjectId(ProjectId),
+                new DesignateWorkspaceBindingCommand(new NodeId(nodeId), _bindingPath!.Trim()),
+                Clock.UtcNow,
+                CancellationToken.None);
+            ToastService.ShowSuccess($"Designated {binding.RepositoryPath}");
+            _bindingNotice =
+                $"Validation revision {binding.ValidationRevision} is pending on the designated node.";
+            _bindingSeeded = false;
+        }
+        catch (Exception ex)
+        {
+            _bindingError = ex.Message;
+        }
+        finally
+        {
+            _bindingBusy = false;
+        }
+
+        await ReloadAsync(showSpinner: false);
+    }
+
+    /// <summary>
+    /// Asks the designated node to validate the current revision. An offline node leaves the
+    /// revision pending, which is reported rather than retried or reinterpreted here.
+    /// </summary>
+    private async Task ValidateBindingAsync()
+    {
+        _bindingError = null;
+        _bindingNotice = null;
+        _bindingBusy = true;
+        try
+        {
+            var binding = await Bindings.ValidateAsync(
+                new ProjectId(ProjectId),
+                Clock.UtcNow,
+                CancellationToken.None);
+            _bindingNotice = binding.Status switch
+            {
+                WorkspaceBindingStatus.Valid =>
+                    $"Revision {binding.ValidationRevision} is valid at {binding.CanonicalRepositoryPath}.",
+                WorkspaceBindingStatus.Invalid =>
+                    $"Revision {binding.ValidationRevision} is invalid: "
+                    + (binding.ValidationDetail ?? binding.ValidationCode ?? "no detail was returned."),
+                _ =>
+                    $"Revision {binding.ValidationRevision} is still pending: the designated node did "
+                    + "not answer this request.",
+            };
+            _bindingSeeded = false;
+        }
+        catch (Exception ex)
+        {
+            _bindingError = ex.Message;
+        }
+        finally
+        {
+            _bindingBusy = false;
+        }
+
+        await ReloadAsync(showSpinner: false);
+    }
+
+    private async Task RemoveBindingAsync()
+    {
+        _bindingError = null;
+        _bindingNotice = null;
+        _bindingBusy = true;
+        try
+        {
+            await Bindings.DeleteAsync(new ProjectId(ProjectId), Clock.UtcNow, CancellationToken.None);
+            ToastService.ShowSuccess("Removed the workspace designation");
+            _bindingNotice =
+                "This project is unbound. Queued work waits with a scheduling reason until a "
+                + "workspace is designated and validated again.";
+            _bindingSeeded = false;
+        }
+        catch (Exception ex)
+        {
+            _bindingError = ex.Message;
+        }
+        finally
+        {
+            _bindingBusy = false;
+        }
+
+        await ReloadAsync(showSpinner: false);
+    }
+
+    private static string WorkspacePath(WorkspaceBindingDto binding) =>
+        binding.CanonicalRepositoryPath ?? binding.RepositoryPath;
+
+    private static Appearance BindingAppearance(WorkspaceBindingStatus status) => status switch
+    {
+        WorkspaceBindingStatus.Valid => Appearance.Accent,
+        _ => Appearance.Neutral,
+    };
 
     private async Task LoadReservationsAsync()
     {

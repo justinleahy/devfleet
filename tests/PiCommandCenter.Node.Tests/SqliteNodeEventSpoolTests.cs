@@ -34,6 +34,7 @@ public class SqliteNodeEventSpoolTests : IDisposable
         Guid.NewGuid(),
         Guid.NewGuid(),
         RequestId: null,
+        ClaimToken: "event-spool-test-token",
         SessionId: "session-1",
         sequence,
         "session.log",

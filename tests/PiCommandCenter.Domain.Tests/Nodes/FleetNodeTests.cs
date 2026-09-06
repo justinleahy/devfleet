@@ -23,6 +23,7 @@ public class FleetNodeTests
         Assert.Equal("1.2.3", node.AgentVersion);
         Assert.Equal(NodeStatus.Offline, node.Status);
         Assert.Equal("{\"arch\":\"arm64\"}", node.CapabilitiesJson);
+        Assert.Null(node.ExecutionStatusJson);
         Assert.Equal(Now, node.CreatedAt);
         Assert.Equal(Now, node.UpdatedAt);
         Assert.Equal(Now, node.LastHeartbeatAt);
@@ -155,16 +156,32 @@ public class FleetNodeTests
         var id = new NodeId(Guid.NewGuid());
         var createdAt = Now.AddDays(-3);
         var updatedAt = Now.AddMinutes(-1);
+        var resourceSnapshotJson = SnapshotJson(updatedAt);
+        var executionStatusJson = ExecutionStatusJson(
+            updatedAt,
+            availableSlots: 2,
+            routingRevision: "revision-42");
 
         var node = FleetNode.Rehydrate(
-            id, "pi-02", "2.0.0", NodeStatus.Online, Now.AddMinutes(-1), "{}",
-            createdAt, updatedAt, version: 42);
+            id,
+            "pi-02",
+            "2.0.0",
+            NodeStatus.Online,
+            Now.AddMinutes(-1),
+            "{}",
+            createdAt,
+            updatedAt,
+            version: 42,
+            resourceSnapshotJson: resourceSnapshotJson,
+            executionStatusJson: executionStatusJson);
 
         Assert.Equal(id, node.Id);
         Assert.Equal(NodeStatus.Online, node.Status);
         Assert.Equal(createdAt, node.CreatedAt);
         Assert.Equal(updatedAt, node.UpdatedAt);
         Assert.Equal(42, node.Version);
+        Assert.Equal(resourceSnapshotJson, node.ResourceSnapshotJson);
+        Assert.Equal(executionStatusJson, node.ExecutionStatusJson);
     }
 
     [Fact]
@@ -192,6 +209,49 @@ public class FleetNodeTests
     }
 
     [Fact]
+    public void Heartbeat_overwrites_the_latest_execution_status()
+    {
+        var node = RegisterNode();
+        var first = ExecutionStatusJson(
+            Now.AddMinutes(1),
+            availableSlots: 1,
+            routingRevision: "revision-1");
+        var second = ExecutionStatusJson(
+            Now.AddMinutes(2),
+            availableSlots: 3,
+            routingRevision: "revision-2");
+
+        node.Heartbeat("1.2.3", "{}", Now.AddMinutes(1), executionStatusJson: first);
+        node.Heartbeat("1.2.3", "{}", Now.AddMinutes(2), executionStatusJson: second);
+
+        Assert.Equal(second, node.ExecutionStatusJson);
+    }
+
+    [Fact]
+    public void Heartbeat_clears_execution_status_independently_from_resources()
+    {
+        var node = RegisterNode();
+        var firstAt = Now.AddMinutes(1);
+        var secondAt = Now.AddMinutes(2);
+        node.Heartbeat(
+            "1.2.3",
+            "{}",
+            firstAt,
+            SnapshotJson(firstAt),
+            ExecutionStatusJson(firstAt, availableSlots: 1, routingRevision: "revision-1"));
+
+        node.Heartbeat(
+            "1.2.3",
+            "{}",
+            secondAt,
+            SnapshotJson(secondAt, cpu: 42.5),
+            executionStatusJson: null);
+
+        Assert.Null(node.ExecutionStatusJson);
+        AssertSnapshot(node.ResourceSnapshotJson, secondAt, cpu: 42.5);
+    }
+
+    [Fact]
     public void RefreshRegistration_preserves_the_latest_resource_snapshot()
     {
         var node = RegisterNode();
@@ -215,6 +275,30 @@ public class FleetNodeTests
             diskTotalBytes = 8192L,
             loadAverageOneMinute = 0.25,
             uptimeSeconds = 90d,
+        });
+
+    private static string ExecutionStatusJson(
+        DateTimeOffset observedAt,
+        int availableSlots,
+        string routingRevision) =>
+        JsonSerializer.Serialize(new
+        {
+            observedAt,
+            availableRequestSlots = availableSlots,
+            activeAssignmentIds = new[] { Guid.Parse("11111111-1111-1111-1111-111111111111") },
+            routingRevision,
+            routes = new[]
+            {
+                new
+                {
+                    role = "coding",
+                    canonicalModel = "claude-sonnet",
+                    readiness = "unknown",
+                    evidenceSource = "unsupported_native_observation",
+                    observedAt,
+                    routingRevision,
+                },
+            },
         });
 
     private static void AssertSnapshot(string? json, DateTimeOffset observedAt, double cpu)

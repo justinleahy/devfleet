@@ -1,123 +1,259 @@
+/* Subscription usage: a measured page. The phone layout is the default — one column,
+   each measure the full width of the column — and every wider step only tightens it:
+   the picker joins its actions, then each window becomes one aligned row.
+   Steps: 600px (phone to small tablet), 960px (tablet), 1280px (dense desktop). */
+
+.page-head {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
 .page-head h1 {
     margin: 0;
-    font-size: var(--type-ramp-plus-4-font-size);
-    line-height: var(--type-ramp-plus-4-line-height);
+    font-size: var(--type-ramp-plus-3-font-size);
+    line-height: var(--type-ramp-plus-3-line-height);
     font-weight: 600;
     letter-spacing: -0.02em;
+    overflow-wrap: anywhere;
+}
+
+.page-lead {
+    margin: 0;
+    /* Prose stays in one readable measure however wide the desktop gets. */
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+}
+
+section {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
 }
 
 h2 {
-    margin: 0 0 calc(var(--design-unit) * 3px);
-    font-size: var(--type-ramp-plus-2-font-size);
-    line-height: var(--type-ramp-plus-2-line-height);
-    font-weight: 600;
-    letter-spacing: -0.015em;
-}
-
-.state-block {
-    display: flex;
-    align-items: center;
-    gap: calc(var(--design-unit) * 3px);
-    padding-block: calc(var(--design-unit) * 6px);
-    color: var(--neutral-foreground-hint);
-}
-
-.panel {
-    display: flex;
-    flex-direction: column;
-    gap: calc(var(--design-unit) * 4px);
-    padding: calc(var(--design-unit) * 5px);
-}
-
-.panel-empty {
-    margin: 0;
-    padding-block: calc(var(--design-unit) * 3px);
-    color: var(--neutral-foreground-hint);
-}
-
-/* Node picker: selector on the left, its fetch actions trailing it. */
-.node-picker {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
-}
-
-.node-picker ::deep .field {
-    min-width: 260px;
-}
-
-.node-picker ::deep .node-picker-actions {
-    flex-shrink: 0;
-}
-
-/* Provider card: the provider's name, then its measured windows. */
-.usage-card {
-    gap: calc(var(--design-unit) * 3px);
-}
-
-.usage-card h3 {
     margin: 0;
     font-size: var(--type-ramp-plus-1-font-size);
     line-height: var(--type-ramp-plus-1-line-height);
     font-weight: 600;
+    letter-spacing: -0.015em;
 }
 
-/* Usage windows: one measured window per row, bar under its own numbers. */
-.usage-windows {
+/* Node picker: the selector stacked over its fetch actions, both filling the column so
+   every control is a thumb-sized target. */
+.node-picker {
+    /* Fluent derives control height from this multiplier: 11 design units is a ~44px
+       target on touch. The desktop step returns the fleet's compact control height. */
+    --base-height-multiplier: 11;
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
+}
+
+.node-field {
+    min-width: 0;
+}
+
+/* The select carries an intrinsic 250px floor, which a 320px viewport cannot hold:
+   it takes the width of its column instead. */
+.node-field ::deep .node-select {
+    min-width: 0;
+    width: 100%;
+}
+
+.node-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: calc(var(--design-unit) * 2px);
+    min-width: 0;
+}
+
+/* The host stretches in its track; the button's own control is sized inside its shadow
+   root, so it has to be told to follow. */
+.node-actions ::deep .node-action::part(control) {
+    width: 100%;
+}
+
+.panel-empty {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--neutral-foreground-hint);
+}
+
+/* Providers: one grouped surface with a rule between providers, rather than a card each.
+   Capped, so the measured tracks stay readable instead of spanning a 1440px viewport. */
+.provider-list {
+    display: flex;
+    flex-direction: column;
+    max-width: 68rem;
+    min-width: 0;
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--layer-corner-radius) * 1px);
+    background-color: var(--neutral-layer-1);
+}
+
+.provider {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+    padding: calc(var(--design-unit) * 4px);
+    min-width: 0;
+}
+
+.provider + .provider {
+    border-top: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.provider h3 {
+    margin: 0;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.window-list {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 4px);
     margin: 0;
     padding: 0;
     list-style: none;
 }
 
-.usage-window {
-    display: flex;
-    flex-direction: column;
-    gap: calc(var(--design-unit) * 1.5px);
+/* One measured window. On phone the numbers sit over a full-width bar with the reset
+   line beneath; the desktop step turns the same four parts into one aligned row. */
+.window {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+        "name value"
+        "bar bar"
+        "reset reset";
+    align-items: baseline;
+    gap: calc(var(--design-unit) * 1.5px) calc(var(--design-unit) * 3px);
     min-width: 0;
 }
 
-.usage-window-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: calc(var(--design-unit) * 2px);
-}
-
-.usage-window-name {
+.window-name {
+    grid-area: name;
     font-weight: 600;
     overflow-wrap: anywhere;
 }
 
-.usage-window-value {
+.window-value {
+    grid-area: value;
+    text-align: right;
     font-variant-numeric: tabular-nums;
+    white-space: nowrap;
 }
 
-.usage-window-reset {
+/* A grid track rather than a flex row: the bar is stretched to the cell it occupies,
+   where a flex item would have collapsed to the progress element's own content width. */
+.window-bar {
+    grid-area: bar;
+    display: grid;
+    align-self: center;
+    min-width: 0;
+}
+
+.window-reset {
+    grid-area: reset;
     margin: 0;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
     line-height: var(--type-ramp-minus-1-line-height);
     font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
 }
 
-.usage-none {
+.window-none {
     margin: 0;
     color: var(--neutral-foreground-hint);
 }
 
-@media (max-width: 720px) {
-    /* Narrow widths cannot hold the picker beside its actions. */
-    .node-picker ::deep .field {
-        min-width: 0;
-        width: 100%;
+/* Loading */
+.state-block {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--design-unit) * 3px);
+    padding-block: calc(var(--design-unit) * 4px);
+    color: var(--neutral-foreground-hint);
+}
+
+@media (min-width: 600px) {
+    .page-head h1 {
+        font-size: var(--type-ramp-plus-4-font-size);
+        line-height: var(--type-ramp-plus-4-line-height);
     }
 
-    .node-picker ::deep .node-picker-actions {
-        width: 100%;
+    .page-lead {
+        font-size: var(--type-ramp-plus-1-font-size);
+        line-height: var(--type-ramp-plus-1-line-height);
+    }
+
+    h2 {
+        font-size: var(--type-ramp-plus-2-font-size);
+        line-height: var(--type-ramp-plus-2-line-height);
+    }
+
+    /* Pointer widths: compact controls, the selector beside the actions it drives. */
+    .node-picker {
+        --base-height-multiplier: 8;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
+    }
+
+    .node-field {
+        flex: 0 1 18rem;
+    }
+
+    .node-actions {
+        grid-auto-flow: column;
+        grid-template-columns: none;
+        justify-content: start;
+        flex: 0 0 auto;
+    }
+
+    .node-actions ::deep .node-action::part(control) {
+        width: auto;
+    }
+
+    .provider {
+        padding: calc(var(--design-unit) * 5px) calc(var(--design-unit) * 6px);
+    }
+
+    /* Name, bar, figure on one line; the reset note tucks under the bar it explains, so
+       the figures down the right edge stay a single tabular column. */
+    .window {
+        grid-template-columns: minmax(7rem, 14rem) minmax(6rem, 1fr) minmax(0, auto);
+        grid-template-areas:
+            "name bar value"
+            "name reset value";
+        align-items: center;
+        column-gap: calc(var(--design-unit) * 4px);
+        row-gap: calc(var(--design-unit) * 1px);
+    }
+
+    .window-name,
+    .window-value {
+        align-self: center;
+    }
+
+    .window-list {
+        gap: calc(var(--design-unit) * 3px);
+    }
+}
+
+@media (min-width: 960px) {
+    .window {
+        grid-template-columns: minmax(9rem, 16rem) minmax(8rem, 1fr) minmax(0, auto);
     }
 }

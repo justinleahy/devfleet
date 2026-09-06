@@ -174,13 +174,23 @@ public class RuntimeCrashRecoveryTests
         gateway.Seed(owned);
         gateway.Seed(other);
         var spool = new RecordingSpool();
-        var recovery = new RuntimeCrashRecovery(gateway, spool, TimeProvider.System);
-
         var projectId = Guid.NewGuid();
+        var requestId = Guid.NewGuid();
+        var credentials = new NodeAssignmentCredentialSource();
+        credentials.Track(new NodeAssignmentCredential(
+            requestId,
+            projectId,
+            "runtime-crash-recovery-test-token"));
+        var recovery = new RuntimeCrashRecovery(
+            gateway,
+            spool,
+            credentials,
+            TimeProvider.System);
+
         await recovery.MarkOwnedLeasesRecoveryRequiredAsync(
             Guid.NewGuid(),
             projectId,
-            Guid.NewGuid(),
+            requestId,
             "child-1",
             "runtime crash",
             CancellationToken.None);
@@ -208,6 +218,10 @@ public class RuntimeCrashRecoveryTests
 
         public Task<IReadOnlyList<NodeEventMessage>> PeekPendingAsync(int max, CancellationToken cancellationToken)
             => Task.FromResult<IReadOnlyList<NodeEventMessage>>(Events);
+
+        public Task<int> CountPendingForRequestAsync(Guid requestId, CancellationToken cancellationToken)
+            => Task.FromResult(Events.Count(e => e.RequestId == requestId));
+
 
         public Task DeleteAsync(IReadOnlyCollection<string> eventIds, CancellationToken cancellationToken)
             => Task.CompletedTask;

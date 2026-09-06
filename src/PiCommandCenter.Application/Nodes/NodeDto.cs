@@ -13,4 +13,5 @@ public sealed record NodeDto(
     NodeStatus Status,
     string CapabilitiesJson,
     long Version,
-    NodeResourceSnapshotDto? Resources = null);
+    NodeResourceSnapshotDto? Resources = null,
+    NodeExecutionStatusDto? ExecutionStatus = null);

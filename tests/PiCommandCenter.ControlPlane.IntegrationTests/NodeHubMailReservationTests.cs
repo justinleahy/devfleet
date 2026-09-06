@@ -7,9 +7,10 @@ using Microsoft.Extensions.DependencyInjection;
 using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Domain;
-using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Projects;
+using PiCommandCenter.Domain.Nodes;
 using PiCommandCenter.Domain.Requests;
+using PiCommandCenter.Domain.Sessions;
 using PiCommandCenter.Infrastructure.Persistence;
 
 namespace PiCommandCenter.ControlPlane.IntegrationTests;
@@ -24,9 +25,10 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
 {
     private readonly ControlPlaneFixture _fixture;
     private readonly HubConnection _connection;
-    private readonly Guid _nodeId = Guid.NewGuid();
+    private readonly Guid _nodeId;
     private Guid _projectId;
     private Guid _requestId;
+    private string _claimToken = null!;
     private readonly string _scope = Guid.NewGuid().ToString("N")[..8];
     private string RootSession => $"session-root-{_scope}";
     private string ChildSession => $"session-child-{_scope}";
@@ -36,7 +38,8 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
     public NodeHubMailReservationTests(ControlPlaneFixture fixture)
     {
         _fixture = fixture;
-        _connection = fixture.CreateNodeHubConnection();
+        _nodeId = fixture.AuthenticatedNodeId;
+        _connection = fixture.CreateNodeHubConnection(_nodeId);
         _connection.StartAsync().GetAwaiter().GetResult();
     }
 
@@ -48,7 +51,7 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
         await SeedAsync();
 
         var delivery = await _connection.InvokeAsync<MailDeliveryMessage>("SendMail", new SendMailMessage(
-            _projectId, _requestId, $"thread-{_requestId:N}", RootSession,
+            _projectId, _requestId, _claimToken, $"thread-{_requestId:N}", RootSession,
             [ChildSession], "Reservation handoff requested", "I need DependencyInjection.cs.",
             MailImportance.High, AckRequired: true));
 
@@ -56,21 +59,24 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
         Assert.Contains(ChildSession, delivery.DeliveredTo);
 
         var inbox = await _connection.InvokeAsync<MailInboxMessage>(
-            "FetchInbox", new FetchMailInboxMessage(_projectId, ChildSession, 50));
+            "FetchInbox", new FetchMailInboxMessage(_projectId, _requestId, _claimToken, ChildSession, 50));
         var message = Assert.Single(inbox.Messages);
         Assert.Equal(RootSession, message.SenderSessionId);
         Assert.Equal(MailImportance.High, message.Importance);
         Assert.True(message.AcknowledgementRequired);
 
         await _connection.InvokeAsync<MailReceiptMessage>(
-            "MarkMailRead", new MarkMailReadMessage(ChildSession, message.MessageId));
+            "MarkMailRead", new MarkMailReadMessage(
+                _projectId, _requestId, _claimToken, ChildSession, message.MessageId));
         var receipt = await _connection.InvokeAsync<MailReceiptMessage>(
-            "AcknowledgeMail", new AcknowledgeMailMessage(ChildSession, message.MessageId));
+            "AcknowledgeMail", new AcknowledgeMailMessage(
+                _projectId, _requestId, _claimToken, ChildSession, message.MessageId));
 
         Assert.Equal(message.MessageId, receipt.MessageId);
         Assert.NotNull(receipt.AcknowledgedAtUtc);
         Assert.Empty((await _connection.InvokeAsync<MailInboxMessage>(
-            "FetchInbox", new FetchMailInboxMessage(_projectId, ChildSession, 50))).Messages);
+            "FetchInbox", new FetchMailInboxMessage(
+                _projectId, _requestId, _claimToken, ChildSession, 50))).Messages);
 
         // Durable: the delivered row lives in the authoritative mail store.
         Assert.Equal(1, CountRows("MailRecipients", "SessionId", ChildSession));
@@ -82,7 +88,7 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
         await SeedAsync();
 
         var granted = await _connection.InvokeAsync<ReservationOperationResultMessage>("AcquireReservation",
-            new AcquireReservationMessage(_projectId, _requestId, SessionA,
+            new AcquireReservationMessage(_projectId, _requestId, _claimToken, SessionA,
                 [new ReservationScopeMessage(0, "File", "src/App/DependencyInjection.cs")], "implement DI"));
         Assert.True(granted.Lease is not null, granted.Error?.Message);
         var grantedLease = granted.Lease!;
@@ -91,13 +97,14 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
         // The owner with a wrong token receives the typed fencing-token error.
         var wrongToken = await _connection.InvokeAsync<MutationAuthorizationResultMessage>("AuthorizeMutation",
             new MutationAuthorizationMessage(
+                _projectId, _requestId, _claimToken,
                 grantedLease.LeaseId, grantedLease.FencingToken + 500, SessionA,
                 "src/App/DependencyInjection.cs", Operation: 1, OperationName: "write"));
         Assert.False(wrongToken.Authorized);
         Assert.Equal(ReservationErrorCodes.InvalidFencingToken, wrongToken.Error!.Code);
 
         var denied = await _connection.InvokeAsync<ReservationOperationResultMessage>("AcquireReservation",
-            new AcquireReservationMessage(_projectId, _requestId, SessionB,
+            new AcquireReservationMessage(_projectId, _requestId, _claimToken, SessionB,
                 [new ReservationScopeMessage(0, "File", "src/App/DependencyInjection.cs")], "same file"));
         Assert.True(denied.Error is not null, "the conflicting acquisition must be denied");
         Assert.Equal(ReservationErrorCodes.Conflict, denied.Error.Code);
@@ -105,13 +112,15 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
 
         // The conflicting request granted nothing.
         var listed = await _connection.InvokeAsync<ReservationLeaseMessage[]>(
-            "ListReservations", new ListReservationsMessage(_projectId, IncludeReleased: false));
+            "ListReservations",
+            new ListReservationsMessage(_projectId, _requestId, _claimToken, IncludeReleased: false));
         var lease = Assert.Single(listed);
         Assert.Equal(grantedLease.LeaseId, lease.LeaseId);
 
         // Atomic handoff through the hub invalidates the old token immediately.
         var handed = await _connection.InvokeAsync<ReservationOperationResultMessage>("TransferReservation",
-            new TransferReservationMessage(lease.LeaseId, SessionA, SessionB));
+            new TransferReservationMessage(
+                _projectId, _requestId, _claimToken, lease.LeaseId, SessionA, SessionB));
         Assert.True(handed.Lease is not null, handed.Error?.Message);
         var handedLease = handed.Lease!;
         Assert.Equal(SessionB, handedLease.OwnerSessionId);
@@ -120,6 +129,7 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
         // A former owner's stale decision is simply unauthorized (ownership is checked first).
         var stale = await _connection.InvokeAsync<MutationAuthorizationResultMessage>("AuthorizeMutation",
             new MutationAuthorizationMessage(
+                _projectId, _requestId, _claimToken,
                 lease.LeaseId, grantedLease.FencingToken, SessionA,
                 "src/App/DependencyInjection.cs", Operation: 1, OperationName: "write"));
         Assert.False(stale.Authorized);
@@ -128,6 +138,7 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
         // The new owner mutates with the fresh token.
         var fresh = await _connection.InvokeAsync<MutationAuthorizationResultMessage>("AuthorizeMutation",
             new MutationAuthorizationMessage(
+                _projectId, _requestId, _claimToken,
                 lease.LeaseId, handedLease.FencingToken, SessionB,
                 "src/App/DependencyInjection.cs", Operation: 2, OperationName: "edit"));
         Assert.True(fresh.Authorized, fresh.Error?.Message);
@@ -141,17 +152,41 @@ public sealed class NodeHubMailReservationTests : IClassFixture<ControlPlaneFixt
         using var scope = _fixture.Factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ControlPlaneDbContext>();
         var now = DateTimeOffset.UtcNow;
-        var node = new NodeId(_nodeId);
         var project = Project.Register(
-            node, "Mail hub project " + Guid.NewGuid().ToString("N")[..6],
-            Path.Combine(Path.GetTempPath(), "pi-cc-integration", Guid.NewGuid().ToString("N")),
+            "Mail hub project " + Guid.NewGuid().ToString("N")[..6],
             "main", enabled: true, maxActiveWriteRequests: 2, maxReadOnlyRequests: 4,
             maxChildAgentsPerRequest: 1, requireCleanStart: false, createRequestBranch: false,
             createRequestCommit: false, autoMerge: false, now);
         var request = WorkRequest.Enqueue(project.Id, WorkRequestKind.Development,
             RequestPriority.Normal, RiskLevel.Standard, "Mail hub request", "Do hub work", now);
+        request.Start(now);
+        var nodeId = new NodeId(_nodeId);
+        var repositoryPath = _fixture.CreateGitRepository();
+        var binding = WorkspaceBinding.Designate(project.Id, nodeId, repositoryPath, now);
+        Assert.True(binding.ApplyValidationResult(
+            nodeId,
+            binding.ValidationRevision,
+            WorkspaceBindingStatus.Valid,
+            WorkspaceBinding.ValidValidationCode,
+            "Seeded for mail hub tests.",
+            repositoryPath,
+            now));
+        _claimToken = "mail-hub-" + Guid.NewGuid().ToString("N");
+        var assignment = ExecutionAssignment.Create(
+            request.Id,
+            project.Id,
+            binding.Id,
+            nodeId,
+            binding.CanonicalRepositoryPath!,
+            project.DefaultBranch,
+            binding.ValidationRevision,
+            _claimToken,
+            now,
+            TimeSpan.FromMinutes(5));
         db.Projects.Add(project);
+        db.WorkspaceBindings.Add(binding);
         db.WorkRequests.Add(request);
+        db.ExecutionAssignments.Add(assignment);
         db.AgentSessions.Add(new AgentSessionRow
         {
             Id = RootSession,

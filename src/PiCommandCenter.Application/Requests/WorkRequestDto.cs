@@ -20,4 +20,6 @@ public sealed record WorkRequestDto(
     string Prompt,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    long Version);
+    long Version,
+    SchedulingStatusDto? SchedulingStatus = null,
+    ExecutionAssignmentProjectionDto? Assignment = null);

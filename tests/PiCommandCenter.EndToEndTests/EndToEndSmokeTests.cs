@@ -31,7 +31,6 @@ public class EndToEndSmokeTests : IClassFixture<EndToEndFixture>
         Assert.Equal("Healthy", healthPayload.Trim());
         Assert.True(homeResponse.IsSuccessStatusCode, html);
         Assert.Contains("DevFleet", html);
-        Assert.Contains("Fleet dashboard", html);
         Assert.Contains("Active projects", html);
         Assert.Contains("Queued requests", html);
     }

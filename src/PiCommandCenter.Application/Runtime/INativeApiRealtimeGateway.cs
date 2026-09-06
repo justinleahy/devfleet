@@ -16,4 +16,14 @@ public interface INativeApiRealtimeGateway
 
     /// <summary>Commands whichever node hosts <paramref name="sessionId"/> to cancel it.</summary>
     Task CancelSessionAsync(string sessionId, string reason, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Best-effort command to cancel a durable assignment on its retained owner. Returns false
+    /// when that node has no live connection or dispatch fails.
+    /// </summary>
+    Task<bool> CancelAssignmentAsync(
+        Guid nodeId,
+        Guid requestId,
+        string reason,
+        CancellationToken cancellationToken);
 }

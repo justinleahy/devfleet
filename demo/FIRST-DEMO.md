@@ -1,6 +1,6 @@
 # First demonstration (web UI)
 
-The SPEC §43 demonstration succeeds only through the web interface. `scripts/demo.sh` starts loopback hosts and registers the fixture **project**. It does **not** complete a request.
+The SPEC §43 demonstration succeeds only through the web interface. `scripts/demo.sh` always starts the loopback Control Plane and registers the fixture **project** as fleet metadata. Only `RUN_REAL_*` mode starts a node, designates a WorkspaceBinding, and requests validation. The script does **not** complete a request.
 
 ## Quota-free (default)
 
@@ -15,7 +15,7 @@ The SPEC §43 demonstration succeeds only through the web interface. `scripts/de
 
    > Add a `/health/details` endpoint, add tests, and update the README. Split the implementation so one agent changes the API and another changes the tests. Require independent review and run the configured test profile.
 
-4. Open the request page. Fake/default mode does not call Pi, Claude, or Antigravity. End-to-end scenarios A–F are covered by `tests/PiCommandCenter.EndToEndTests` with fake runtimes.
+4. Open the request page. Default mode is Control-Plane-only: no node is running, the Project has no WorkspaceBinding, and the request remains queued without calling Pi, Claude, Antigravity, or Muse. End-to-end scenarios A–F are covered separately by `tests/PiCommandCenter.EndToEndTests` with fake runtimes.
 
 ## Full provider pipeline (opt-in quota)
 
@@ -25,7 +25,7 @@ Provider-native login first (`claude`, `agy`). Then:
 RUN_REAL_PI_TESTS=1 RUN_REAL_CLAUDE_TESTS=1 RUN_REAL_ANTIGRAVITY_TESTS=1 ./scripts/demo.sh
 ```
 
-The script still does not mark the request complete. The node may claim the queued work and launch official CLIs. Expected tree:
+After the node registers, the script designates its configured `Node__Id` and the prepared fixture path as the Project's WorkspaceBinding, then requests node-local validation. The script still does not mark the request complete. Once the binding and node are eligible, the node may claim queued work and launch official CLIs. Expected tree:
 
 ```text
 Root Pi
@@ -38,4 +38,4 @@ Then force both implementers onto `src/App/DependencyInjection.cs`: one reservat
 
 ## Smoke
 
-`--smoke` uses a temporary `PI_CC_DATA`, never launches providers, registers the fixture project, and exits. Registration is not demonstration success.
+`--smoke` uses a temporary `PI_CC_DATA`, starts only the Control Plane, registers one metadata-only fixture Project with no WorkspaceBinding, and exits. It never requests node validation or launches providers. Registration is not demonstration success.

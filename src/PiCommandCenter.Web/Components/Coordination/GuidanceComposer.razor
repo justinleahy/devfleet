@@ -12,11 +12,13 @@
 *@
 
 <section class="composer" aria-labelledby="@HeadingId">
-    <h3 id="@HeadingId">Send human guidance</h3>
-    <p class="composer-lead">
-        Guidance is written into the request thread as a high-importance message with no sender
-        session, so every agent sees it as human-originated.
-    </p>
+    <header class="composer-head">
+        <h3 id="@HeadingId">Send human guidance</h3>
+        <p class="composer-lead">
+            Guidance is written into the request thread as a high-importance message with no sender
+            session, so every agent sees it as human-originated.
+        </p>
+    </header>
 
     @if (Targets.Count == 0)
     {
@@ -45,41 +47,46 @@
             </div>
         }
 
-        <FluentSelect TOption="GuidanceTarget"
-                      Label="Recipients"
-                      Items="@Targets"
-                      OptionText="@(target => target.Label)"
-                      OptionValue="@(target => target.Value)"
-                      @bind-Value="_target"
-                      Class="field field-wide" />
+        <div class="composer-fields">
+            <FluentSelect TOption="GuidanceTarget"
+                          Label="Recipients"
+                          Items="@Targets"
+                          OptionText="@(target => target.Label)"
+                          OptionValue="@(target => target.Value)"
+                          @bind-Value="_target"
+                          Class="field field-wide" />
 
-        <FluentTextField @bind-Value="_subject"
-                         Label="Subject"
-                         Required="true"
-                         Class="field field-wide" />
+            <FluentTextField @bind-Value="_subject"
+                             Label="Subject"
+                             Required="true"
+                             Class="field field-wide" />
 
-        <FluentTextArea @bind-Value="_body"
-                        Label="Guidance"
-                        Required="true"
-                        Rows="4"
-                        Placeholder="Stop expanding the reservation and hand src/A.cs to the reviewer."
-                        Class="field field-wide" />
+            <FluentTextArea @bind-Value="_body"
+                            Label="Guidance"
+                            Required="true"
+                            Rows="4"
+                            Placeholder="Stop expanding the reservation and hand src/A.cs to the reviewer."
+                            Class="field field-wide field-body" />
+        </div>
 
-        <FluentCheckbox @bind-Value="_ackRequired"
-                        Label="Require acknowledgement from every recipient" />
+        <div class="confirm-row">
+            <FluentCheckbox @bind-Value="_ackRequired"
+                            Label="Require acknowledgement from every recipient" />
+        </div>
 
-        <FluentStack Orientation="Orientation.Horizontal"
-                     VerticalAlignment="VerticalAlignment.Center"
-                     HorizontalGap="12"
-                     Width="auto">
-            <FluentButton Appearance="Appearance.Accent" OnClick="SendAsync" Loading="@_sending">
+        <div class="composer-actions">
+            <FluentButton Appearance="Appearance.Accent"
+                          OnClick="SendAsync"
+                          Loading="@_sending"
+                          Class="composer-send">
                 Send guidance
             </FluentButton>
-            <span class="composer-note">
-                High importance &middot; thread <span class="mono">@ThreadId</span> &middot;
-                @RecipientSummary()
-            </span>
-        </FluentStack>
+            <p class="composer-note">
+                <span class="composer-note-lead">High importance</span>
+                <span>thread <span class="mono">@ThreadId</span></span>
+                <span>@RecipientSummary()</span>
+            </p>
+        </div>
     }
 </section>
 

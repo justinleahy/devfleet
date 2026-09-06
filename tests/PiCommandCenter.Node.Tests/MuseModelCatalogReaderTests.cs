@@ -7,8 +7,8 @@ namespace PiCommandCenter.Node.Tests;
 
 /// <summary>
 /// Model discovery against an in-memory MSP host: handshake, merge the partial live
-/// <c>model/list</c> with curated native ids, terminate. No session is started and no model quota
-/// is spent.
+/// <c>model/list</c> with curated discovery ids while preserving native evidence, terminate. No
+/// session is started and no model quota is spent.
 /// </summary>
 public sealed class MuseModelCatalogReaderTests
 {
@@ -36,6 +36,7 @@ public sealed class MuseModelCatalogReaderTests
                 "muse/muse-spark-1.3-contributor",
             ],
             result.Models.ToArray());
+        Assert.Equal(["muse/muse-spark-1.3"], result.NativeModels);
 
         var start = Assert.Single(factory.Starts);
         Assert.Equal("/opt/muse/bin/muse", start.Executable);
@@ -79,6 +80,31 @@ public sealed class MuseModelCatalogReaderTests
                 "muse/muse-spark-2.0",
             ],
             result.Models.ToArray());
+        Assert.Equal(
+            ["muse/muse-spark-1.3", "muse/muse-spark-2.0"],
+            result.NativeModels);
+    }
+
+    [Fact]
+    public void Empty_native_catalog_keeps_curated_discovery_models_without_native_evidence()
+    {
+        var response = JsonSerializer.SerializeToElement(new
+        {
+            models = Array.Empty<object>(),
+        });
+
+        var result = MuseModelCatalogReader.Parse(response);
+
+        Assert.Null(result.Error);
+        Assert.Equal(
+            [
+                "muse/muse-spark-1.2",
+                "muse/muse-spark-1.2-contributor",
+                "muse/muse-spark-1.3",
+                "muse/muse-spark-1.3-contributor",
+            ],
+            result.Models);
+        Assert.Empty(result.NativeModels);
     }
 
     [Fact]
@@ -92,6 +118,7 @@ public sealed class MuseModelCatalogReaderTests
 
         Assert.NotNull(result.Error);
         Assert.Empty(result.Models);
+        Assert.Empty(result.NativeModels);
         Assert.True(host.Exited.IsCompleted);
     }
 

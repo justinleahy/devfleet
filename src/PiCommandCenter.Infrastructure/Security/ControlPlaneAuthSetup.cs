@@ -1,11 +1,10 @@
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Hosting;
 
 namespace PiCommandCenter.Infrastructure.Security;
 
 /// <summary>
-/// Explicit first-run setup: writes one admin password hash and one 256-bit node token
-/// to private files. Does not run as a silent default at host startup.
+/// Explicit first-run setup for the administrator password hash.
+/// Node identity and credential provisioning is handled by the local setup script.
 /// </summary>
 public static class ControlPlaneAuthSetup
 {
@@ -21,8 +20,6 @@ public static class ControlPlaneAuthSetup
 
         var admin = new AdminOptions();
         configuration.GetSection(AdminOptions.SectionName).Bind(admin);
-        var node = new NodeAuthenticationOptions();
-        configuration.GetSection(NodeAuthenticationOptions.SectionName).Bind(node);
 
         if (string.IsNullOrWhiteSpace(admin.Username))
         {
@@ -30,12 +27,11 @@ public static class ControlPlaneAuthSetup
         }
 
         var passwordPath = Path.GetFullPath(PrivateFileAccess.ExpandPath(admin.PasswordFile));
-        var tokenPath = Path.GetFullPath(PrivateFileAccess.ExpandPath(node.CredentialFile));
 
-        if (!force && (File.Exists(passwordPath) || File.Exists(tokenPath)))
+        if (!force && File.Exists(passwordPath))
         {
             throw new InvalidOperationException(
-                $"Auth material already exists at '{passwordPath}' or '{tokenPath}'. Re-run with --force to overwrite.");
+                $"Administrator auth material already exists at '{passwordPath}'. Re-run with --force to overwrite.");
         }
 
         var password = adminPassword ?? AuthMaterialLoader.GeneratePassword();
@@ -45,18 +41,14 @@ public static class ControlPlaneAuthSetup
         }
 
         var hash = AuthMaterialLoader.HashPassword(password);
-        var tokenHex = AuthMaterialLoader.GenerateNodeTokenHex();
 
         PrivateFileAccess.WritePrivateFile(passwordPath, hash);
-        PrivateFileAccess.WritePrivateFile(tokenPath, tokenHex);
 
-        return new SetupResult(admin.Username, password, passwordPath, tokenPath, tokenHex);
+        return new SetupResult(admin.Username, password, passwordPath);
     }
 
     public sealed record SetupResult(
         string Username,
         string OneTimePassword,
-        string PasswordFile,
-        string CredentialFile,
-        string NodeTokenHex);
+        string PasswordFile);
 }

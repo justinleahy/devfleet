@@ -20,7 +20,8 @@ public sealed class AgentRuntimeRegistryTests
             new NodeWorkerProcessFactory(),
             new StubHandler(),
             TimeProvider.System,
-            NullLogger<PiRuntimeAdapter>.Instance);
+            NullLogger<PiRuntimeAdapter>.Instance,
+            new Quiescence.RequestAdmissionGate(TimeProvider.System));
         var settings = Path.GetTempFileName();
         File.WriteAllText(settings, "{}");
         var claude = new ClaudeCodeRuntimeAdapter(

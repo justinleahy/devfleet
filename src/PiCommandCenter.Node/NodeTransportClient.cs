@@ -1,13 +1,13 @@
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using PiCommandCenter.Contracts.NodeTransport;
 using PiCommandCenter.Application.Completion;
 using PiCommandCenter.Application.Verification;
+using PiCommandCenter.Contracts.NodeTransport;
+using PiCommandCenter.Domain.Verification;
+using PiCommandCenter.Node.Projects;
 using PiCommandCenter.Node.RuntimeRouting;
 using PiCommandCenter.Node.SubscriptionUsage;
-
-
 
 namespace PiCommandCenter.Node;
 
@@ -24,6 +24,7 @@ public sealed class NodeTransportClient : INodeHubOps
     private readonly INodeRuntimeRoutingStore _routing;
     private readonly IRuntimeModelDiscovery _models;
     private readonly ISubscriptionUsageCache _usage;
+    private readonly IWorkspaceBindingValidator _workspaceBindingValidator;
     private HubConnection? _connection;
     private NodeCredential? _credential;
 
@@ -37,12 +38,16 @@ public sealed class NodeTransportClient : INodeHubOps
     /// </summary>
     public event Func<CancelSessionCommand, Task>? CancelSessionReceived;
 
+    /// <summary>Raised when the Control Plane cancels an assignment owned by this node.</summary>
+    public event Func<CancelAssignmentCommand, Task>? CancelAssignmentReceived;
+
     public NodeTransportClient(
         IOptions<NodeOptions> options,
         NodeCredentialLoader credentials,
         INodeRuntimeRoutingStore routing,
         IRuntimeModelDiscovery models,
         ISubscriptionUsageCache usage,
+        IWorkspaceBindingValidator workspaceBindings,
         ILogger<NodeTransportClient> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -51,11 +56,13 @@ public sealed class NodeTransportClient : INodeHubOps
         ArgumentNullException.ThrowIfNull(routing);
         ArgumentNullException.ThrowIfNull(models);
         ArgumentNullException.ThrowIfNull(usage);
+        ArgumentNullException.ThrowIfNull(workspaceBindings);
         _options = options.Value;
         _credentials = credentials;
         _routing = routing;
         _models = models;
         _usage = usage;
+        _workspaceBindingValidator = workspaceBindings;
         _logger = logger;
     }
 
@@ -68,12 +75,14 @@ public sealed class NodeTransportClient : INodeHubOps
             return;
         }
 
+        var controlPlaneUri = NodeOptionsValidator.CreateControlPlaneUri(_options.ControlPlaneUrl);
         _credential = _credentials.Load();
 
-        var hubUrl = new Uri(new Uri(_options.ControlPlaneUrl), "/nodeHub");
+        var hubUrl = new Uri(controlPlaneUri, "/nodeHub");
         var connection = new HubConnectionBuilder()
             .WithUrl(hubUrl, http =>
             {
+                http.HttpMessageHandlerFactory = DisableAutomaticRedirects;
                 ApplyCredential(http);
             })
             .WithAutomaticReconnect(new BoundedExponentialRetryPolicy(_logger))
@@ -82,6 +91,7 @@ public sealed class NodeTransportClient : INodeHubOps
         connection.Reconnected += OnReconnectedAsync;
         connection.Closed += OnClosedAsync;
         connection.On<CancelSessionCommand>("CancelSession", OnCancelSessionAsync);
+        connection.On<CancelAssignmentCommand>("CancelAssignment", OnCancelAssignmentAsync);
         connection.On<NodeRuntimeConfigurationMessage>(
             "GetRuntimeConfiguration",
             () => Task.FromResult(_routing.Current));
@@ -93,6 +103,9 @@ public sealed class NodeTransportClient : INodeHubOps
             "UpdateRuntimeConfiguration",
             update => _routing.UpdateAsync(update));
 
+        connection.On<WorkspaceBindingValidationRequestMessage, WorkspaceBindingValidationResultMessage>(
+            "ValidateWorkspaceBinding",
+            request => _workspaceBindingValidator.ValidateAsync(request));
         await connection.StartAsync(cancellationToken).ConfigureAwait(false);
         _connection = connection;
 
@@ -136,13 +149,15 @@ public sealed class NodeTransportClient : INodeHubOps
     public async Task HeartbeatAsync(
         IReadOnlyList<string> activeSessionIds,
         NodeResourceSnapshotMessage resources,
+        NodeExecutionStatusMessage executionStatus,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(resources);
+        ArgumentNullException.ThrowIfNull(executionStatus);
         var connection = RequireConnection();
         await connection.InvokeAsync(
             "Heartbeat",
-            new NodeHeartbeatMessage(_options.Id, activeSessionIds, resources),
+            new NodeHeartbeatMessage(_options.Id, activeSessionIds, resources, executionStatus),
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -304,79 +319,191 @@ public sealed class NodeTransportClient : INodeHubOps
     }
 
     /// <summary>Records one verification command run (one-argument hub method).</summary>
-    public async Task<VerificationRunMessage> RecordVerificationAsync(
+    public async Task<VerificationRunResultMessage> RecordVerificationAsync(
         VerificationRunMessage message,
         CancellationToken cancellationToken)
     {
         var connection = RequireConnection();
-        return await connection.InvokeAsync<VerificationRunMessage>(
+        return await connection.InvokeAsync<VerificationRunResultMessage>(
             "RecordVerification",
             message,
             cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Maps an application run DTO onto <see cref="RecordVerificationAsync"/>.</summary>
-    public Task<VerificationRunMessage> RecordVerificationRunAsync(
+    /// <summary>Maps an application run DTO to and from the verification transport contract.</summary>
+    public async Task<VerificationRunDto> RecordVerificationRunAsync(
         VerificationRunDto run,
+        Guid projectId,
+        string claimToken,
+        string sessionId,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(run);
-        return RecordVerificationAsync(
-            new VerificationRunMessage(
-                Guid.NewGuid(),
-                Guid.Empty,
-                run.RequestId,
-                "node",
-                run.Id,
-                run.ProfileId,
-                run.CommandId,
-                (int)run.Status,
-                run.Status.ToString(),
-                run.ExitCode,
-                run.StartedAt,
-                run.CompletedAt,
-                run.OutputSummary,
-                run.OutputArtifactPath,
-                run.Mandatory),
-            cancellationToken);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sessionId);
+        var correlationId = Guid.NewGuid();
+        var result = await RecordVerificationAsync(
+            CreateVerificationRunMessage(run, projectId, claimToken, sessionId, correlationId),
+            cancellationToken).ConfigureAwait(false);
+
+        if (result.CorrelationId != correlationId
+            || result.ProjectId != projectId
+            || result.RequestId != run.RequestId
+            || !string.Equals(result.SessionId, sessionId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                "The verification response does not match the submitted command.");
+        }
+
+        return new VerificationRunDto(
+            result.Id,
+            result.RequestId,
+            result.ProfileId,
+            result.CommandId,
+            (VerificationRunStatus)result.Status,
+            result.ExitCode,
+            result.StartedAt,
+            result.CompletedAt,
+            result.OutputSummary,
+            result.OutputArtifactPath,
+            result.Mandatory);
     }
 
-    /// <summary>Evaluates the objective completion gate (one-argument hub method).</summary>
-    public async Task<CompletionGateDecisionMessage> EvaluateCompletionAsync(
-        EvaluateCompletionMessage message,
+    internal static VerificationRunMessage CreateVerificationRunMessage(
+        VerificationRunDto run,
+        Guid projectId,
+        string claimToken,
+        string sessionId,
+        Guid correlationId)
+    {
+        return new VerificationRunMessage(
+            correlationId,
+            projectId,
+            run.RequestId,
+            claimToken,
+            sessionId,
+            run.Id,
+            run.ProfileId,
+            run.CommandId,
+            (int)run.Status,
+            run.Status.ToString(),
+            run.ExitCode,
+            run.StartedAt,
+            run.CompletedAt,
+            run.OutputSummary,
+            run.OutputArtifactPath,
+            run.Mandatory);
+    }
+
+    /// <summary>First terminalization step (one-argument hub method).</summary>
+    public async Task<CompletionGateDecisionMessage> BeginTerminalizationAsync(
+        BeginTerminalizationMessage message,
         CancellationToken cancellationToken)
     {
         var connection = RequireConnection();
         return await connection.InvokeAsync<CompletionGateDecisionMessage>(
-            "EvaluateCompletion",
+            "BeginTerminalization",
             message,
             cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Maps application evidence onto <see cref="EvaluateCompletionAsync"/>.</summary>
-    public async Task<CompletionGateDecision> EvaluateCompletionAsync(
-        Guid projectId,
-        Guid requestId,
-        string rootSessionId,
-        CompletionEvidence evidence,
+    /// <summary>Second terminalization step (one-argument hub method).</summary>
+    public async Task<CompletionGateDecisionMessage> ConfirmTerminalizationAsync(
+        ConfirmTerminalizationMessage message,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(evidence);
-        var decision = await EvaluateCompletionAsync(
-            new EvaluateCompletionMessage(
-                Guid.NewGuid(),
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<CompletionGateDecisionMessage>(
+            "ConfirmTerminalization",
+            message,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Maps application evidence onto <see cref="BeginTerminalizationAsync(BeginTerminalizationMessage, CancellationToken)"/>.</summary>
+    public async Task<CompletionGateDecision> BeginTerminalizationAsync(
+        Guid projectId,
+        Guid requestId,
+        string claimToken,
+        string rootSessionId,
+        TerminalizationIntent intent,
+        CompletionEvidence? evidence,
+        string? reason,
+        CancellationToken cancellationToken)
+    {
+        var correlationId = Guid.NewGuid();
+        var decision = await BeginTerminalizationAsync(
+            new BeginTerminalizationMessage(
+                correlationId,
                 projectId,
                 requestId,
+                claimToken,
                 rootSessionId,
-                new CompletionEvidenceMessage(
-                    evidence.SummaryMarkdown,
-                    evidence.ChangedFiles,
-                    (evidence.ReviewFindings ?? []).Select(f => new ReviewFindingMessage(
-                        f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
-                    evidence.VerificationSummary,
-                    evidence.RequestBranch,
-                    evidence.CheckpointCommitId)),
+                intent,
+                MapEvidence(evidence),
+                reason),
             cancellationToken).ConfigureAwait(false);
+        return MapDecision(correlationId, decision);
+    }
+
+    /// <summary>Maps application evidence and the quiescence proof onto <see cref="ConfirmTerminalizationAsync(ConfirmTerminalizationMessage, CancellationToken)"/>.</summary>
+    public async Task<CompletionGateDecision> ConfirmTerminalizationAsync(
+        Guid projectId,
+        Guid requestId,
+        string claimToken,
+        string rootSessionId,
+        TerminalizationIntent intent,
+        CompletionEvidence? evidence,
+        string? reason,
+        AssignmentQuiescenceProof proof,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(proof);
+        var correlationId = Guid.NewGuid();
+        var decision = await ConfirmTerminalizationAsync(
+            new ConfirmTerminalizationMessage(
+                correlationId,
+                projectId,
+                requestId,
+                claimToken,
+                rootSessionId,
+                intent,
+                MapEvidence(evidence),
+                reason,
+                new AssignmentQuiescenceProofMessage(
+                    proof.AdmissionClosed,
+                    proof.ActiveChildren,
+                    proof.ActiveOperations,
+                    proof.ActiveProcesses,
+                    proof.PendingEvents,
+                    proof.ActiveReservations,
+                    proof.RepositoryInspected,
+                    proof.ObservedAt)),
+            cancellationToken).ConfigureAwait(false);
+        return MapDecision(correlationId, decision);
+    }
+
+    private static CompletionEvidenceMessage? MapEvidence(CompletionEvidence? evidence)
+        => evidence is null
+            ? null
+            : new CompletionEvidenceMessage(
+                evidence.SummaryMarkdown,
+                evidence.ChangedFiles,
+                (evidence.ReviewFindings ?? []).Select(f => new ReviewFindingMessage(
+                    f.Id, f.Summary, f.Blocking, f.Resolved, f.UserOverridden)).ToArray(),
+                evidence.VerificationSummary,
+                evidence.RequestBranch,
+                evidence.CheckpointCommitId);
+
+    /// <summary>Fails closed when the authority's decision does not echo the submitted fence.</summary>
+    private static CompletionGateDecision MapDecision(
+        Guid correlationId,
+        CompletionGateDecisionMessage decision)
+    {
+        ArgumentNullException.ThrowIfNull(decision);
+        if (decision.CorrelationId != correlationId)
+        {
+            throw new InvalidOperationException(
+                "The terminalization decision does not match the submitted command.");
+        }
 
         return new CompletionGateDecision(
             decision.Accepted,
@@ -395,7 +522,6 @@ public sealed class NodeTransportClient : INodeHubOps
                     decision.Result.CheckpointCommitId));
     }
 
-
     private async Task<ReservationOperationResultMessage> InvokeReservationAsync<TMessage>(
         string methodName,
         TMessage message,
@@ -408,30 +534,46 @@ public sealed class NodeTransportClient : INodeHubOps
             cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RequestClaimMessage?> ClaimNextAsync(int leaseSeconds, CancellationToken cancellationToken)
+    public async Task<ReconcileAssignmentsResultMessage> ReconcileAssignmentsAsync(
+        IReadOnlyList<ExecutionAssignmentInventoryItemMessage> assignments,
+        CancellationToken cancellationToken)
     {
         var connection = RequireConnection();
-        return await connection.InvokeAsync<RequestClaimMessage?>(
+        return await connection.InvokeAsync<ReconcileAssignmentsResultMessage>(
+            "ReconcileAssignments",
+            new ReconcileAssignmentsMessage(
+                _options.Id,
+                _options.ClaimLeaseSeconds,
+                assignments),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<ExecutionAssignmentMessage?> ClaimNextAsync(
+        int leaseSeconds,
+        CancellationToken cancellationToken)
+    {
+        var connection = RequireConnection();
+        return await connection.InvokeAsync<ExecutionAssignmentMessage?>(
             "ClaimNext",
             new ClaimRequestMessage(_options.Id, leaseSeconds),
             cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Renews an active claim. Returns the new lease expiry, or null when the claim
+    /// Renews an active assignment. Returns the new lease expiry, or null when the assignment
     /// is unknown, expired, or held by another node.
     /// </summary>
-    public async Task<DateTimeOffset?> RenewClaimAsync(
-        RequestClaimMessage claim,
+    public async Task<DateTimeOffset?> RenewAssignmentAsync(
+        ExecutionAssignmentMessage assignment,
         CancellationToken cancellationToken)
     {
         var connection = RequireConnection();
         return await connection.InvokeAsync<DateTimeOffset?>(
             "RenewClaim",
             new ClaimRenewalMessage(
-                claim.RequestId,
-                claim.NodeId,
-                claim.ClaimToken,
+                assignment.RequestId,
+                assignment.NodeIdSnapshot,
+                assignment.ClaimToken,
                 _options.ClaimLeaseSeconds),
             cancellationToken).ConfigureAwait(false);
     }
@@ -464,6 +606,29 @@ public sealed class NodeTransportClient : INodeHubOps
         catch (Exception ex)
         {
             _logger.LogError(ex, "CancelSession handler failed for {SessionId}.", command.SessionId);
+        }
+    }
+
+    private async Task OnCancelAssignmentAsync(CancelAssignmentCommand command)
+    {
+        if (CancelAssignmentReceived is not { } handler)
+        {
+            _logger.LogWarning(
+                "CancelAssignment for {RequestId} received but no worker subscribed; assignment remains active.",
+                command.RequestId);
+            return;
+        }
+
+        try
+        {
+            await handler(command).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            _logger.LogError(
+                exception,
+                "CancelAssignment handler failed for {RequestId}.",
+                command.RequestId);
         }
     }
 
@@ -514,6 +679,31 @@ public sealed class NodeTransportClient : INodeHubOps
         return _connection ?? throw new InvalidOperationException(
             "The node transport is not connected; call StartAsync first.");
     }
+    internal static HttpMessageHandler DisableAutomaticRedirects(HttpMessageHandler handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        var current = handler;
+
+        while (true)
+        {
+            switch (current)
+            {
+                case HttpClientHandler httpClientHandler:
+                    httpClientHandler.AllowAutoRedirect = false;
+                    return handler;
+                case SocketsHttpHandler socketsHttpHandler:
+                    socketsHttpHandler.AllowAutoRedirect = false;
+                    return handler;
+                case DelegatingHandler { InnerHandler: { } innerHandler }:
+                    current = innerHandler;
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        "The SignalR HTTP handler does not expose automatic redirect configuration.");
+            }
+        }
+    }
+
     private void ApplyCredential(Microsoft.AspNetCore.Http.Connections.Client.HttpConnectionOptions http)
     {
         var credential = _credential ?? throw new InvalidOperationException("Node credential was not loaded.");

@@ -125,13 +125,13 @@ public sealed class AuthenticationTests : IClassFixture<ControlPlaneFixture>
 
         var response = await client.PostAsJsonAsync(
             "/api/projects",
-            new { displayName = "no-csrf", repositoryPath = "/tmp", defaultBranch = "main" });
+            new { displayName = "no-csrf", defaultBranch = "main" });
 
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
     [Fact]
-    public async Task Wrong_node_token_is_unauthorized_and_correct_token_connects()
+    public async Task Wrong_node_token_is_unauthorized_and_each_per_node_token_connects()
     {
         _ = _fixture.Factory.CreateClient();
         await using var wrong = new HubConnectionBuilder()
@@ -146,24 +146,40 @@ public sealed class AuthenticationTests : IClassFixture<ControlPlaneFixture>
         var wrongEx = await Assert.ThrowsAnyAsync<Exception>(() => wrong.StartAsync());
         Assert.Contains("401", wrongEx.Message + wrongEx.InnerException?.Message, StringComparison.Ordinal);
 
-        await using var right = _fixture.CreateNodeHubConnection();
-        await right.StartAsync();
-        Assert.Equal(HubConnectionState.Connected, right.State);
+        await using var primary = _fixture.CreateNodeHubConnection();
+        await primary.StartAsync();
+        Assert.Equal(HubConnectionState.Connected, primary.State);
+
+        await using var secondary = _fixture.CreateNodeHubConnection(_fixture.SecondaryNodeId);
+        await secondary.StartAsync();
+        Assert.Equal(HubConnectionState.Connected, secondary.State);
     }
 
     [Fact]
-    public void Auth_files_are_owner_only()
+    public void Auth_files_and_credential_directory_are_owner_only()
     {
+        Assert.Equal($"{_fixture.AuthenticatedNodeId:D}.token", Path.GetFileName(_fixture.NodeCredentialFile));
+        Assert.Equal($"{_fixture.SecondaryNodeId:D}.token", Path.GetFileName(_fixture.SecondaryNodeCredentialFile));
+        Assert.Equal(64, new FileInfo(_fixture.NodeCredentialFile).Length);
+        Assert.Equal(64, new FileInfo(_fixture.SecondaryNodeCredentialFile).Length);
+
         if (OperatingSystem.IsWindows())
         {
             return;
         }
 
         var passwordMode = File.GetUnixFileMode(_fixture.PasswordFile);
-        var tokenMode = File.GetUnixFileMode(_fixture.CredentialFile);
-        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, passwordMode);
-        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, tokenMode);
+        var credentialDirectoryMode = File.GetUnixFileMode(_fixture.CredentialDirectory);
+        var nodeTokenMode = File.GetUnixFileMode(_fixture.NodeCredentialFile);
+        var secondaryNodeTokenMode = File.GetUnixFileMode(_fixture.SecondaryNodeCredentialFile);
         var keysMode = File.GetUnixFileMode(_fixture.DataProtectionKeysDirectory);
+
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, passwordMode);
+        Assert.Equal(
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+            credentialDirectoryMode);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, nodeTokenMode);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, secondaryNodeTokenMode);
         Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, keysMode);
     }
 
@@ -181,7 +197,10 @@ public sealed class AuthenticationTests : IClassFixture<ControlPlaneFixture>
         var response = await client.PostAsync("/account/login", body);
         var text = await response.Content.ReadAsStringAsync();
         Assert.DoesNotContain(AuthTestMaterial.Password, text, StringComparison.Ordinal);
-        Assert.DoesNotContain(AuthTestMaterial.NodeTokenHex, text, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain(AuthTestMaterial.NodeTokenHex, response.Headers.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.False(text.Contains(_fixture.NodeTokenHex, StringComparison.OrdinalIgnoreCase));
+        Assert.False(text.Contains(_fixture.SecondaryNodeTokenHex, StringComparison.OrdinalIgnoreCase));
+        var headers = response.Headers.ToString();
+        Assert.False(headers.Contains(_fixture.NodeTokenHex, StringComparison.OrdinalIgnoreCase));
+        Assert.False(headers.Contains(_fixture.SecondaryNodeTokenHex, StringComparison.OrdinalIgnoreCase));
     }
 }

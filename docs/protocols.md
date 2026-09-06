@@ -74,17 +74,20 @@ Turn notifications from the host are normalized into the shared event contract (
 
 ## SignalR node hub (`/nodeHub`)
 
-Outbound from the node (`Node:ControlPlaneUrl` + `/nodeHub`, default `http://127.0.0.1:5057/nodeHub`). Authenticated with the application-generated node credential (never logged or returned). Reconnect: exponential backoff capped at 30 seconds; re-`Register` on every connection.
+Outbound from the node (`Node:ControlPlaneUrl` + `/nodeHub`, default `http://127.0.0.1:5057/nodeHub`). Plain HTTP is permitted only when the endpoint is positively verified as loopback; this is the explicit local-development exception. Every non-loopback connection uses HTTPS/WSS with normal certificate-chain and hostname validation. The node rejects plaintext remote URLs, TLS-to-HTTP downgrade redirects, and certificate-validation bypasses before sending its authentication credential or assignment data.
+
+Each node has a distinct, manually provisioned credential whose authenticated principal contains its stable `NodeId`. Credential distribution is not a hub operation. `Register` does not choose identity: any identity metadata must agree with the principal, the connection is bound to the principal's `NodeId` for its lifetime, and every later hub operation derives node identity from the connection rather than trusting a DTO body field. A credential shared by the fleet plus a caller-supplied `NodeId` is not multi-node authentication. Replacing a connection for one node changes neither assignment ownership nor writer authority.
 
 Hub methods (one-argument DTOs in `PiCommandCenter.Contracts.NodeTransport`):
 
 | Hub method | Request DTO | Result |
 |---|---|---|
-| `Register` | `NodeRegistrationMessage` (`NodeId`, `DisplayName`, `AgentVersion`, `CapabilitiesJson`) | `NodeDto` |
-| `Heartbeat` | `NodeHeartbeatMessage` (`NodeId`, `ActiveSessionIds`, optional `Resources`) | `NodeDto` (`Resources` echoed from latest stored snapshot) |
-| `ClaimNext` | `ClaimRequestMessage` | `RequestClaimMessage?` |
-| `RenewClaim` | `ClaimRenewalMessage` | `DateTimeOffset` |
-| `PublishEvents` | `NodeEventBatchMessage` | `NodeEventAcknowledgementMessage` |
+| `Register` | `NodeRegistrationMessage` (display name, agent version, capabilities, typed execution status; identity is connection-derived) | `NodeDto` |
+| `Heartbeat` | `NodeHeartbeatMessage` (active assigned session ids, optional `Resources`, typed execution status; identity is connection-derived) | `NodeDto` (`Resources` echoed from latest stored snapshot) |
+| `ReconcileAssignments` | Durable local assignment inventory (assignment id, token, binding revision, process and repository status) | Per-assignment continue, renew, cancel, or `RecoveryRequired` decisions |
+| `ClaimNext` | `ClaimRequestMessage` (lease request; identity is connection-derived) | `ExecutionAssignmentMessage?` with assignment id, workspace binding id/revision, immutable canonical path/default-branch snapshot, token, and lease |
+| `RenewClaim` | `ClaimRenewalMessage` (assignment/request id, claim token, requested lease) | `DateTimeOffset` |
+| `PublishEvents` | `NodeEventBatchMessage` (assignment-authorized events) | `NodeEventAcknowledgementMessage` |
 | `SendMail` / `ReplyMail` | `SendMailMessage` / `ReplyMailMessage` | `MailDeliveryMessage` |
 | `FetchInbox` / `FetchThread` | `FetchMailInboxMessage` / `FetchMailThreadMessage` | `MailInboxMessage` |
 | `MarkMailRead` / `AcknowledgeMail` | `MarkMailReadMessage` / `AcknowledgeMailMessage` | `MailReceiptMessage` |
@@ -99,17 +102,41 @@ Hub methods (one-argument DTOs in `PiCommandCenter.Contracts.NodeTransport`):
 | `EvaluateCompletion` | `EvaluateCompletionMessage` | `CompletionGateDecisionMessage` |
 
 
+Server-to-node `CancelAssignmentCommand` targets the retained assignment by request id. It is
+best-effort only: the control plane commits the request and assignment as `Cancelling` first.
+`ReconcileAssignments` returns the `Cancel` disposition for an owner's matching durable inventory
+even when that inventory still reports the pre-disconnect running state. The node journals the
+authoritative `Cancelling` snapshot before stopping the root and invokes the same quiescence
+terminalizer used by live cancellation; it never resumes or reclaims that request.
+
+An assignment claim is an atomic scheduling decision, not discovery of a path. The control plane rechecks the current binding revision, authenticated node, fresh execution readiness, capacity, project policy, concurrency, request state, and absence of an existing assignment before it commits the assignment and moves the request to `Starting`. The node persists the returned assignment identity and token before launching work.
+
+Before `ClaimNext` after any connection or control-plane restart, the node reconciles its owner-only durable assignment inventory. Disconnect or heartbeat/lease expiry changes liveness and may require reconciliation; it never releases an assignment or authorizes another node to claim the request. A terminal, failed, or cancelled assignment remains the durable placement and authorship record.
+
+The initial phase has at most one designated WorkspaceBinding per Project and no repository mobility. Another node's checkout is not interchangeable and does not become eligible because it has the same project id or path text.
+
 `Heartbeat` is not session-ids-only. `NodeHeartbeatMessage.Resources` is a `NodeResourceSnapshotMessage`: required UTC `ObservedAt`; nullable `CpuUsagePercent`, `MemoryUsedBytes`, `MemoryTotalBytes`, `DiskUsedBytes`, `DiskTotalBytes`, `LoadAverageOneMinute`, `UptimeSeconds`. The node fills it from `INodeSystemResourceMonitor.Capture()` on the existing `Node:HeartbeatSeconds` tick (no extra poll). First CPU sample is `null`. Hub maps the snapshot onto `NodeResourceSnapshotDto`; `NodeRegistry` validates (`ObservedAt` offset zero; CPU finite in `[0, 100]` or null; load/uptime finite ≥ 0 or null; byte used ≥ 0, total > 0, and `used ≤ total` when both set) and stores **latest JSON only** on `FleetNode.ResourceSnapshotJson`. Invalid snapshots fail the heartbeat; omitted `Resources` persists null. Application `NodeDto.Resources` is the same shape. Sampling semantics: [research/node-system-resource-monitoring.md](research/node-system-resource-monitoring.md).
 
+`NodeExecutionStatusMessage` is separate from resource telemetry. It reports available request slots; active and recovering assignment ids; and per-route adapter-observed runtime and authentication readiness (`Ready`, `Unavailable`, or `Unknown`) with a stable evidence source, UTC observation time, and routing revision. Only fresh `Ready` observations are schedulable. Executable presence, catalog membership, static model aliases, and credential-file presence are not authentication evidence; unsupported, stale, or unknown observations fail closed. Provider credentials, credential contents, and raw provider output never appear in registration, heartbeat, callbacks, or other SignalR payloads.
 
-Hub methods are **node → control plane**. Subscription usage and role routing are the reverse: the hub **invokes client callbacks** on the connected node (no hub methods of the same names).
+These are SignalR transport additions. The TypeScript Pi worker NDJSON protocol remains version 1.
+
+
+Hub methods are **node → control plane**. Node-local usage, runtime routing, discovery, and workspace validation are the reverse: the hub **invokes client callbacks** on the authenticated connected node (no hub methods of the same names).
 
 | Client callback | Arguments | Result |
 |---|---|---|
-| `GetSubscriptionUsage` | none | `NodeSubscriptionUsageMessage` (`NodeId`, `Providers`) |
-| `GetRuntimeConfiguration` | none | `NodeRuntimeConfigurationMessage` (`NodeId`, `AllowedRoles`, `RoleRoutes[]{Role, Candidates[]{Model}}`) |
+| `GetSubscriptionUsage` | none | `NodeSubscriptionUsageMessage` (`Providers`) |
+| `GetRuntimeConfiguration` | none | `NodeRuntimeConfigurationMessage` (`AllowedRoles`, `RoleRoutes[]{Role, Candidates[]{Model}}`) |
 | `DiscoverRuntimeModels` | none | `RuntimeModelCatalogMessage[]` (`Provider`, `Models[]{Id, DisplayName, Provider}`, `Error`) |
 | `UpdateRuntimeConfiguration` | `UpdateNodeRuntimeConfigurationMessage` (`RoleRoutes`) | `NodeRuntimeConfigurationMessage` |
+| `ValidateWorkspaceBinding` | `WorkspaceBindingValidationRequestMessage` (`BindingId`, `ProjectId`, `Revision`, node-local path, default branch) | Canonical path plus structured bounded validation status/code/detail for the same revision |
+
+`ValidateWorkspaceBinding` is invoked only on the connection authenticated as the binding's node. The node applies its own `Projects:ApprovedRoots` and filesystem/Git checks. The control plane accepts a result only for the requested binding, authenticated node, and still-current revision; stale or cross-node results fail closed. `ApprovedRoots` is node configuration because the path namespace and checkout exist on that node, not on the control plane.
+
+Every event and control for assigned work is authorized against the retained `ExecutionAssignment`: authenticated connection `NodeId`, assignment id and token, workspace binding revision, session, request, and project must agree. This gate covers renewal, event publication, heartbeat session membership, reservations, mutation authorization, verification, completion, mail, cancellation, repository/Git operations, and creation of root or child sessions. Cancellation routes directly to the assigned node or an assignment-gated session group; a heartbeat cannot subscribe a node to a foreign session.
+
+Terminal assignments may acknowledge duplicate event ids and accept bounded final/history events from their recorded sessions, but historical ingestion never reopens execution or authorizes mutations, new sessions, reservations, Git, or verification. Completion, failure, and cancellation release writer ownership only after assignment-bound quiescence is proven; expiry alone never does.
 
 `Model` is always a canonical `<provider>/<model>` selector whose prefix is lowercase ASCII alphanumeric with interior hyphens (e.g. `codex/default`, `claude-code/default`, `zai/glm-4.7`); the prefix `pi` is rejected because Pi is a runtime, not a provider. There are no runtime profiles on the wire; the prefix alone selects the adapter — the reserved prefixes `claude-code`, `antigravity`, and `muse` pick their official-harness adapters and every other valid prefix runs through Pi — and the `muse` and `antigravity` adapters are read-only regardless of route position. The node rejects an update naming a role outside `AllowedRoles`, a non-canonical or duplicate candidate, or more than 16 candidates for one role, and answers with the persisted normalized routes on success.
 
@@ -155,6 +182,6 @@ Reservation errors are in-band (`ReservationErrorCodes`: `conflict`, `not_found`
 
 ### Event message
 
-`NodeEventMessage`: `EventId`, `NodeId`, `ProjectId`, `RequestId?`, `SessionId?`, `Sequence`, `Type`, `OccurredAt`, `PayloadJson`.
+`NodeEventMessage`: `EventId`, `ExecutionAssignmentId`, `ProjectId`, `RequestId`, `SessionId?`, `Sequence`, `Type`, `OccurredAt`, `PayloadJson`. The authenticated connection supplies node authorship; the retained assignment supplies placement and validates every correlation.
 
-Spool replay after reconnect: inventory + snapshots + unacked events in order; delete only after acknowledgement.
+After reconnect, the node first submits its durable assignment inventory for reconciliation, then replays inventory snapshots and unacknowledged events in order. Events are deleted from the local spool only after acknowledgement. Reconciliation and replay precede new claims.

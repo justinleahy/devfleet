@@ -11,6 +11,7 @@
 <PageTitle>Access denied &middot; DevFleet</PageTitle>
 
 <div class="denied-head">
+    <span class="denied-eyebrow">Authorization</span>
     <h1>Access denied</h1>
     <p class="denied-lead">
         This session is signed in, but it is not the control-plane administrator. The
@@ -21,9 +22,10 @@
 
 <AuthorizeView>
     <Authorized>
-        <p class="denied-identity">
-            Signed in as <strong>@context.User.Identity?.Name</strong>.
-        </p>
+        <div class="denied-identity">
+            <span class="denied-identity-label">Signed in as</span>
+            <strong class="denied-identity-value">@context.User.Identity?.Name</strong>
+        </div>
     </Authorized>
 </AuthorizeView>
 

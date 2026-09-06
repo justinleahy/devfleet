@@ -8,7 +8,9 @@ namespace PiCommandCenter.Infrastructure.Requests;
 
 /// <summary>
 /// Reduces appended node events onto <see cref="WorkRequest"/> status. Catch-up is
-/// idempotent and forward-only so out-of-order delivery cannot regress or throw.
+/// idempotent and forward-only so out-of-order delivery cannot regress or throw. Terminal
+/// outcomes are never inferred here: request.completed/failed/cancelled remain history only;
+/// only the terminalization authority terminalizes a request.
 /// </summary>
 public static class WorkRequestProjector
 {
@@ -42,21 +44,6 @@ public static class WorkRequestProjector
     internal static WorkRequestStatus? InferTarget(NodeEventDto nodeEvent)
     {
         var type = nodeEvent.Type;
-        if (string.Equals(type, "request.completed", StringComparison.OrdinalIgnoreCase))
-        {
-            return WorkRequestStatus.Completed;
-        }
-
-        if (string.Equals(type, "request.failed", StringComparison.OrdinalIgnoreCase))
-        {
-            return WorkRequestStatus.Failed;
-        }
-
-        if (string.Equals(type, "request.cancelled", StringComparison.OrdinalIgnoreCase))
-        {
-            return WorkRequestStatus.Cancelled;
-        }
-
         if (string.Equals(type, "request.blocked", StringComparison.OrdinalIgnoreCase))
         {
             return WorkRequestStatus.Blocked;

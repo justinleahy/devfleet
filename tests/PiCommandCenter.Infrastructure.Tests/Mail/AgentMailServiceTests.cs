@@ -40,7 +40,7 @@ public class AgentMailServiceTests : IDisposable
     {
         var db = CreateContext();
         var node = TestNodes.SeedNode(db, TestNodes.NewNodeId(), _clock);
-        var project = TestNodes.SeedProject(db, new NodeId(node.Id.Value), _clock);
+        var project = TestNodes.SeedProject(db, _clock);
         var request = TestNodes.SeedRequest(db, project, _clock);
         _projectId = project.Id.Value;
         _requestId = request.Id.Value;
@@ -292,7 +292,7 @@ public class AgentMailServiceTests : IDisposable
         Assert.Equal(allocated.AgentName, again.AgentName);
 
         // The same name is fine in a different project (uniqueness is project-scoped).
-        var otherProject = TestNodes.SeedProject(world.Db, TestNodes.NewNodeId(), _clock);
+        var otherProject = TestNodes.SeedProject(world.Db, _clock);
         await TestNodes.SaveAsync(world.Db);
         var elsewhere = await world.Identity.AllocateAsync(new AllocateAgentIdentityCommand(
             otherProject.Id, "session-other", "tester", "implementer", "pi"));

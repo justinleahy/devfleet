@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using PiCommandCenter.Contracts.NodeTransport;
 
 namespace PiCommandCenter.Node.Child;
@@ -8,52 +9,109 @@ namespace PiCommandCenter.Node.Child;
 /// </summary>
 public sealed class NodeTransportReservationGateway : INodeReservationGateway
 {
-    private readonly NodeTransportClient _transport;
+    private readonly INodeReservationTransport _transport;
+    private readonly INodeAssignmentCredentialSource _credentials;
+    private readonly ConcurrentDictionary<Guid, NodeAssignmentCredential> _leaseCredentials = new();
 
-    public NodeTransportReservationGateway(NodeTransportClient transport)
+    public NodeTransportReservationGateway(
+        NodeTransportClient transport,
+        INodeAssignmentCredentialSource credentials)
+        : this(new NodeReservationTransport(transport), credentials)
     {
-        _transport = transport ?? throw new ArgumentNullException(nameof(transport));
     }
 
-    public Task<ReservationOperationResult> AcquireAsync(
+    internal NodeTransportReservationGateway(
+        INodeReservationTransport transport,
+        INodeAssignmentCredentialSource credentials)
+    {
+        _transport = transport ?? throw new ArgumentNullException(nameof(transport));
+        _credentials = credentials ?? throw new ArgumentNullException(nameof(credentials));
+    }
+
+    public async Task<ReservationOperationResult> AcquireAsync(
         Guid projectId,
         Guid requestId,
         string ownerSessionId,
         IReadOnlyList<ReservationScopeSpec> scopes,
         string reason,
         CancellationToken cancellationToken)
-        => InvokeAsync(_transport.AcquireReservationAsync(
+    {
+        var credential = GetRequestCredential(requestId, projectId);
+        var result = await _transport.AcquireReservationAsync(
             new AcquireReservationMessage(
-                projectId, requestId, ownerSessionId, ToScopes(scopes), reason),
-            cancellationToken));
+                credential.ProjectId,
+                credential.RequestId,
+                credential.ClaimToken,
+                ownerSessionId,
+                ToScopes(scopes),
+                reason),
+            cancellationToken).ConfigureAwait(false);
+        if (result.Error is null)
+        {
+            CacheLease(result.Lease, credential);
+        }
 
-    public Task<ReservationOperationResult> ExpandAsync(
+        return ToResult(result);
+    }
+
+    public async Task<ReservationOperationResult> ExpandAsync(
         Guid leaseId,
         Guid projectId,
         long fencingToken,
         string sessionId,
         IReadOnlyList<ReservationScopeSpec> scopes,
         CancellationToken cancellationToken)
-        => InvokeAsync(_transport.ExpandReservationAsync(
+    {
+        var credential = GetProjectCredential(projectId);
+        var result = await _transport.ExpandReservationAsync(
             new ExpandReservationMessage(
-                leaseId, fencingToken, sessionId, ToScopes(scopes)),
-            cancellationToken));
+                credential.ProjectId,
+                credential.RequestId,
+                credential.ClaimToken,
+                leaseId,
+                fencingToken,
+                sessionId,
+                ToScopes(scopes)),
+            cancellationToken).ConfigureAwait(false);
+        return ToResult(result);
+    }
 
-    public Task<ReservationOperationResult> ReleaseAsync(
+    public async Task<ReservationOperationResult> ReleaseAsync(
         Guid leaseId,
         Guid projectId,
         string sessionId,
         CancellationToken cancellationToken)
-        => InvokeAsync(_transport.ReleaseReservationAsync(
-            new ReleaseReservationMessage(leaseId, sessionId), cancellationToken));
+    {
+        var credential = GetProjectCredential(projectId);
+        var result = await _transport.ReleaseReservationAsync(
+            new ReleaseReservationMessage(
+                credential.ProjectId,
+                credential.RequestId,
+                credential.ClaimToken,
+                leaseId,
+                sessionId),
+            cancellationToken).ConfigureAwait(false);
+        return ToResult(result);
+    }
 
-    public Task<ReservationOperationResult> TransferAsync(
+    public async Task<ReservationOperationResult> TransferAsync(
         Guid leaseId,
         string fromSessionId,
         string toSessionId,
         CancellationToken cancellationToken)
-        => InvokeAsync(_transport.TransferReservationAsync(
-            new TransferReservationMessage(leaseId, fromSessionId, toSessionId), cancellationToken));
+    {
+        var credential = GetLeaseCredential(leaseId);
+        var result = await _transport.TransferReservationAsync(
+            new TransferReservationMessage(
+                credential.ProjectId,
+                credential.RequestId,
+                credential.ClaimToken,
+                leaseId,
+                fromSessionId,
+                toSessionId),
+            cancellationToken).ConfigureAwait(false);
+        return ToResult(result);
+    }
 
     public async Task<ReservationOperationResult> RenewAsync(
         Guid leaseId,
@@ -61,12 +119,17 @@ public sealed class NodeTransportReservationGateway : INodeReservationGateway
         string sessionId,
         CancellationToken cancellationToken)
     {
+        var credential = GetLeaseCredential(leaseId);
         var result = await _transport.RenewReservationAsync(
-            new ReservationMutationMessage(leaseId, fencingToken, sessionId), cancellationToken)
-            .ConfigureAwait(false);
-        return new ReservationOperationResult(
-            result.Lease is null ? null : ToLease(result.Lease),
-            result.Error is null ? null : new GatewayError(result.Error.Code, result.Error.Message));
+            new ReservationMutationMessage(
+                credential.ProjectId,
+                credential.RequestId,
+                credential.ClaimToken,
+                leaseId,
+                fencingToken,
+                sessionId),
+            cancellationToken).ConfigureAwait(false);
+        return ToResult(result);
     }
 
     public async Task<MutationAuthorizationResult> AuthorizeAsync(
@@ -77,10 +140,19 @@ public sealed class NodeTransportReservationGateway : INodeReservationGateway
         string operation,
         CancellationToken cancellationToken)
     {
+        var credential = GetLeaseCredential(leaseId);
         var (code, name) = ToOperation(operation);
         var result = await _transport.AuthorizeMutationAsync(
             new MutationAuthorizationMessage(
-                leaseId, fencingToken, sessionId, targetPath, code, name),
+                credential.ProjectId,
+                credential.RequestId,
+                credential.ClaimToken,
+                leaseId,
+                fencingToken,
+                sessionId,
+                targetPath,
+                code,
+                name),
             cancellationToken).ConfigureAwait(false);
         return new MutationAuthorizationResult(
             result.Authorized,
@@ -92,18 +164,38 @@ public sealed class NodeTransportReservationGateway : INodeReservationGateway
         bool includeReleased,
         CancellationToken cancellationToken)
     {
+        var credential = GetProjectCredential(projectId);
         var leases = await _transport.ListReservationsAsync(
-            new ListReservationsMessage(projectId, includeReleased),
+            new ListReservationsMessage(
+                credential.ProjectId,
+                credential.RequestId,
+                credential.ClaimToken,
+                includeReleased),
             cancellationToken).ConfigureAwait(false);
+        foreach (var lease in leases)
+        {
+            CacheLease(lease, credential);
+        }
+
         return [.. leases.Select(ToLease)];
     }
 
-    public Task<ReservationOperationResult> MarkRecoveryRequiredAsync(
+    public async Task<ReservationOperationResult> MarkRecoveryRequiredAsync(
         Guid leaseId,
         string reason,
         CancellationToken cancellationToken)
-        => InvokeAsync(_transport.MarkRecoveryRequiredAsync(
-            new MarkRecoveryMessage(leaseId, reason), cancellationToken));
+    {
+        var credential = GetLeaseCredential(leaseId);
+        var result = await _transport.MarkRecoveryRequiredAsync(
+            new MarkRecoveryMessage(
+                credential.ProjectId,
+                credential.RequestId,
+                credential.ClaimToken,
+                leaseId,
+                reason),
+            cancellationToken).ConfigureAwait(false);
+        return ToResult(result);
+    }
 
     private static ReservationScopeMessage[] ToScopes(IReadOnlyList<ReservationScopeSpec> scopes)
         => [.. scopes.Select(s => new ReservationScopeMessage(
@@ -128,14 +220,56 @@ public sealed class NodeTransportReservationGateway : INodeReservationGateway
             _ => throw new ArgumentOutOfRangeException(nameof(operation), operation, "Unknown operation."),
         };
 
-    private static async Task<ReservationOperationResult> InvokeAsync(
-        Task<ReservationOperationResultMessage> call)
+    private NodeAssignmentCredential GetRequestCredential(Guid requestId, Guid projectId)
     {
-        var result = await call.ConfigureAwait(false);
-        return new ReservationOperationResult(
+        if (_credentials.TryGetByRequest(requestId, out var credential)
+            && credential.ProjectId == projectId)
+        {
+            return credential;
+        }
+
+        throw new InvalidOperationException(
+            $"No active assignment credential is available for request '{requestId}' "
+            + $"in project '{projectId}'.");
+    }
+
+    private NodeAssignmentCredential GetProjectCredential(Guid projectId)
+    {
+        if (_credentials.TryGetByProject(projectId, out var credential)
+            && credential.ProjectId == projectId)
+        {
+            return credential;
+        }
+
+        throw new InvalidOperationException(
+            $"No active assignment credential is available for project '{projectId}'.");
+    }
+
+    private NodeAssignmentCredential GetLeaseCredential(Guid leaseId)
+    {
+        if (_leaseCredentials.TryGetValue(leaseId, out var credential))
+        {
+            return credential;
+        }
+
+        throw new InvalidOperationException(
+            $"No authenticated assignment credential is cached for lease '{leaseId}'.");
+    }
+
+    private void CacheLease(
+        ReservationLeaseMessage? lease,
+        NodeAssignmentCredential credential)
+    {
+        if (lease is not null)
+        {
+            _leaseCredentials[lease.LeaseId] = credential;
+        }
+    }
+
+    private static ReservationOperationResult ToResult(ReservationOperationResultMessage result)
+        => new(
             result.Lease is null ? null : ToLease(result.Lease),
             result.Error is null ? null : new GatewayError(result.Error.Code, result.Error.Message));
-    }
 
     private static ReservationLeaseInfo ToLease(ReservationLeaseMessage lease)
         => new(
@@ -145,4 +279,86 @@ public sealed class NodeTransportReservationGateway : INodeReservationGateway
             lease.ExpiresAt,
             [.. lease.Scopes.Select(s => new ReservationScopeSpec(s.KindName, s.Path))],
             lease.OwnerSessionId);
+
+    private sealed class NodeReservationTransport(NodeTransportClient transport)
+        : INodeReservationTransport
+    {
+        private readonly NodeTransportClient _transport =
+            transport ?? throw new ArgumentNullException(nameof(transport));
+
+        public Task<ReservationOperationResultMessage> AcquireReservationAsync(
+            AcquireReservationMessage message,
+            CancellationToken cancellationToken)
+            => _transport.AcquireReservationAsync(message, cancellationToken);
+
+        public Task<ReservationOperationResultMessage> RenewReservationAsync(
+            ReservationMutationMessage message,
+            CancellationToken cancellationToken)
+            => _transport.RenewReservationAsync(message, cancellationToken);
+
+        public Task<ReservationOperationResultMessage> ExpandReservationAsync(
+            ExpandReservationMessage message,
+            CancellationToken cancellationToken)
+            => _transport.ExpandReservationAsync(message, cancellationToken);
+
+        public Task<ReservationOperationResultMessage> ReleaseReservationAsync(
+            ReleaseReservationMessage message,
+            CancellationToken cancellationToken)
+            => _transport.ReleaseReservationAsync(message, cancellationToken);
+
+        public Task<ReservationOperationResultMessage> TransferReservationAsync(
+            TransferReservationMessage message,
+            CancellationToken cancellationToken)
+            => _transport.TransferReservationAsync(message, cancellationToken);
+
+        public Task<MutationAuthorizationResultMessage> AuthorizeMutationAsync(
+            MutationAuthorizationMessage message,
+            CancellationToken cancellationToken)
+            => _transport.AuthorizeMutationAsync(message, cancellationToken);
+
+        public Task<ReservationOperationResultMessage> MarkRecoveryRequiredAsync(
+            MarkRecoveryMessage message,
+            CancellationToken cancellationToken)
+            => _transport.MarkRecoveryRequiredAsync(message, cancellationToken);
+
+        public Task<ReservationLeaseMessage[]> ListReservationsAsync(
+            ListReservationsMessage message,
+            CancellationToken cancellationToken)
+            => _transport.ListReservationsAsync(message, cancellationToken);
+    }
+}
+
+internal interface INodeReservationTransport
+{
+    Task<ReservationOperationResultMessage> AcquireReservationAsync(
+        AcquireReservationMessage message,
+        CancellationToken cancellationToken);
+
+    Task<ReservationOperationResultMessage> RenewReservationAsync(
+        ReservationMutationMessage message,
+        CancellationToken cancellationToken);
+
+    Task<ReservationOperationResultMessage> ExpandReservationAsync(
+        ExpandReservationMessage message,
+        CancellationToken cancellationToken);
+
+    Task<ReservationOperationResultMessage> ReleaseReservationAsync(
+        ReleaseReservationMessage message,
+        CancellationToken cancellationToken);
+
+    Task<ReservationOperationResultMessage> TransferReservationAsync(
+        TransferReservationMessage message,
+        CancellationToken cancellationToken);
+
+    Task<MutationAuthorizationResultMessage> AuthorizeMutationAsync(
+        MutationAuthorizationMessage message,
+        CancellationToken cancellationToken);
+
+    Task<ReservationOperationResultMessage> MarkRecoveryRequiredAsync(
+        MarkRecoveryMessage message,
+        CancellationToken cancellationToken);
+
+    Task<ReservationLeaseMessage[]> ListReservationsAsync(
+        ListReservationsMessage message,
+        CancellationToken cancellationToken);
 }

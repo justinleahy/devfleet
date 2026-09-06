@@ -19,7 +19,7 @@ public sealed class RuntimeRoutingGatewayTests : IClassFixture<ControlPlaneFixtu
     [Fact]
     public async Task Gateway_invokes_configuration_model_and_update_handlers_on_registered_node()
     {
-        var nodeId = Guid.NewGuid();
+        var nodeId = _fixture.AuthenticatedNodeId;
         var configuration = new NodeRuntimeConfigurationMessage(
             nodeId,
             ["reviewer"],

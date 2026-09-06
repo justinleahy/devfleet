@@ -1,48 +1,73 @@
-/* The button's shadow-root content keeps its intrinsic width, so a shrunken host clips
-   the label: let the copy absorb the squeeze instead. */
-.page-head ::deep .page-head-row,
-.page-head ::deep .page-head-copy {
+/* Fleet statistics: a quantitative page. The phone layout is the default — heading over
+   its action, counters two to a row, each runtime's figures stacked under its name — and
+   the wider steps only tighten it into aligned tabular columns.
+   Steps: 600px (phone to small tablet), 960px (tablet), 1280px (dense desktop). */
+
+.page-head {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
     min-width: 0;
 }
 
-.page-head ::deep .page-head-action {
-    flex-shrink: 0;
+.page-head-copy {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    min-width: 0;
 }
 
 .page-head h1 {
-    font-size: var(--type-ramp-plus-4-font-size);
-    line-height: var(--type-ramp-plus-4-line-height);
-    letter-spacing: -0.02em;
     margin: 0;
+    font-size: var(--type-ramp-plus-3-font-size);
+    line-height: var(--type-ramp-plus-3-line-height);
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    overflow-wrap: anywhere;
 }
 
 .page-lead {
     margin: 0;
+    /* Prose keeps one readable measure however wide the desktop gets. */
     max-width: 68ch;
     color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-plus-1-font-size);
-    line-height: var(--type-ramp-plus-1-line-height);
+}
+
+/* Fluent derives control height from this multiplier: 11 design units is a ~44px target
+   on touch. Each wider step returns the fleet's compact control height. */
+.page-head-actions {
+    --base-height-multiplier: 11;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    min-width: 0;
+}
+
+/* The host stretches in its track; the button sizes its own control inside its shadow
+   root, so it has to be told to follow. */
+.page-head-actions ::deep .page-head-action::part(control) {
+    width: 100%;
 }
 
 section {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 3px);
+    min-width: 0;
 }
 
 h2 {
     margin: 0;
-    font-size: var(--type-ramp-plus-2-font-size);
-    line-height: var(--type-ramp-plus-2-line-height);
+    font-size: var(--type-ramp-plus-1-font-size);
+    line-height: var(--type-ramp-plus-1-line-height);
     font-weight: 600;
     letter-spacing: -0.015em;
 }
 
-/* Summary counters: a dense strip, not hero tiles. Eight counters over a fixed four
-   tracks fill two whole rows, so the strip never ends in stranded empty cells. */
-.metric-row {
+/* Summary counters: a dense strip on one grouped surface, not hero tiles. Eight counters
+   divide evenly by two and by four, so no step of the grid strands an empty cell. */
+.metric-grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: calc(var(--design-unit) * 1px);
     margin: 0;
     border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
@@ -55,7 +80,8 @@ h2 {
     display: flex;
     flex-direction: column;
     gap: calc(var(--design-unit) * 1px);
-    padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 5px);
+    padding: calc(var(--design-unit) * 3px);
+    min-width: 0;
     background-color: var(--neutral-layer-1);
 }
 
@@ -69,12 +95,12 @@ h2 {
 
 .metric dd {
     margin: 0;
-    font-size: var(--type-ramp-plus-3-font-size);
-    line-height: var(--type-ramp-plus-3-line-height);
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
     font-weight: 600;
     font-variant-numeric: tabular-nums;
-    /* Exact counters are shown in full, so a fleet total wider than its cell wraps within the
-       cell instead of running under the neighbour and losing its trailing digits. */
+    /* Exact counters are shown in full, so a fleet total wider than its cell wraps within
+       the cell instead of running under the neighbour and losing its trailing digits. */
     overflow-wrap: anywhere;
 }
 
@@ -83,38 +109,36 @@ h2 {
 .metric dd.absent,
 .runtime-metric dd.absent {
     color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-base-font-size);
     font-weight: 400;
 }
 
 .metric dd.absent {
-    line-height: var(--type-ramp-plus-3-line-height);
+    font-size: var(--type-ramp-base-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
 }
 
-.cost-note {
+.cost-note,
+.coverage {
     margin: 0;
-    max-width: 68ch;
+    max-width: 72ch;
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
     line-height: var(--type-ramp-minus-1-line-height);
 }
 
 .coverage {
-    margin: 0;
-    color: var(--neutral-foreground-hint);
-    font-size: var(--type-ramp-minus-1-font-size);
-    line-height: var(--type-ramp-minus-1-line-height);
     font-variant-numeric: tabular-nums;
 }
 
-/* Runtime breakdown: one runtime per row, its identity line above its own counters.
-   Rows are separated by a rule rather than nested cards. */
+/* Runtime breakdown: one runtime per row, its identity line above its own counters, rows
+   separated by a rule rather than nested cards. */
 .runtime-list {
     list-style: none;
     margin: 0;
     padding: 0;
     display: flex;
     flex-direction: column;
+    min-width: 0;
 }
 
 .runtime-row {
@@ -122,6 +146,7 @@ h2 {
     flex-direction: column;
     gap: calc(var(--design-unit) * 2px);
     padding-block: calc(var(--design-unit) * 4px);
+    min-width: 0;
     border-top: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
 }
 
@@ -131,9 +156,8 @@ h2 {
 
 .runtime-head {
     display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: calc(var(--design-unit) * 1px) calc(var(--design-unit) * 3px);
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 0.5px);
     min-width: 0;
 }
 
@@ -147,17 +171,17 @@ h2 {
 .runtime-counts {
     color: var(--neutral-foreground-hint);
     font-size: var(--type-ramp-minus-1-font-size);
-    line-height: var(--type-ramp-plus-1-line-height);
+    line-height: var(--type-ramp-minus-1-line-height);
     font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
 }
 
 .runtime-metrics {
     display: grid;
-    /* Capped tracks keep the strip dense and left-aligned on wide screens instead of
-       stretching six figures across the whole viewport. */
-    grid-template-columns: repeat(auto-fit, minmax(132px, 176px));
-    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 5px);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
     margin: 0;
+    min-width: 0;
 }
 
 .runtime-metric {
@@ -189,16 +213,18 @@ h2 {
     display: flex;
     align-items: center;
     gap: calc(var(--design-unit) * 3px);
-    padding-block: calc(var(--design-unit) * 6px);
+    padding-block: calc(var(--design-unit) * 4px);
     color: var(--neutral-foreground-hint);
 }
 
 .state-empty {
+    --base-height-multiplier: 11;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
     gap: calc(var(--design-unit) * 3px);
-    padding: calc(var(--design-unit) * 6px);
+    padding: calc(var(--design-unit) * 4px);
+    min-width: 0;
 }
 
 .state-empty h3 {
@@ -216,49 +242,92 @@ h2 {
 
 .panel-empty {
     margin: 0;
-    padding-block: calc(var(--design-unit) * 3px);
     max-width: 68ch;
     color: var(--neutral-foreground-hint);
 }
 
-/* Below four comfortable tracks the strip halves rather than reflowing to an odd
-   count: two columns still divide the eight counters evenly. */
-@media (max-width: 980px) {
-    .metric-row {
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-}
-
-@media (max-width: 620px) {
-    /* Phone widths cannot hold heading + action side by side: stack them.
-       align-items is inline on the FluentStack host, hence !important. */
-    .page-head ::deep .page-head-row {
-        flex-direction: column;
-        align-items: flex-start !important;
-        row-gap: calc(var(--design-unit) * 3px);
+@media (min-width: 600px) {
+    .page-head {
+        flex-direction: row;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: calc(var(--design-unit) * 4px);
     }
 
-    .metric {
-        padding: calc(var(--design-unit) * 3px);
+    .page-head-copy {
+        flex: 1 1 auto;
     }
 
-    /* The summary figure drops a ramp step so a seven-digit token total still fits. */
-    .metric dd,
-    .metric dd.absent {
+    .page-head-actions {
+        --base-height-multiplier: 8;
+        flex: 0 0 auto;
+        grid-template-columns: none;
+    }
+
+    .page-head-actions ::deep .page-head-action::part(control) {
+        width: auto;
+    }
+
+    .page-head h1 {
+        font-size: var(--type-ramp-plus-4-font-size);
+        line-height: var(--type-ramp-plus-4-line-height);
+    }
+
+    .page-lead {
+        font-size: var(--type-ramp-plus-1-font-size);
+        line-height: var(--type-ramp-plus-1-line-height);
+    }
+
+    h2 {
         font-size: var(--type-ramp-plus-2-font-size);
         line-height: var(--type-ramp-plus-2-line-height);
     }
 
-    .metric dd.absent {
-        font-size: var(--type-ramp-base-font-size);
+    .metric {
+        padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 5px);
     }
 
+    /* Room for the full figure ramp once a cell is half a tablet wide. */
+    .metric dd {
+        font-size: var(--type-ramp-plus-3-font-size);
+        line-height: var(--type-ramp-plus-3-line-height);
+    }
+
+    .metric dd.absent {
+        line-height: var(--type-ramp-plus-3-line-height);
+    }
+
+    /* Six runtime counters over three tracks: two full rows, no stranded cell. */
     .runtime-metrics {
-        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-        gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+        grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
     .state-empty {
-        padding: calc(var(--design-unit) * 4px);
+        --base-height-multiplier: 8;
+        padding: calc(var(--design-unit) * 6px);
+    }
+}
+
+@media (min-width: 960px) {
+    .metric-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    /* Capped tracks keep the runtime figures a dense, left-aligned block instead of
+       stretching six counters across the whole viewport. */
+    .runtime-metrics {
+        grid-template-columns: repeat(auto-fit, minmax(132px, 176px));
+        gap: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 5px);
+    }
+}
+
+@media (min-width: 1280px) {
+    /* Desktop reads each runtime as a label-value row: identity in a fixed column, its
+       counters in one aligned block beside it. */
+    .runtime-row {
+        display: grid;
+        grid-template-columns: minmax(11rem, 16rem) minmax(0, 1fr);
+        align-items: start;
+        column-gap: calc(var(--design-unit) * 6px);
     }
 }

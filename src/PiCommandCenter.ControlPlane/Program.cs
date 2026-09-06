@@ -2,11 +2,14 @@ using System.Net;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.FluentUI.AspNetCore.Components;
 using PiCommandCenter.Application;
+using PiCommandCenter.Application.Nodes;
 using PiCommandCenter.Application.Runtime;
+using PiCommandCenter.Application.Projects;
 using PiCommandCenter.Api;
 using PiCommandCenter.ControlPlane.Api;
 using PiCommandCenter.ControlPlane.Security;
 using PiCommandCenter.ControlPlane.RuntimeRouting;
+using PiCommandCenter.ControlPlane.Projects;
 using PiCommandCenter.ControlPlane.SubscriptionUsage;
 using PiCommandCenter.Infrastructure;
 using PiCommandCenter.Infrastructure.Persistence;
@@ -42,7 +45,6 @@ if (ControlPlaneAuthSetup.IsSetupRequested(args))
         }
 
         Console.WriteLine($"Password file: {result.PasswordFile}");
-        Console.WriteLine($"Node credential file: {result.CredentialFile}");
     }
     catch (Exception ex)
     {
@@ -81,6 +83,7 @@ builder.Services.Configure<NodeLivenessOptions>(
     builder.Configuration.GetSection(NodeLivenessOptions.SectionName));
 builder.Services.AddHostedService<NodeLivenessService>();
 builder.Services.AddSingleton<NodeConnectionDirectory>();
+builder.Services.AddSingleton<IWorkspaceValidationGateway, NodeWorkspaceValidationGateway>();
 builder.Services.AddSingleton<INodeRuntimeConfigurationGateway, NodeRuntimeConfigurationGateway>();
 builder.Services.AddSingleton<INodeSubscriptionUsageGateway, NodeSubscriptionUsageGateway>();
 builder.Services.AddSingleton<INativeApiRealtimeGateway, NativeApiRealtimeGateway>();

@@ -6,7 +6,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { resolveConfiguredModel, type ModelCatalog } from "../src/sdk.ts";
-import { mapModelsToCatalog } from "../src/modelCatalog.ts";
+import {
+  mapModelsToCatalog,
+  observeModelCatalog,
+  type CatalogRuntime,
+} from "../src/modelCatalog.ts";
 
 interface FakeModel {
   provider: string;
@@ -66,20 +70,95 @@ describe("model override resolution", () => {
   });
 });
 
-describe("model catalog mapping", () => {
-  it("emits flat provider selectors with the OpenAI codex shorthand", () => {
-    const catalog = mapModelsToCatalog([
-      { provider: "kimi-coding", id: "k3", name: "Kimi K3" },
-      { provider: "openai-codex", id: "gpt-6-mini" },
-      { provider: "opencode-go", id: "big-pickle" },
-      { provider: "openai-codex", id: "gpt-6-astra", name: "GPT-6 Astra" },
-      { provider: "kimi-coding", id: "k3" },
-    ]);
+describe("model catalog readiness", () => {
+  it("combines exact catalog models with refreshed provider auth", async () => {
+    const checkCalls: string[] = [];
+    const authCalls: string[] = [];
+    const runtime: CatalogRuntime = {
+      getAvailable: async () => [
+        codexA,
+        anthropic,
+        { provider: "opencode-go", id: "big-pickle" },
+      ],
+      checkAuth: async (provider) => {
+        checkCalls.push(provider);
+        return provider === "opencode-go" ? undefined : { type: "oauth" };
+      },
+      getAuth: async (provider) => {
+        authCalls.push(provider);
+        if (provider === "openai-codex") {
+          return { auth: { apiKey: "refreshed-token" } };
+        }
+        throw new Error("expired OAuth could not be refreshed");
+      },
+    };
+
+    const catalog = await observeModelCatalog(runtime, new AbortController().signal);
+
+    assert.deepEqual(authCalls.sort(), ["anthropic", "openai-codex"]);
+    assert.deepEqual(checkCalls.sort(), ["anthropic", "openai-codex", "opencode-go"]);
     assert.deepEqual(catalog, [
-      { id: "codex/gpt-6-astra", displayName: "GPT-6 Astra", provider: "openai-codex" },
-      { id: "codex/gpt-6-mini", displayName: "gpt-6-mini", provider: "openai-codex" },
-      { id: "kimi-coding/k3", displayName: "Kimi K3", provider: "kimi-coding" },
-      { id: "opencode-go/big-pickle", displayName: "big-pickle", provider: "opencode-go" },
+      {
+        id: "anthropic/claude-opus-4-5",
+        displayName: "claude-opus-4-5",
+        provider: "anthropic",
+        authStatus: "unknown",
+      },
+      {
+        id: "codex/gpt-6-astra",
+        displayName: "gpt-6-astra",
+        provider: "openai-codex",
+        authStatus: "ready",
+      },
+      {
+        id: "opencode-go/big-pickle",
+        displayName: "big-pickle",
+        provider: "opencode-go",
+        authStatus: "unavailable",
+      },
+    ]);
+  });
+
+  it("emits flat provider selectors with the OpenAI codex shorthand", () => {
+    const catalog = mapModelsToCatalog(
+      [
+        { provider: "kimi-coding", id: "k3", name: "Kimi K3" },
+        { provider: "openai-codex", id: "gpt-6-mini" },
+        { provider: "opencode-go", id: "big-pickle" },
+        { provider: "openai-codex", id: "gpt-6-astra", name: "GPT-6 Astra" },
+        { provider: "kimi-coding", id: "k3" },
+      ],
+      new Map([
+        ["kimi-coding", "ready"],
+        ["openai-codex", "ready"],
+        ["opencode-go", "ready"],
+      ]),
+    );
+    assert.deepEqual(catalog, [
+      {
+        id: "codex/gpt-6-astra",
+        displayName: "GPT-6 Astra",
+        provider: "openai-codex",
+        authStatus: "ready",
+      },
+      {
+        id: "codex/gpt-6-mini",
+        displayName: "gpt-6-mini",
+        provider: "openai-codex",
+        authStatus: "ready",
+      },
+      {
+        id: "kimi-coding/k3",
+        displayName: "Kimi K3",
+        provider: "kimi-coding",
+        authStatus: "ready",
+      },
+      {
+        id: "opencode-go/big-pickle",
+        displayName: "big-pickle",
+        provider: "opencode-go",
+        authStatus: "ready",
+      },
     ]);
   });
 });
