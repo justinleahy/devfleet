@@ -203,7 +203,7 @@ Reservation errors are in-band (`ReservationErrorCodes`: `conflict`, `not_found`
 - `MarkMailRead`: idempotent per recipient session.
 - Reservation acquire of identical scopes for the same owner follows lease semantics (conflict vs existing lease), never silent double-grant of overlapping scopes to two owners.
 - Completion evaluation is keyed by request; accepted results persist once.
-- Recovery start/recheck/`confirm-manual` keys are `RecoveryIdempotencyKeys` per Project/action/key; same key and hash is a replay, different hash is `409`.
+- Recovery start/recheck/`confirm-manual` keys are `RecoveryIdempotencyKeys` per Project/action/key; same key and hash is a replay, different hash is `409`. Start input is `InventoryRevision` plus `IdempotencyKey` (no operator `Reason`). `confirm-manual` hashes evidence and fence fields, not a typed reason.
 - Concurrent `RecoverAssignment` for the same recovery id and attempt shares one node task; a later attempt waits for the prior attempt to finish.
 - `ReportRecoveryProof` for an already-terminalized target with recorded outcome is accepted without reopening execution.
 
@@ -214,6 +214,8 @@ Reservation errors are in-band (`ReservationErrorCodes`: `conflict`, `not_found`
 After reconnect, the node first submits its durable assignment inventory for reconciliation, then replays inventory snapshots and unacknowledged events in order. Events are deleted from the local spool only after acknowledgement. Reconciliation and replay precede new claims.
 
 ## Project recovery transport
+
+HTTP start is `POST /api/projects/{projectId}/recoveries` with `StartProjectRecoveryRequest` (`InventoryRevision`, `IdempotencyKey`). HTTP `confirm-manual` drops `Reason` and retains every evidence/fence field. At the HTTP/UI trust seam the control plane passes a fixed server-authored audit reason into application commands: `Administrator requested project recovery.` on start, `Administrator confirmed manual recovery after evidence review.` on manual confirm. Actor is the authenticated principal, never a body field.
 
 Control plane → node: `RecoverAssignment` with `RecoverAssignmentCommandMessage`. Recovery always stops/cancels; it never resumes interrupted execution. The claim token remains a fence: the node may act only while it matches current assignment authority. `Register` rebinds the connection and `RecoveryAttemptDispatcher.DispatchForNodeAsync` redelivers open-target commands after reconnect, before `ClaimNext`.
 

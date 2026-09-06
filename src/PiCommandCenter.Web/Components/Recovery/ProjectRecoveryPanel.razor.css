@@ -373,7 +373,8 @@
     line-height: var(--type-ramp-minus-1-line-height);
 }
 
-/* Confirmation: the exact mandated sentence is quoted, not paraphrased or truncated. */
+/* Recover project: consequences stay quoted and visible; the click is the command. */
+
 .confirm {
     gap: calc(var(--design-unit) * 2px);
     padding: calc(var(--design-unit) * 3px);
@@ -403,14 +404,6 @@
     line-height: var(--type-ramp-base-line-height);
 }
 
-.confirm ::deep .field {
-    width: 100%;
-    min-width: 0;
-}
-
-.confirm ::deep .field-wide {
-    display: block;
-}
 
 /* Attestation: the most dangerous control in the panel, framed in the error accent so it never reads
    as one more neutral form. Fields stack full width on a phone; every control clears 44px. */

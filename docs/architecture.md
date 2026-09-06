@@ -124,14 +124,14 @@ Provider authentication missing is **not** a generic crash. Adapters emit `sessi
 | Runtime process crash | Capture exit code and stderr tail; emit `session.failed`; mark the ExecutionAssignment and owned **Active** leases `RecoveryRequired` (`reservation.recovery_required`). Neither is released by silence. |
 | Startup failure before any session (workspace preparation, policy, branch, or root start) | The node journals `StartBlocked` and spools one assignment-scoped `request.blocked` event with the failing phase; no session identity is fabricated. The assignment is retained and retryable on the same assignment, reconciles as retained rather than `RecoveryRequired`, and cancellation still proves quiescence before terminalizing without a session. |
 | Completion, failure, or cancellation | Ownership remains through `Finalizing` or `Cancelling` until the assigned node proves admission is closed and all assignment-bound processes, mutations, verification, Git work, events, and reservations are quiescent. Integer counts of zero are not unknown; unknown inventories cannot authorize release. |
-| Operator Recover project | `ProjectRecoveryService` atomically captures inventory, sets `RecoveryHoldRow`, persists `RecoveryOperationRow` (`Pending`/`Running`/`NeedsIntervention`/`Recovered`), and cancels targets. Assigned node runs `RecoverAssignment`. Recheck starts a new attempt; `confirm-manual` is operator attestation (`operator-attestation`); resume clears only a recovered hold. |
+| Operator Recover project | Authenticated administrator invokes one **Recover project** action (no operator-authored reason). `ProjectRecoveryService` atomically captures inventory, sets `RecoveryHoldRow`, persists `RecoveryOperationRow` (`Pending`/`Running`/`NeedsIntervention`/`Recovered`), and cancels targets. Audit description is server-authored `Administrator requested project recovery.` Assigned node runs `RecoverAssignment`. Recheck starts a new attempt; `confirm-manual` is operator attestation (`operator-attestation`) without a typed reason (audit `Administrator confirmed manual recovery after evidence review.`); resume clears only a recovered hold. |
 | Node never returns | Assignment remains owned until node proof or administrator `confirm-manual`. The same request is not requeued elsewhere. Returning node receives `RecoverAssignment` / cancellation before claims; historical replay cannot reopen terminal or recovered execution. |
 | Stale reservation lease | Not reusable until recovery inspection or human force-release (`POST /api/reservations/{leaseId}/force-release` with `confirm=true`, reason, and repository status snapshot). Force-release rotates the fencing token; it is not process-stop proof and is not a substitute for recovery. |
 | Reservation service unavailable | Mutations fail closed. |
 | Invalid resource snapshot on heartbeat | `NodeRegistry` rejects the heartbeat (`ArgumentException`); the node retries on the next tick. Deserialization of a corrupt stored row yields `Resources = null` on `NodeDto`. |
 | Malformed NDJSON | Logged and skipped; the protocol stream stays up. |
 
-Lifecycle ownership: control plane owns hold, operation, idempotency, and terminal truth; node owns process-group identity and `AssignmentRecoveryProofMessage`; administrator owns attestation text and confirmations. Recovery never deletes workspaces, journals, or spools.
+Lifecycle ownership: control plane owns hold, operation, idempotency, and terminal truth; node owns process-group identity and `AssignmentRecoveryProofMessage`; administrator owns evidence, exact-name confirmation, and acknowledgements on `confirm-manual`, not an authored reason. Recovery never deletes workspaces, journals, or spools.
 
 Operator procedure: [docs/operations/project-recovery.md](operations/project-recovery.md).
 
@@ -289,10 +289,10 @@ Research: [research/agent-token-cost-statistics.md](research/agent-token-cost-st
 | GET/POST | `/api/projects/{projectId}/requests` | List / enqueue; optional `OriginalRequestId` linked retry; ineligible work stays queued |
 | GET | `/api/projects/{projectId}/recovery` | Read-only diagnosis, inventory revision, hold, latest operation |
 | GET | `/api/requests/{requestId}` | Scheduling status plus immutable ExecutionAssignment history when assigned |
-| POST | `/api/projects/{projectId}/recoveries` | Start recovery (`StartProjectRecoveryRequest`: `InventoryRevision`, `Reason`, `IdempotencyKey`); `202` |
+| POST | `/api/projects/{projectId}/recoveries` | Start recovery (`StartProjectRecoveryRequest`: `InventoryRevision`, `IdempotencyKey`); `202`; actor from principal; server-authored audit `Administrator requested project recovery.` |
 | GET | `/api/projects/{projectId}/recoveries/{recoveryId}` | Durable operation progress |
 | POST | `/api/projects/{projectId}/recoveries/{recoveryId}/recheck` | New attempt (`ExpectedOperationVersion`, `IdempotencyKey`); does not resume the queue |
-| POST | `/api/projects/{projectId}/recoveries/{recoveryId}/confirm-manual` | Administrator attestation; never `force=true` |
+| POST | `/api/projects/{projectId}/recoveries/{recoveryId}/confirm-manual` | Administrator attestation; no `Reason`; never `force=true`; server-authored audit `Administrator confirmed manual recovery after evidence review.` |
 | POST | `/api/projects/{projectId}/recovery/resume` | Clear recovered hold (`OperationId`, `ExpectedHoldVersion`) |
 | POST | `/api/requests/{requestId}/cancel` | Queued/unassigned work becomes `Cancelled` atomically; assigned request and assignment become `Cancelling` before best-effort owner notification and retain ownership until quiescence is confirmed |
 | GET | `/api/requests/{requestId}/messages` | |

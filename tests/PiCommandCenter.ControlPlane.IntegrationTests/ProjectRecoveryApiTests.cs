@@ -107,7 +107,6 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
             new
             {
                 inventoryRevision = diagnosis.GetProperty("inventoryRevision").GetString(),
-                reason = "none",
                 idempotencyKey = "empty-start",
             },
             Json);
@@ -130,7 +129,7 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
 
         var response = await client.PostAsJsonAsync(
             $"/api/projects/{projectId}/recoveries",
-            StartBody(diagnosis, "stuck", "start-key"),
+            StartBody(diagnosis, "start-key"),
             Json);
         var body = await response.Content.ReadAsStringAsync();
 
@@ -165,7 +164,6 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
             new
             {
                 inventoryRevision = "deadbeef",
-                reason = "stuck",
                 idempotencyKey = "stale-key",
             },
             Json);
@@ -176,13 +174,13 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
 
         var first = await client.PostAsJsonAsync(
             $"/api/projects/{projectId}/recoveries",
-            StartBody(diagnosis, "stuck", "key-a"),
+            StartBody(diagnosis, "key-a"),
             Json);
         Assert.Equal(HttpStatusCode.Accepted, first.StatusCode);
 
         var second = await client.PostAsJsonAsync(
             $"/api/projects/{projectId}/recoveries",
-            StartBody(diagnosis, "stuck", "key-b"),
+            StartBody(diagnosis, "key-b"),
             Json);
         Assert.Equal(HttpStatusCode.Conflict, second.StatusCode);
         Assert.Equal(
@@ -191,12 +189,14 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
 
         var reused = await client.PostAsJsonAsync(
             $"/api/projects/{projectId}/recoveries",
-            StartBody(diagnosis, "other-reason", "key-a"),
+            StartBody(diagnosis, "key-a"),
             Json);
-        Assert.Equal(HttpStatusCode.Conflict, reused.StatusCode);
-        Assert.Equal(
-            "Recovery idempotency conflict",
-            JsonDocument.Parse(await reused.Content.ReadAsStringAsync()).RootElement.GetProperty("title").GetString());
+        Assert.Equal(HttpStatusCode.Accepted, reused.StatusCode);
+        var firstId = JsonDocument.Parse(await first.Content.ReadAsStringAsync()).RootElement
+            .GetProperty("operation").GetProperty("id").GetGuid();
+        var replayedId = JsonDocument.Parse(await reused.Content.ReadAsStringAsync()).RootElement
+            .GetProperty("operation").GetProperty("id").GetGuid();
+        Assert.Equal(firstId, replayedId);
     }
 
     [Fact]
@@ -334,7 +334,6 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
             new
             {
                 inventoryRevision = "x",
-                reason = "stuck",
                 idempotencyKey = "anon",
             },
             Json);
@@ -356,7 +355,6 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
             new
             {
                 inventoryRevision = "x",
-                reason = "stuck",
                 idempotencyKey = "native-anon",
             },
             Json);
@@ -375,7 +373,6 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
             new
             {
                 inventoryRevision = "x",
-                reason = "stuck",
                 idempotencyKey = "csrf",
             },
             Json);
@@ -388,10 +385,9 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
         Assert.Equal(HttpStatusCode.BadRequest, csrfConfirm.StatusCode);
     }
 
-    private static object StartBody(JsonElement diagnosis, string reason, string key) => new
+    private static object StartBody(JsonElement diagnosis, string key) => new
     {
         inventoryRevision = diagnosis.GetProperty("inventoryRevision").GetString(),
-        reason,
         actor = "spoofed-actor",
         idempotencyKey = key,
     };
@@ -401,7 +397,6 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
         expectedOperationVersion,
         expectedAttempt,
         exactProjectName = "Recovery project",
-        reason = "local stop",
         actor = "spoofed-actor",
         idempotencyKey = key,
         confirmOriginalExecutionCannotResume = true,
@@ -453,7 +448,7 @@ public sealed class ProjectRecoveryApiTests : IClassFixture<ControlPlaneFixture>
     {
         var response = await client.PostAsJsonAsync(
             $"/api/projects/{projectId}/recoveries",
-            StartBody(diagnosis, "stuck", key),
+            StartBody(diagnosis, key),
             Json);
         var body = await response.Content.ReadAsStringAsync();
         Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);

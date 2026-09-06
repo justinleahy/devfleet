@@ -17,7 +17,7 @@
 @*
     Operator recovery surface for one Project (docs/design/project-recovery.md §"Operator experience").
     Opening it only reads: diagnosis, hold, latest operation, and the captured target inventory. Every
-    mutation is an explicit operator action that first confirms the exact inventory revision the panel
+    mutation is an explicit operator action that fences the exact inventory revision the panel
     displayed. The panel never claims process-stop proof, a completion percentage, or a known-zero
     inventory of its own; unreported facts are labelled as not reported.
 
@@ -145,11 +145,11 @@
         @if (_inventoryChanged)
         {
             <FluentMessageBar Intent="MessageIntent.Warning"
-                              Title="Target inventory changed — confirm again"
+                              Title="Target inventory changed"
                               AllowDismiss="false">
                 The project's assignments or reservations changed after this panel loaded, so nothing was
                 started. The list below is refreshed to revision <span class="mono">@diagnosis.InventoryRevision</span>;
-                review it and confirm again.
+                review it. Recover project starts against this revision.
             </FluentMessageBar>
         }
 
@@ -614,13 +614,6 @@
                     you type against the project it is about to act on, and refuses any mismatch.
                 </p>
 
-                <FluentTextArea @bind-Value="_manualReason"
-                                Label="Reason for attesting instead of waiting for node evidence"
-                                Required="true"
-                                Rows="3"
-                                Maxlength="1024"
-                                Class="field field-wide" />
-
                 <FluentTextArea @bind-Value="_manualProcessStop"
                                 Label="Process-stop evidence you observed (what you ran, on which machine, and what it showed)"
                                 Required="true"
@@ -735,10 +728,10 @@
         @if (startable)
         {
             <section class="group confirm" aria-labelledby="@ConfirmHeadingId">
-                <p class="confirm-eyebrow">Confirmation required</p>
-                <h3 id="@ConfirmHeadingId" class="group-title">Stop work and recover</h3>
+                <p class="confirm-eyebrow">Consequences</p>
+                <h3 id="@ConfirmHeadingId" class="group-title">Recover project</h3>
 
-                @* Exact confirmation text mandated by docs/design/project-recovery.md §Confirmation. *@
+                @* Consequences remain visible; Recover project is the explicit command. *@
                 <blockquote class="confirm-text">
                     Stop this project's current work and pause its queue. Files, uncommitted changes,
                     settings, and history will be kept. Work will not restart automatically. If DevFleet
@@ -746,7 +739,7 @@
                 </blockquote>
 
                 <section class="subgroup" aria-labelledby="@AffectedHeadingId">
-                    <h4 id="@AffectedHeadingId" class="section-label">Affected by this confirmation</h4>
+                    <h4 id="@AffectedHeadingId" class="section-label">Affected inventory</h4>
                     <ul class="affected-list">
                         @foreach (var assignment in diagnosis.NonterminalAssignments)
                         {
@@ -767,24 +760,18 @@
                     </ul>
                 </section>
 
-                <FluentTextArea @bind-Value="_reason"
-                                Label="Reason (recorded on the operation and in the audit trail)"
-                                Required="true"
-                                Rows="3"
-                                Class="field field-wide" />
-
                 <div class="actions">
                     <FluentButton Appearance="Appearance.Accent"
                                   OnClick="StartRecoveryAsync"
                                   Loading="@_submitting"
                                   Disabled="@(ActorProblem() is not null)"
                                   Class="action">
-                        Stop work and recover
+                        Recover project
                     </FluentButton>
                     <p class="action-note">
-                        Confirms inventory revision <span class="mono">@diagnosis.InventoryRevision</span> as
+                        Starts recovery against inventory revision <span class="mono">@diagnosis.InventoryRevision</span> as
                         @(_actor ?? "an unidentified operator"). If the inventory changed meanwhile, nothing
-                        starts and you are asked to confirm again.
+                        starts and the list is refreshed.
                     </p>
                 </div>
             </section>
@@ -834,15 +821,17 @@
     private string? _actionError;
     private string? _dispatchNotice;
     private string? _actor;
-    private string _reason = string.Empty;
-    private bool _reasonSeeded;
     private string? _startKey;
-    private string? _startKeyReason;
     private string? _startKeyRevision;
+
+    private const string AdministratorRequestedProjectRecoveryReason =
+        "Administrator requested project recovery.";
+
+    private const string AdministratorConfirmedManualRecoveryReason =
+        "Administrator confirmed manual recovery after evidence review.";
 
     // Administrator attestation, kept as typed text so a rejected submission survives for correction.
     private string _manualProjectName = string.Empty;
-    private string _manualReason = string.Empty;
     private string _manualProcessStop = string.Empty;
     private string _manualRepositoryStatus = string.Empty;
     private string _manualRepositorySource = string.Empty;
@@ -918,8 +907,6 @@
         _loadedProject = ProjectId;
         _loading = true;
         _diagnosis = null;
-        _reason = string.Empty;
-        _reasonSeeded = false;
         _startKey = null;
         _inventoryChanged = false;
         _actionError = null;
@@ -1000,7 +987,6 @@
             _now = Clock.UtcNow;
             _diagnosis = await Recoveries.GetDiagnosisAsync(new ProjectId(ProjectId), CancellationToken.None);
             _loadError = null;
-            SeedReason(_diagnosis);
             SeedRepositoryCollectedAt(_diagnosis);
         }
         catch (Exception ex)
@@ -1015,49 +1001,12 @@
     }
 
     /// <summary>
-    /// Prefills the reason from the observed blocker once, then leaves it under operator control.
-    /// The seed states only what the diagnosis reports.
-    /// </summary>
-    private void SeedReason(ProjectRecoveryDiagnosis diagnosis)
-    {
-        if (_reasonSeeded || _reason.Length > 0)
-        {
-            return;
-        }
-
-        if (diagnosis.LatestOperation is { } operation && BlockerCodes(operation) is { Count: > 0 } codes)
-        {
-            _reason = $"Recovery reported {string.Join(", ", codes)} on attempt {operation.Attempt}.";
-        }
-        else if (diagnosis.NonterminalAssignments.Count > 0)
-        {
-            var assignment = diagnosis.NonterminalAssignments[0];
-            var node = assignment.NodeStatus is { Length: > 0 } status
-                ? $" Assigned node reports {status}."
-                : " No assigned-node status is reported.";
-            _reason = $"Retained {assignment.State} assignment for request {assignment.RequestId.Value} is not progressing.{node}";
-        }
-        else if (diagnosis.UnresolvedReservations.Count > 0)
-        {
-            var reservation = diagnosis.UnresolvedReservations[0];
-            _reason = $"Unresolved {reservation.State} reservation lease {reservation.LeaseId} still blocks its scopes.";
-        }
-        else
-        {
-            return;
-        }
-
-        _reasonSeeded = true;
-    }
-
-    /// <summary>
     /// Clears every attested field. Attestation is per project and per blocked operation: evidence
     /// typed against one project must never be carried into another.
     /// </summary>
     private void ResetManualForm()
     {
         _manualProjectName = string.Empty;
-        _manualReason = string.Empty;
         _manualProcessStop = string.Empty;
         _manualRepositoryStatus = string.Empty;
         _manualRepositorySource = string.Empty;
@@ -1104,7 +1053,7 @@
     /// </summary>
     private List<string> ManualGaps()
     {
-        var gaps = new List<string>(11);
+        var gaps = new List<string>(10);
         if (ActorProblem() is not null)
         {
             gaps.Add("a readable administrator identity");
@@ -1113,11 +1062,6 @@
         if (string.IsNullOrWhiteSpace(_manualProjectName))
         {
             gaps.Add("the exact project name");
-        }
-
-        if (string.IsNullOrWhiteSpace(_manualReason))
-        {
-            gaps.Add("a reason");
         }
 
         if (string.IsNullOrWhiteSpace(_manualProcessStop))
@@ -1204,7 +1148,6 @@
         }
 
         var projectName = _manualProjectName.Trim();
-        var reason = _manualReason.Trim();
         var processStop = _manualProcessStop.Trim();
         var repositoryStatus = _manualRepositoryStatus.Trim();
         var repositorySource = _manualRepositorySource.Trim();
@@ -1215,7 +1158,6 @@
             operation.Version.ToString(CultureInfo.InvariantCulture),
             operation.Attempt.ToString(CultureInfo.InvariantCulture),
             projectName,
-            reason,
             processStop,
             repositoryStatus,
             repositorySource,
@@ -1238,7 +1180,7 @@
                         operation.Version,
                         operation.Attempt,
                         projectName,
-                        reason,
+                        AdministratorConfirmedManualRecoveryReason,
                         _actor!,
                         ManualKey(fingerprint),
                         ConfirmOriginalExecutionCannotResume: true,
@@ -1281,19 +1223,17 @@
         : null;
 
     /// <summary>
-    /// Stable idempotency key for one confirmed input. Editing the reason or confirming a refreshed
-    /// inventory issues a new key, so a retry of identical input is idempotent and changed input is
-    /// never silently folded into the earlier acceptance.
+    /// Stable idempotency key for one start against one displayed inventory revision. A refreshed
+    /// inventory issues a new key, so a retry of identical fencing is idempotent and a changed
+    /// inventory is never silently folded into the earlier acceptance.
     /// </summary>
-    private string StartKey(string revision, string reason)
+    private string StartKey(string revision)
     {
         if (_startKey is null
-            || !string.Equals(_startKeyRevision, revision, StringComparison.Ordinal)
-            || !string.Equals(_startKeyReason, reason, StringComparison.Ordinal))
+            || !string.Equals(_startKeyRevision, revision, StringComparison.Ordinal))
         {
             _startKey = Guid.NewGuid().ToString("N");
             _startKeyRevision = revision;
-            _startKeyReason = reason;
         }
 
         return _startKey;
@@ -1307,16 +1247,12 @@
         }
 
         _dispatchNotice = null;
-        _actionError = ActorProblem()
-            ?? (string.IsNullOrWhiteSpace(_reason)
-                ? "A reason is required; it is recorded on the operation and in the audit trail."
-                : null);
+        _actionError = ActorProblem();
         if (_actionError is not null)
         {
             return;
         }
 
-        var reason = _reason.Trim();
         var revision = diagnosis.InventoryRevision;
         _submitting = true;
         try
@@ -1327,7 +1263,11 @@
             {
                 started = await Recoveries.StartAsync(
                     new ProjectId(ProjectId),
-                    new StartProjectRecoveryCommand(revision, reason, _actor!, StartKey(revision, reason)),
+                    new StartProjectRecoveryCommand(
+                        revision,
+                        AdministratorRequestedProjectRecoveryReason,
+                        _actor!,
+                        StartKey(revision)),
                     CancellationToken.None);
 
                 if (started.Operation is { } operation)
@@ -1364,7 +1304,8 @@
         }
         catch (RecoveryInventoryConflictException)
         {
-            // Never cancel work the operator has not seen: refresh the preview and ask again.
+            // Never cancel work the operator has not seen: refresh the preview. Recover project
+            // must fence the inventory now displayed.
             _inventoryChanged = true;
             _startKey = null;
             await LoadAsync();

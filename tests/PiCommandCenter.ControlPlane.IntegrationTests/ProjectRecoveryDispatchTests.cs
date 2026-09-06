@@ -244,7 +244,6 @@ public sealed class ProjectRecoveryDispatchTests : IClassFixture<ControlPlaneFix
             new
             {
                 inventoryRevision = diagnosis.GetProperty("inventoryRevision").GetString(),
-                reason = "stuck",
                 idempotencyKey = key,
             },
             Json);

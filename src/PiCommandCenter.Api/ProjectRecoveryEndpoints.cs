@@ -70,7 +70,7 @@ internal static class ProjectRecoveryEndpoints
                 new ProjectId(projectId),
                 new StartProjectRecoveryCommand(
                     body.InventoryRevision,
-                    body.Reason,
+                    "Administrator requested project recovery.",
                     AuthenticatedActor(httpContext),
                     body.IdempotencyKey),
                 cancellationToken);
@@ -203,7 +203,7 @@ internal static class ProjectRecoveryEndpoints
                     body.ExpectedOperationVersion,
                     body.ExpectedAttempt,
                     body.ExactProjectName,
-                    body.Reason,
+                    "Administrator confirmed manual recovery after evidence review.",
                     AuthenticatedActor(httpContext),
                     body.IdempotencyKey,
                     body.ConfirmOriginalExecutionCannotResume,
@@ -325,7 +325,6 @@ internal static class ProjectRecoveryEndpoints
 /// <summary>Body for <c>POST {prefix}/projects/{projectId}/recoveries</c>.</summary>
 internal sealed record StartProjectRecoveryRequest(
     string InventoryRevision,
-    string Reason,
     string IdempotencyKey);
 
 /// <summary>Body for <c>POST {prefix}/projects/{projectId}/recoveries/{recoveryId}/recheck</c>.</summary>
@@ -338,7 +337,6 @@ internal sealed record ConfirmManualProjectRecoveryRequest(
     long ExpectedOperationVersion,
     int ExpectedAttempt,
     string ExactProjectName,
-    string Reason,
     string IdempotencyKey,
     bool ConfirmOriginalExecutionCannotResume,
     bool WriterAccessPrevented,

@@ -1,6 +1,6 @@
 # Operator runbook: project recovery
 
-Recover project stops this Project's retained execution, keeps the workspace and history, and leaves the queue paused. It is not a reset. Node-observed proof (`AssignmentRecoveryProofMessage`) is distinct from administrator attestation (`operator-attestation` on `confirm-manual`). Silence is never stop proof.
+Recover project stops this Project's retained execution, keeps the workspace and history, and leaves the queue paused. It is not a reset. An authenticated administrator starts it with one **Recover project** action; there is no operator-entered reason. Node-observed proof (`AssignmentRecoveryProofMessage`) is distinct from administrator attestation (`operator-attestation` on `confirm-manual`). Silence is never stop proof.
 
 Architecture: [docs/architecture.md](../architecture.md#recovery). Design as built: [docs/design/project-recovery.md](../design/project-recovery.md).
 
@@ -12,8 +12,8 @@ Also inspect the Project/request UI Recover project panel. Do not treat disconne
 
 ## Exact safe automatic flow
 
-1. Confirm with a reason. Server checks `InventoryRevision`.
-2. `POST /api/projects/{projectId}/recoveries` body `StartProjectRecoveryRequest`: `InventoryRevision`, `Reason`, `IdempotencyKey`. Cookie admin (or `/api/v1` bearer). Response `202` with `Location` `…/recoveries/{recoveryId}` unless `NoOp` (empty inventory; no hold).
+1. Click **Recover project**. Consequences stay visible. Server checks `InventoryRevision`. There is no typed reason and no second confirmation.
+2. `POST /api/projects/{projectId}/recoveries` body `StartProjectRecoveryRequest`: `InventoryRevision`, `IdempotencyKey`. Cookie admin (or `/api/v1` bearer). Actor is the authenticated principal. Audit description is server-authored `Administrator requested project recovery.` Response `202` with `Location` `…/recoveries/{recoveryId}` unless `NoOp` (empty inventory; no hold).
 3. Control plane (`ProjectRecoveryService`) in one transaction: persist `RecoveryOperationRow`, capture assignment/reservation targets, set `RecoveryHoldRow`, record cancellation intent. `ClaimNext` then reports `project_recovery_paused` before `project_disabled`. New requests may still enqueue.
 4. Dispatcher sends SignalR `RecoverAssignment` (`RecoverAssignmentCommandMessage`: `RecoveryId`, `Attempt`, `ProjectId`, `RequestId`, `ClaimToken`, `BindingRevision`, `Deadline`) to the assigned node.
 5. Node (`AssignmentRecoveryRunner` / `NodeAssignmentRecoveryRuntime`): journal intent, close admission, cooperative cancel, isolated process-group stop, drain, flush acknowledged events **without deleting** the spool, inspect the canonical workspace, resolve only assignment reservations after stop evidence, report `ReportRecoveryProgress` / `ReportRecoveryProof`.
@@ -34,7 +34,7 @@ Budgets (`NodeOptions`, attempt deadlines only): `Node:RecoveryCooperativeStopSe
 | `reservation_unresolved` | Lease still Active/RecoveryRequired | Wait for recovery disposition; force-release is not stop proof |
 | `repository_status_unknown` | Canonical workspace not inspectable | Inspect on the owning machine; do not attest another checkout |
 | `recovery_evidence_stale` | Proof/attestation does not match current attempt | Recheck; refresh diagnosis |
-| `recovery_target_changed` | Inventory revision mismatch | Re-read GET diagnosis; confirm again |
+| `recovery_target_changed` | Inventory revision mismatch | Re-read GET diagnosis; click **Recover project** again |
 
 Existing readiness/startup codes are unchanged.
 
@@ -55,12 +55,12 @@ Only when the operation is `NeedsIntervention`. Authenticated administrator only
 
 `POST /api/projects/{projectId}/recoveries/{recoveryId}/confirm-manual` body `ConfirmManualProjectRecoveryRequest`:
 
-- `ExpectedOperationVersion`, `ExpectedAttempt`, `ExactProjectName`, `Reason`, `IdempotencyKey`
+- `ExpectedOperationVersion`, `ExpectedAttempt`, `ExactProjectName`, `IdempotencyKey`
 - `ConfirmOriginalExecutionCannotResume`, `WriterAccessPrevented`, `AcknowledgeEvidenceGaps` — all required true
 - `ProcessStopEvidence`, `ReservationAndEventGapAccounting` (max 1024 chars each via `ManualRecoveryService.MaxTextLength`)
 - `RepositoryStatusSnapshot`, `RepositoryStatusSource`, `RepositoryCollectedAt` (must be the owning workspace; age ≤ `MaxRepositoryEvidenceAge` = 15 minutes)
 
-Missing event history may be accounted as an audit gap. Unresolved writer access or unavailable repository status cannot be waived. Fencing/token revoke cannot stop an open process or fd. Success keeps the hold. Action name `confirm-manual`.
+No `Reason` field. Audit description is server-authored `Administrator confirmed manual recovery after evidence review.` Missing event history may be accounted as an audit gap. Unresolved writer access or unavailable repository status cannot be waived. Fencing/token revoke cannot stop an open process or fd. Success keeps the hold. Action name `confirm-manual`.
 
 ## Recheck (not resume)
 
@@ -93,5 +93,5 @@ Never:
 - Use reservation `force-release` instead of recovery
 - Kill by executable name, path substring, or a bare reused PID
 - Kill unrelated Projects' processes
-- Pass `force=true` or skip confirmations
+- Pass `force=true`, skip inventory fencing, or skip process-stop evidence, exact-name confirmation, or required acknowledgements
 - Resume the original assignment or copy its execution authority onto a retry

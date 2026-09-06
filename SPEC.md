@@ -646,7 +646,7 @@ Completion, failure, and cancellation acceptance do not release ownership. The a
 
 The ExecutionAssignment and immutable placement snapshot persist through terminal and recovery history. A retry that may execute elsewhere is a new linked Work Request, never mutation or reassignment of the original. The initial phase provides no transparent failover.
 
-Project recovery is fail-closed. Diagnosis is read-only. Start captures inventory, sets the hold, and persists the operation before any stop delivery. The Control Plane validates assignment-bound quiescence proof before terminalization. Node, authentication, claim token, attempt, and binding fences must all match. Operator attestation is not node proof. Resume is a separate route and never implied by recheck, confirm-manual, or linked retry. A linked retry is ordinary queue semantics: `POST /api/projects/{projectId}/requests` with immutable `OriginalRequestId`.
+Project recovery is fail-closed. Diagnosis is read-only. An authenticated administrator starts recovery with one **Recover project** action; the click is the command, with visible consequences and no operator-authored reason. Start captures inventory, sets the hold, and persists the operation before any stop delivery. The HTTP/UI trust seam supplies the fixed server-authored audit description `Administrator requested project recovery.` The Control Plane validates assignment-bound quiescence proof before terminalization. Node, authentication, claim token, attempt, and binding fences must all match. Operator attestation is not node proof and does not collect a typed reason; its server-authored audit description is `Administrator confirmed manual recovery after evidence review.` Resume is a separate route and never implied by recheck, confirm-manual, or linked retry. A linked retry is ordinary queue semantics: `POST /api/projects/{projectId}/requests` with immutable `OriginalRequestId`.
 
 ---
 
@@ -2137,7 +2137,7 @@ The node populates the fingerprint and policy revision from the coordinator's la
 - Attempt
 - Version
 - InventoryRevision
-- Reason
+- Reason (server-authored audit description; never operator-typed)
 - Actor
 - Stage
 - BlockerCodesJson
@@ -2225,9 +2225,9 @@ POST   /api/projects/{projectId}/recovery/resume
 Cookie admin (antiforgery) or `/api/v1` bearer. Node credentials cannot invoke these routes. Actor is `NameIdentifier` or Identity name, never a body field.
 
 - `GET …/recovery` is diagnosis only (`InventoryRevision`, hold, latest operation, nonterminal assignments, unresolved reservations). It does not create a hold.
-- `POST …/recoveries` body `StartProjectRecoveryRequest`: `InventoryRevision`, `Reason`, `IdempotencyKey`. Response `202`. Empty inventory is `NoOp` with no hold. Stale inventory is `409`. Start persists the operation and hold and records cancellation intent **before** sending `RecoverAssignment`.
+- `POST …/recoveries` body `StartProjectRecoveryRequest`: `InventoryRevision`, `IdempotencyKey`. Response `202`. Empty inventory is `NoOp` with no hold. Stale inventory is `409`. Start persists the operation and hold and records cancellation intent **before** sending `RecoverAssignment`. The actor is the authenticated principal; audit reason is server-authored `Administrator requested project recovery.`
 - Recheck body `ExpectedOperationVersion`, `IdempotencyKey`. Starts a new attempt from `NeedsIntervention`. Does not resume the queue.
-- `confirm-manual` is administrator attestation (`operator-attestation`) with exact project name, attempt/version fences, three required true acknowledgements, process-stop evidence, reservation/event gap accounting, and a fresh owning-workspace repository snapshot. Never `force=true`. Success keeps the hold.
+- `confirm-manual` is administrator attestation (`operator-attestation`) with exact project name, attempt/version fences, three required true acknowledgements, process-stop evidence, reservation/event gap accounting, and a fresh owning-workspace repository snapshot. Body has no `Reason`. Never `force=true`. Success keeps the hold. Audit reason is server-authored `Administrator confirmed manual recovery after evidence review.`
 - Resume body `OperationId`, `ExpectedHoldVersion`. Requires operation `Recovered` and captured targets terminal/released. Clears only the hold.
 
 ### 30.3 Sessions
@@ -2321,7 +2321,7 @@ Display:
 - Active agent count.
 - Active reservations.
 - A **Verification policy** card: automatic baseline always enabled; project checks default to none or one trusted profile from the connected node's bounded catalog (ids, labels, command ids, working-directory labels, mandatory/optional flags, timeout budgets — never environment values, credentials, raw paths, or editable command text). Copy when none selected: `Baseline repository checks will run. No project test suite is configured.` A node that advertises profiles while the Project remains baseline-only shows `Node advertises trusted profiles but none is selected`.
-- A **Recover project** action and diagnosis panel. Start requires a reason and current inventory revision. Recheck, confirm-manual, and resume are separate. Linked retry uses the ordinary request composer with `OriginalRequestId`. No unlock or `force=true` control.
+- A **Recover project** action and diagnosis panel. The primary button reads **Recover project**; its click is the explicit command. Consequences stay visible; there is no typed reason and no second confirmation interaction. Start sends the current inventory revision and an idempotency key. Recheck, confirm-manual (evidence, exact name, and acknowledgements; no operator reason), and resume are separate. Linked retry uses the ordinary request composer with `OriginalRequestId`. No unlock or `force=true` control.
 
 ### 31.3 Request page
 
@@ -2509,6 +2509,7 @@ The design must record enough assignment, process, and provider-session metadata
 - Node proof inventories distinguish known zero from unknown. Unknown cannot authorize release.
 - Returning node: reconnect reconciles, then `DispatchForNodeAsync` redelivers `RecoverAssignment` for open targets. `Cancelling` stays cancel. Terminal stays terminal. Stale claim tokens fail closed.
 - Never delete workspaces, Control Plane SQLite, node journals, `Node:EventSpoolPath`, or recovery rows to unstick recovery.
+- Do not skip inventory revision fencing, process-stop evidence, exact-name/acknowledgement requirements on `confirm-manual`, or use force unlocks. Normal and manual recovery do not collect an operator-authored reason.
 
 ---
 

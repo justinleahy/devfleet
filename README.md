@@ -41,13 +41,13 @@ The initial phase has no repository mobility or transparent failover. A Project 
 
 ## Project recovery
 
-**Recover project** stops this Project's retained execution, keeps files and history, and leaves the queue paused. It is not a reset and does not resume the original assignment.
+**Recover project** stops this Project's retained execution, keeps files and history, and leaves the queue paused. It is not a reset and does not resume the original assignment. An authenticated administrator starts it with one **Recover project** click; consequences stay visible, and there is no operator-entered reason or second confirmation. Actor attribution comes from the authenticated principal. The HTTP/UI trust seam supplies a fixed server-authored audit description (`Administrator requested project recovery.` for start; `Administrator confirmed manual recovery after evidence review.` for `confirm-manual`).
 
 - Operator runbook: [docs/operations/project-recovery.md](docs/operations/project-recovery.md)
 - Architecture ownership: [docs/architecture.md](docs/architecture.md#recovery)
 - Design (implemented): [docs/design/project-recovery.md](docs/design/project-recovery.md)
 
-Diagnosis is `GET /api/projects/{projectId}/recovery`. Start is `POST /api/projects/{projectId}/recoveries`. Recheck, administrator `confirm-manual`, and `POST /api/projects/{projectId}/recovery/resume` are separate. Linked retry is a new `POST /api/projects/{projectId}/requests` with immutable `OriginalRequestId`.
+Diagnosis is `GET /api/projects/{projectId}/recovery`. Start is `POST /api/projects/{projectId}/recoveries` with `InventoryRevision` and `IdempotencyKey`. Recheck, administrator `confirm-manual` (evidence and fences, no `Reason`), and `POST /api/projects/{projectId}/recovery/resume` are separate. Linked retry is a new `POST /api/projects/{projectId}/requests` with immutable `OriginalRequestId`.
 
 Linux nodes prove stop with `setsid` session/process-group identity (`AssignmentProcessIdentity`: PID, `/proc` start ticks, `ProcessGroupId`, `SessionId`). Non-Linux and missing `setsid` report `process_stop_unproven`; tree kill is not proof. Silence is never stop proof. Never delete workspaces, SQLite, `Node:EventSpoolPath`, or assignment journals to “unstick” recovery.
 

@@ -13,7 +13,7 @@ Expose **Recover project**, not **Reset project**.
 
 Recovery stops the current execution safely, resolves its retained ownership, and leaves the Project paused for operator inspection. It never resets Git, discards files, deletes history, or assumes an unreachable agent has stopped. Starting work again is a separate explicit action.
 
-The normal path is one confirmation followed by visible progress. The exceptional path explains exactly what evidence or local intervention is missing rather than presenting an indefinite spinner or an unconditional unlock.
+The normal path is one **Recover project** click followed by visible progress. The exceptional path explains exactly what evidence or local intervention is missing rather than presenting an indefinite spinner or an unconditional unlock.
 
 ## Sources and current behavior
 
@@ -99,17 +99,17 @@ Opening the panel is read-only. Display:
 
 Do not label an agent dead or safe to unlock merely because it is silent.
 
-### Confirmation
+### Recover project
 
-Primary action: **Stop work and recover**.
+Primary action: **Recover project**. The click is the explicit command. There is no typed reason and no second confirmation interaction.
 
-Required confirmation text:
+Visible consequences:
 
 > Stop this project's current work and pause its queue. Files, uncommitted changes, settings, and history will be kept. Work will not restart automatically. If DevFleet cannot prove the old processes stopped, the project will stay blocked.
 
-Show the exact affected assignments, including read-only assignments if enabled. Require a reason, prefilled with the observed blocker and editable. Do not require typing a Project name for this non-destructive normal path.
+Show the exact affected assignments, including read-only assignments if enabled. Do not require typing a Project name for this non-destructive normal path. Actor attribution is the authenticated administrator. The HTTP/UI trust seam supplies the fixed server-authored audit description `Administrator requested project recovery.`
 
-The server validates the panel's revision before acceptance. If its target inventory changed, refresh the preview and require confirmation again rather than cancelling a newly started request the operator never saw.
+The server validates the panel's inventory revision before acceptance. If its target inventory changed, refresh the preview rather than cancelling a newly started request the operator never saw.
 
 ### Progress
 
@@ -203,12 +203,11 @@ A service restart is an optional local troubleshooting step with a warning that 
 If automatic proof remains impossible, an explicit **Confirm manual recovery** form requires:
 
 - Project, operation, attempt, assignment and binding identities tied to the current server revision.
-- Reason and operator identity recorded by authentication, plus confirmation that original execution must not resume.
+- Operator identity recorded by authentication, plus confirmation that original execution must not resume. The HTTP/UI trust seam supplies the fixed server-authored audit description `Administrator confirmed manual recovery after evidence review.` There is no operator-authored reason field.
 - Dated process-stop or durable isolation evidence: what was checked/stopped, how descendants were excluded, and how restart access to this workspace is prevented.
 - A current repository status snapshot from the actual owning workspace, with source and collection time. The node is by definition unable to supply this, so the administrator collects it on the owning machine and enters it by hand; the form labels it as such. An inaccessible workspace cannot be attested as clean or replaced by another checkout.
 - An accounting of affected reservations and any journal/event evidence gaps. Missing events remain an explicit audit gap, not a false claim that the spool was flushed.
 - A separate explicit acknowledgement of those gaps and consequences; typed Project name confirmation.
-
 Server validation rejects incomplete, stale, or mismatched evidence. Administrator-supplied evidence is labeled as an **operator attestation**, never as node-observed fact. Missing event history can be explicitly accounted for under this audited exception; unresolved writer access or unavailable repository status cannot be waived.
 
 The authorized recovery transition revokes old execution authority, resolves only the attested targets/reservations, increments applicable fencing epochs, terminalizes affected nonterminal assignments as cancelled, and records the evidence and decision atomically. Keep the scheduling hold until explicitly cleared.
@@ -229,7 +228,7 @@ If the machine/workspace is permanently inaccessible and the required evidence c
 
 ## Durable model and transport requirements
 
-Persist a recovery record with id, Project id, target identities/revisions, actor/reason, creation/update/completion timestamps, attempt number, current stage, last progress time, deadline, stable blocker codes, evidence provenance, and resolution. Keep per-target outcomes and an append-only audit trail. Store the recovery hold separately from the operation's success so a refresh or restart cannot accidentally resume the queue.
+Persist a recovery record with id, Project id, target identities/revisions, authenticated actor, server-authored audit reason, creation/update/completion timestamps, attempt number, current stage, last progress time, deadline, stable blocker codes, evidence provenance, and resolution. Keep per-target outcomes and an append-only audit trail. Store the recovery hold separately from the operation's success so a refresh or restart cannot accidentally resume the queue.
 
 Operation statuses: `Pending`, `Running`, `NeedsIntervention`, `Recovered`. `NeedsIntervention` retains ownership and may return to `Running` for a new bounded attempt. Database/transport failures are visible diagnostic reasons, never aliases for recovery success. Readiness blockers after `Recovered` are separate from unresolved ownership blockers.
 
@@ -238,10 +237,10 @@ Implemented HTTP (`ProjectRecoveryEndpoints`, also under `/api/v1`):
 | Method and route | Contract |
 |---|---|
 | `GET /api/projects/{projectId}/recovery` | `ProjectRecoveryDiagnosisDto` |
-| `POST /api/projects/{projectId}/recoveries` | `StartProjectRecoveryRequest` (`InventoryRevision`, `Reason`, `IdempotencyKey`); `202` |
+| `POST /api/projects/{projectId}/recoveries` | `StartProjectRecoveryRequest` (`InventoryRevision`, `IdempotencyKey`); `202` |
 | `GET /api/projects/{projectId}/recoveries/{recoveryId}` | `ProjectRecoveryOperationDto` |
 | `POST /api/projects/{projectId}/recoveries/{recoveryId}/recheck` | `RecheckProjectRecoveryRequest`; does not clear the hold |
-| `POST /api/projects/{projectId}/recoveries/{recoveryId}/confirm-manual` | `ConfirmManualProjectRecoveryRequest`; provenance `operator-attestation` |
+| `POST /api/projects/{projectId}/recoveries/{recoveryId}/confirm-manual` | `ConfirmManualProjectRecoveryRequest` (no `Reason`); provenance `operator-attestation` |
 | `POST /api/projects/{projectId}/recovery/resume` | `ResumeProjectRecoveryRequest` (`OperationId`, `ExpectedHoldVersion`) |
 
 Node hub: `RecoverAssignment` (`RecoverAssignmentCommandMessage`); node reports `ReportRecoveryProgress` / `ReportRecoveryProof`. Proof type is `AssignmentRecoveryProofMessage` with `RecoveryKnownCountMessage` inventories.
@@ -260,7 +259,7 @@ All scenarios must be verified with fake/local runtimes; real-provider quota is 
 
 | Scenario | Required result |
 |---|---|
-| Responsive stuck root with children | One confirmation pauses claims, stops all targeted activity, resolves ownership, preserves files/history, and leaves queue paused. |
+| Responsive stuck root with children | One **Recover project** action pauses claims, stops all targeted activity, resolves ownership, preserves files/history, and leaves queue paused. |
 | Unresponsive root or verification process | Bounded targeted escalation proves stop or reports missing evidence; no unrelated process is killed. |
 | Startup blocked before root creation | Recovery can cancel without inventing a session or requiring a Git HEAD that never existed. |
 | Finalizing target with accepted completion | Recovery confirms the original `Complete` or `Fail` intent with its proof; the persisted result is preserved; the target is cancelled only if the completion gate rejects. |
@@ -283,7 +282,7 @@ All scenarios must be verified with fake/local runtimes; real-provider quota is 
 | Unauthorized request or CSRF | Denied with no hold, cancellation, release, or audit-evidence mutation. |
 | Preservation and isolation | Compare pre/post tracked and untracked file contents, branch refs, settings, credentials, histories, and unrelated Project activity; no recovery-induced destructive changes. |
 
-Test layers: domain/state-machine tests for holds and transitions; infrastructure transaction/idempotency tests; API and hub authorization/correlation tests; node supervisor process/deadline tests; end-to-end restart/race tests; browser checks for diagnosis, confirmations, progress, retained pause, manual blockers, and linked retry. Process tests must include descendants and concurrent unrelated work, not only a cooperative fake adapter.
+Test layers: domain/state-machine tests for holds and transitions; infrastructure transaction/idempotency tests; API and hub authorization/correlation tests; node supervisor process/deadline tests; end-to-end restart/race tests; browser checks for diagnosis, Recover project, progress, retained pause, manual evidence/fences, and linked retry. Process tests must include descendants and concurrent unrelated work, not only a cooperative fake adapter.
 
 ## Delivery record
 
