@@ -20,7 +20,7 @@ node --version     # v26+
 
 ## Repository layout
 
-- `PiCommandCenter.sln` — .NET solution
+- `DevFleet.sln` — .NET solution
 - `src/PiCommandCenter.ControlPlane` — web host, `/nodeHub`, `/api`, `/health`
 - `src/PiCommandCenter.Node` — worker
 - `runtime/` — Pi worker (`npm ci`, `npm test`, `npm run typecheck`)

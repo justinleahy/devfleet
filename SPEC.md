@@ -2463,7 +2463,7 @@ Create a monorepo:
 
 ```text
 pi-command-center/
-├── PiCommandCenter.sln
+├── DevFleet.sln
 ├── Directory.Build.props
 ├── Directory.Packages.props
 ├── global.json
