@@ -41,6 +41,7 @@ public static class NodeServiceCollectionExtensions
             .BindConfiguration(WorkspaceValidationOptions.SectionName)
             .Services
             .AddSingleton<IWorkspaceBindingValidator, WorkspaceBindingValidator>()
+            .AddSingleton<IWorkspaceDirectoryBrowser, WorkspaceDirectoryBrowser>()
             .AddOptions<Verification.VerificationOptions>()
             .BindConfiguration(Verification.VerificationOptions.SectionName)
             .ValidateOnStart()

@@ -122,7 +122,7 @@ The initial phase has at most one designated WorkspaceBinding per Project and no
 These are SignalR transport additions. The TypeScript Pi worker NDJSON protocol remains version 1.
 
 
-Hub methods are **node → control plane**. Node-local usage, runtime routing, discovery, and workspace validation are the reverse: the hub **invokes client callbacks** on the authenticated connected node (no hub methods of the same names).
+Hub methods are **node → control plane**. Node-local usage, runtime routing, discovery, workspace directory browse, and workspace validation are the reverse: the hub **invokes client callbacks** on the authenticated connected node (no hub methods of the same names).
 
 | Client callback | Arguments | Result |
 |---|---|---|
@@ -131,8 +131,11 @@ Hub methods are **node → control plane**. Node-local usage, runtime routing, d
 | `DiscoverRuntimeModels` | none | `RuntimeModelCatalogMessage[]` (`Provider`, `Models[]{Id, DisplayName, Provider}`, `Error`) |
 | `UpdateRuntimeConfiguration` | `UpdateNodeRuntimeConfigurationMessage` (`RoleRoutes`) | `NodeRuntimeConfigurationMessage` |
 | `ValidateWorkspaceBinding` | `WorkspaceBindingValidationRequestMessage` (`BindingId`, `ProjectId`, `Revision`, node-local path, default branch) | Canonical path plus structured bounded validation status/code/detail for the same revision |
+| `BrowseWorkspaceDirectories` | `WorkspaceDirectoryBrowseRequestMessage` (`Path?`) | `WorkspaceDirectoryBrowseResponseMessage` (`CurrentPath?`, `ParentPath?`, `Directories[]{Name, Path}`, `ErrorCode?`, `ErrorDetail?`) |
 
 `ValidateWorkspaceBinding` is invoked only on the connection authenticated as the binding's node. The node applies its own `Projects:ApprovedRoots` and filesystem/Git checks. The control plane accepts a result only for the requested binding, authenticated node, and still-current revision; stale or cross-node results fail closed. `ApprovedRoots` is node configuration because the path namespace and checkout exist on that node, not on the control plane.
+
+`BrowseWorkspaceDirectories` is invoked only on the selected authenticated node. Blazor calls `INodeWorkspaceDirectoryGateway.BrowseAsync` in the control-plane process; there is no HTTP browse route. A null `Path` lists configured approved roots (`CurrentPath` and `ParentPath` null). A successful directory listing returns the canonical absolute `CurrentPath`, `ParentPath` null when that path is an approved root, and sorted direct child directories only (no files, no symlink entries, no parent traversal above an approved root). Errors use stable codes `invalid_path`, `path_missing`, `outside_approved_root`, and `unreadable`, with no entries and bounded operator-safe detail (512 characters). Results are capped at 500 entries. An offline node is an error. Browse does not validate Git or the default branch; designation still uses `ValidateWorkspaceBinding`.
 
 Every event and control for assigned work is authorized against the retained `ExecutionAssignment`: authenticated connection `NodeId`, assignment id and token, workspace binding revision, session, request, and project must agree. This gate covers renewal, event publication, heartbeat session membership, reservations, mutation authorization, verification, completion, mail, cancellation, repository/Git operations, and creation of root or child sessions. Cancellation routes directly to the assigned node or an assignment-gated session group; a heartbeat cannot subscribe a node to a foreign session.
 

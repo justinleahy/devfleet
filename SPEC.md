@@ -461,6 +461,8 @@ Binding status is `PendingValidation`, `Valid`, or `Invalid`. Liveness is separa
 
 Creating or editing the binding's Node, path, default-branch policy, or other validation input increments `ValidationRevision` and sets the binding to `PendingValidation`. The Control Plane asks the connection authenticated as the binding's Node to validate the current revision. Only a response from that connection for that exact binding and revision may update the result; stale or wrong-node responses must be rejected.
 
+The designation UI does not accept a typed path. After the operator selects an authenticated Node, Blazor calls `INodeWorkspaceDirectoryGateway.BrowseAsync` in-process (no HTTP browse endpoint). That gateway invokes the reverse SignalR callback `BrowseWorkspaceDirectories` only on that Node. A null request path lists configured `Projects:ApprovedRoots`; a non-null path lists one direct child-directory level under a canonical absolute path. Selecting a folder does not run Git or default-branch checks; those remain the existing revisioned `ValidateWorkspaceBinding` path.
+
 The bound Node validates:
 
 - Path exists and is a directory.
@@ -1478,6 +1480,7 @@ The contract must support:
 - Authenticated Node registration.
 - Heartbeat with fresh execution-status, assignment-inventory, adapter-readiness, capacity, and latest resource observations.
 - Revisioned WorkspaceBinding validation request and result.
+- Bounded WorkspaceBinding directory browse request and result (`BrowseWorkspaceDirectories`): null path lists that Node's approved roots; otherwise one direct directory level. Browse is not validation.
 - Atomic ExecutionAssignment claim result containing the immutable binding snapshot and token.
 - Assignment renewal and explicit reconciliation.
 - Assignment-authorized event batches and acknowledgements.
@@ -2155,7 +2158,7 @@ Display:
 
 - Fleet-owned Project identity and policy.
 - A Workspace panel with nullable Node/path, validation status, code, time, revision, and current eligibility.
-- Actions to designate, edit, revalidate, or remove the sole WorkspaceBinding; removal and replacement are disabled while an active or recovery assignment references it.
+- Actions to designate, edit, revalidate, or remove the sole WorkspaceBinding. Designation picks a Node, then browses that Node's approved-root tree one directory level at a time (`BrowseWorkspaceDirectories`); there is no manual path entry. Removal and replacement are disabled while an active or recovery assignment references it.
 - New request composer, enabled even when no WorkspaceBinding exists, with notice that work remains queued until a designated workspace is eligible.
 - Active request.
 - Queue with deterministic scheduling reasons.
@@ -2360,8 +2363,8 @@ The design must record enough assignment, process, and provider-session metadata
 ### 34.3 Filesystem boundary
 
 - A current valid WorkspaceBinding may supply a canonical path for assignment. Active or recovery work may use only its immutable ExecutionAssignment path snapshot under matching assignment authorization; a historical snapshot alone grants no filesystem authority.
+- Directory browse for designation is node-owned: the Control Plane never reads node filesystems. `BrowseWorkspaceDirectories` returns only existing directories inside that Node's `Projects:ApprovedRoots`, omits symlink entries, never traverses above an approved root, bounds results (500 entries, 512-character details), and treats an offline Node as an error. Choosing a listed folder is not Git/default-branch validation.
 - Resolve and validate every path, and recheck approved-root containment for every filesystem operation.
-- Reject path traversal and external symlink resolution.
 - Agents cannot reserve or modify `.git/`.
 - Application configuration and hooks live outside agent-writable project paths.
 
@@ -2539,7 +2542,7 @@ Implementation must proceed in vertical slices and keep builds passing.
 
 - Implement fleet-owned Project and WorkRequest entities.
 - Implement metadata-only Project registration and enqueue without a WorkspaceBinding.
-- Implement zero-or-one WorkspaceBinding designation and revisioned node-local validation.
+- Implement zero-or-one WorkspaceBinding designation (node-backed approved-root directory browse, no typed path) and revisioned node-local validation.
 - Implement queue APIs and deterministic unbound waiting reasons.
 - Build the dashboard, Workspace panel, and request composer.
 
@@ -2548,7 +2551,7 @@ Implementation must proceed in vertical slices and keep builds passing.
 ### Milestone 2 — Node connection
 
 - Implement Node worker and stable per-node authenticated identity.
-- Implement registration, heartbeat execution status, WorkspaceBinding validation, atomic ExecutionAssignment, reconciliation, and assignment-authorized event transport.
+- Implement registration, heartbeat execution status, bounded `BrowseWorkspaceDirectories`, WorkspaceBinding validation, atomic ExecutionAssignment, reconciliation, and assignment-authorized event transport.
 - Implement the durable local assignment/event spool and idempotent replay.
 - Show distinct Node liveness, binding validation, runtime readiness, capacity, and recovery states in the UI.
 - Show current Node CPU, memory, disk, load, and uptime; render unavailable fields as unavailable.

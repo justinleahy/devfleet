@@ -292,6 +292,201 @@ h2 {
     padding-inline-start: calc(var(--design-unit) * 4px);
 }
 
+/* Workspace folder picker.
+   The path is not typeable: it is only ever what the selected node returned, so the
+   field is a read-only display paired with the action that opens the browser. */
+.workspace-picker {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    padding: calc(var(--design-unit) * 3px);
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--control-corner-radius) * 1px);
+    background: var(--neutral-layer-1);
+    min-width: 0;
+}
+
+.picker-label {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.picker-value {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.picker-value.path {
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.picker-value-empty {
+    color: var(--neutral-foreground-hint);
+}
+
+/* Folder picker dialog.
+   Same sheet mechanics as the registration dialog: the surface is the web component's
+   own `control` part, sized from the host so the shadow tree inherits the width. The
+   list is the only scrolling region, so the location and the actions stay on screen. */
+.dialog-host ::deep fluent-dialog.folder-dialog {
+    --dialog-width: calc(100vw - calc(var(--design-unit) * 4px)) !important;
+    --dialog-height: auto;
+    --dialog-max-block-size: calc(100vh - calc(var(--design-unit) * 6px));
+}
+
+.dialog-host ::deep fluent-dialog.folder-dialog::part(control) {
+    display: flex;
+    flex-direction: column;
+    width: var(--dialog-width);
+    max-width: var(--dialog-width);
+    height: var(--dialog-height);
+    max-height: var(--dialog-max-block-size);
+    padding: 0;
+    overflow: hidden;
+}
+
+.dialog-shell {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+}
+
+.dialog-header {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 2px);
+    padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 4px) calc(var(--design-unit) * 3px);
+    border-block-end: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    min-width: 0;
+}
+
+.dialog-header h2 {
+    font-size: var(--type-ramp-plus-2-font-size);
+    line-height: var(--type-ramp-plus-2-line-height);
+}
+
+.dialog-lead {
+    margin: 0;
+    max-width: 60ch;
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.picker-breadcrumb {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.picker-breadcrumb .path {
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.picker-breadcrumb-roots {
+    color: var(--neutral-foreground-hint);
+    font-size: var(--type-ramp-minus-1-font-size);
+    line-height: var(--type-ramp-minus-1-line-height);
+}
+
+.dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 3px);
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    overflow-y: auto;
+    padding: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px);
+}
+
+/* Grouped rows, one border for the set: the same treatment the request lists use. */
+.folder-list {
+    display: flex;
+    flex-direction: column;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    min-width: 0;
+    border: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+    border-radius: calc(var(--layer-corner-radius) * 1px);
+    overflow: hidden;
+}
+
+.folder-list > li + li {
+    border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.folder-entry {
+    display: flex;
+    flex-direction: column;
+    gap: calc(var(--design-unit) * 1px);
+    width: 100%;
+    min-height: 44px;
+    padding: calc(var(--design-unit) * 2px) calc(var(--design-unit) * 3px);
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    transition: background-color 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.folder-entry:hover {
+    background-color: var(--neutral-fill-stealth-hover);
+}
+
+.folder-entry:active {
+    background-color: var(--neutral-fill-stealth-active);
+}
+
+.folder-entry:focus-visible {
+    outline: calc(var(--focus-stroke-width) * 1px) solid var(--focus-stroke-outer);
+    outline-offset: -2px;
+}
+
+.folder-entry-name {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.folder-entry-path {
+    color: var(--neutral-foreground-hint);
+    font-family: var(--monospace-font-family, ui-monospace, monospace);
+    font-size: var(--type-ramp-minus-1-font-size);
+    overflow-wrap: anywhere;
+}
+
+/* Phone: actions stack full width, primary first, thumb-sized. */
+.dialog-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: calc(var(--design-unit) * 2px);
+    padding: calc(var(--design-unit) * 3px) calc(var(--design-unit) * 4px) calc(var(--design-unit) * 4px);
+    border-block-start: calc(var(--stroke-width) * 1px) solid var(--neutral-stroke-divider-rest);
+}
+
+.dialog-actions ::deep fluent-button,
+.dialog-actions ::deep fluent-button::part(control) {
+    width: 100%;
+}
+
+.dialog-actions ::deep fluent-button::part(control) {
+    min-height: 44px;
+}
+
 /* Work queues */
 .queues {
     display: grid;
@@ -500,6 +695,55 @@ h2 {
     .request-prompt {
         -webkit-line-clamp: 3;
     }
+
+    .workspace-picker {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        column-gap: calc(var(--design-unit) * 4px);
+    }
+
+    .picker-label {
+        flex: 0 0 100%;
+    }
+
+    .picker-value {
+        flex: 1 1 260px;
+    }
+
+    .workspace-picker ::deep .picker-browse {
+        flex: 0 0 auto;
+    }
+
+    /* Sheet with room for a full path on one line and a single action row. */
+    .dialog-host ::deep fluent-dialog.folder-dialog {
+        --dialog-width: min(720px, calc(100vw - calc(var(--design-unit) * 12px))) !important;
+        --dialog-max-block-size: calc(100vh - calc(var(--design-unit) * 12px));
+    }
+
+    .dialog-header {
+        padding: calc(var(--design-unit) * 6px) calc(var(--design-unit) * 6px) calc(var(--design-unit) * 4px);
+    }
+
+    .dialog-body {
+        padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 6px);
+    }
+
+    .dialog-actions {
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        padding: calc(var(--design-unit) * 4px) calc(var(--design-unit) * 6px) calc(var(--design-unit) * 5px);
+    }
+
+    .dialog-actions ::deep fluent-button,
+    .dialog-actions ::deep fluent-button::part(control) {
+        width: auto;
+    }
+
+    .dialog-actions ::deep .action-cancel {
+        margin-inline-start: auto;
+    }
 }
 
 /* Tablet: workspace and policy sit side by side. */
@@ -527,6 +771,22 @@ h2 {
     .form-grid {
         grid-template-columns: minmax(0, 1fr);
         gap: calc(var(--design-unit) * 3px);
+    }
+
+    /* Desktop: a wider sheet, and each row reads as name then path on one line. */
+    .dialog-host ::deep fluent-dialog.folder-dialog {
+        --dialog-width: min(880px, calc(100vw - calc(var(--design-unit) * 16px))) !important;
+    }
+
+    .folder-entry {
+        flex-direction: row;
+        align-items: baseline;
+        gap: calc(var(--design-unit) * 4px);
+    }
+
+    .folder-entry-path {
+        margin-inline-start: auto;
+        text-align: end;
     }
 }
 

@@ -15,6 +15,7 @@
 @using PiCommandCenter.Web.Components.Coordination
 @using PiCommandCenter.Application.Live
 @using PiCommandCenter.Web.Components.Live
+@using PiCommandCenter.Contracts.NodeTransport
 @implements IAsyncDisposable
 @inject IProjectCatalog Catalog
 @inject IWorkspaceBindingCatalog Bindings
@@ -25,6 +26,7 @@
 @inject IReservationService ReservationAuthority
 @inject IToastService ToastService
 @inject IProjectionNotifier Notifier
+@inject INodeWorkspaceDirectoryGateway Directories
 
 <PageTitle>@(_project?.DisplayName ?? "Project") &middot; DevFleet</PageTitle>
 
@@ -229,19 +231,31 @@ else
                                               OptionText="@(node => $"{node.DisplayName} \u00b7 {node.Status}")"
                                               OptionValue="@(node => node.Id.ToString())"
                                               @bind-Value="_bindingNodeId"
+                                              @bind-Value:after="OnBindingNodeChanged"
                                               Disabled="@BindingWriteBlocked"
                                               Class="field" />
-                                <FluentTextField @bind-Value="_bindingPath"
-                                                 Label="Repository path on that node"
-                                                 Required="true"
-                                                 Placeholder="/home/operator/src/devfleet"
-                                                 Disabled="@BindingWriteBlocked"
-                                                 Class="field field-wide" />
+                            </div>
+
+                            <div class="workspace-picker">
+                                <span id="workspace-folder-label" class="picker-label">
+                                    Workspace folder on that node
+                                </span>
+                                <p class="@PickerValueClass"
+                                   role="status"
+                                   aria-labelledby="workspace-folder-label">
+                                    @(HasSelectedFolder ? _bindingPath : "No folder selected yet")
+                                </p>
+                                <FluentButton Appearance="Appearance.Outline"
+                                              OnClick="OpenFolderPickerAsync"
+                                              Disabled="@BindingWriteBlocked"
+                                              Class="action picker-browse">
+                                    @(HasSelectedFolder ? "Change folder" : "Browse folders")
+                                </FluentButton>
                             </div>
                             <p class="panel-lead">
-                                The path is interpreted by the selected node under its own approved
-                                roots; the control plane never reads it. Every edit starts a new
-                                validation revision and discards the previous result.
+                                Folders are listed by the selected node from its own approved roots;
+                                the control plane never reads them. Choosing a different folder starts
+                                a new validation revision and discards the previous result.
                             </p>
                         }
 
@@ -567,6 +581,113 @@ else
     </div>
 }
 
+<div class="dialog-host">
+    <FluentDialog @bind-Hidden="_pickerHidden"
+                  Modal="true"
+                  TrapFocus="true"
+                  PreventScroll="true"
+                  Class="folder-dialog"
+                  AriaLabelledby="folder-picker-heading">
+        <div class="dialog-shell">
+            <header class="dialog-header">
+                <h2 id="folder-picker-heading">Select workspace folder</h2>
+                <p class="dialog-lead">
+                    @PickerNodeLabel() lists these folders itself, from its own approved roots.
+                    Open a folder to go one level deeper, then select the folder you are in.
+                </p>
+                <p class="picker-breadcrumb">
+                    <span class="visually-hidden">Current location</span>
+                    @if (_pickerCurrentPath is { Length: > 0 } here)
+                    {
+                        <span class="path">@here</span>
+                    }
+                    else
+                    {
+                        <span class="picker-breadcrumb-roots">Approved roots</span>
+                    }
+                </p>
+            </header>
+
+            <div class="dialog-body">
+                @if (_pickerOffline)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Warning"
+                                      Title="Node did not answer"
+                                      AllowDismiss="false">
+                        @(_pickerError ?? "The selected node is not connected, so it cannot list folders.")
+                    </FluentMessageBar>
+                }
+                else if (_pickerErrorCode is { Length: > 0 } errorCode)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Error"
+                                      Title="@PickerErrorTitle(errorCode)"
+                                      AllowDismiss="false">
+                        @(_pickerError ?? "The node refused that folder and returned no detail.")
+                    </FluentMessageBar>
+                }
+                else if (_pickerError is { Length: > 0 } pickerError)
+                {
+                    <FluentMessageBar Intent="MessageIntent.Error"
+                                      Title="Could not list folders"
+                                      AllowDismiss="false">
+                        @pickerError
+                    </FluentMessageBar>
+                }
+
+                @if (_pickerLoading)
+                {
+                    <div class="state-block" role="status">
+                        <FluentProgressRing aria-label="Listing folders" />
+                        <span>Listing folders on the node</span>
+                    </div>
+                }
+                else if (_pickerEntries.Count > 0)
+                {
+                    <ul class="folder-list">
+                        @foreach (var entry in _pickerEntries)
+                        {
+                            <li>
+                                <button type="button"
+                                        class="folder-entry"
+                                        @onclick="() => BrowseAsync(entry.Path)">
+                                    <span class="folder-entry-name">@entry.Name</span>
+                                    <span class="folder-entry-path">@entry.Path</span>
+                                </button>
+                            </li>
+                        }
+                    </ul>
+                }
+                else if (_pickerErrorCode is null && !_pickerOffline && _pickerError is null)
+                {
+                    <p class="panel-empty">
+                        @(_pickerCurrentPath is null
+                            ? "This node has no approved roots configured, so there is no folder to select."
+                            : "This folder has no subfolders. Select it, or go up and choose another.")
+                    </p>
+                }
+            </div>
+
+            <footer class="dialog-actions">
+                <FluentButton Appearance="Appearance.Accent"
+                              OnClick="SelectCurrentFolder"
+                              Disabled="@(_pickerLoading || _pickerCurrentPath is null)">
+                    Select this folder
+                </FluentButton>
+                <FluentButton Appearance="Appearance.Outline"
+                              OnClick="BrowseUpAsync"
+                              Disabled="@(_pickerLoading || _pickerCurrentPath is null)">
+                    Up one level
+                </FluentButton>
+                <FluentButton Appearance="Appearance.Stealth"
+                              OnClick="CloseFolderPicker"
+                              Class="action-cancel">
+                    Cancel
+                </FluentButton>
+            </footer>
+        </div>
+    </FluentDialog>
+</div>
+
 @code {
     private static readonly string[] KindNames = Enum.GetNames<WorkRequestKind>();
     private static readonly string[] PriorityNames = Enum.GetNames<RequestPriority>();
@@ -608,6 +729,26 @@ else
     private string? _bindingLock;
     private bool _bindingBusy;
     private bool _bindingSeeded;
+
+    /// <summary>
+    /// Folder picker state. The listing is node-local: the control plane holds only what the
+    /// selected node returned for the level currently shown, and it is discarded whenever the
+    /// node changes so a path can never cross nodes.
+    /// </summary>
+    private bool _pickerHidden = true;
+    private bool _pickerLoading;
+    private bool _pickerOffline;
+    private string? _pickerCurrentPath;
+    private string? _pickerParentPath;
+    private string? _pickerError;
+    private string? _pickerErrorCode;
+    private IReadOnlyList<WorkspaceDirectoryEntryMessage> _pickerEntries =
+        Array.Empty<WorkspaceDirectoryEntryMessage>();
+
+    private bool HasSelectedFolder => !string.IsNullOrWhiteSpace(_bindingPath);
+
+    private string PickerValueClass =>
+        HasSelectedFolder ? "picker-value path" : "picker-value picker-value-empty";
 
     /// <summary>
     /// The catalog rejects removal, and replacement discards a snapshot still in use, while a
@@ -757,7 +898,154 @@ else
             : binding.NodeId.ToString();
         _bindingPath = binding?.RepositoryPath ?? string.Empty;
         _bindingSeeded = true;
+        ResetFolderPicker();
     }
+
+    /// <summary>
+    /// Opens the node-local folder picker at the selected node's approved roots. An already
+    /// selected path stays selected: it is displayed as chosen without being re-browsed.
+    /// </summary>
+    private async Task OpenFolderPickerAsync()
+    {
+        if (BindingWriteBlocked)
+        {
+            return;
+        }
+
+        _pickerHidden = false;
+        await BrowseAsync(null);
+    }
+
+    private void CloseFolderPicker() => _pickerHidden = true;
+
+    /// <summary>
+    /// Discards the selected path and every listed level when the node changes, so a folder
+    /// browsed on one node can never be designated against another.
+    /// </summary>
+    private void OnBindingNodeChanged()
+    {
+        _bindingPath = string.Empty;
+        _bindingError = null;
+        ResetFolderPicker();
+    }
+
+    private void ResetFolderPicker()
+    {
+        _pickerHidden = true;
+        _pickerLoading = false;
+        _pickerOffline = false;
+        _pickerCurrentPath = null;
+        _pickerParentPath = null;
+        _pickerError = null;
+        _pickerErrorCode = null;
+        _pickerEntries = Array.Empty<WorkspaceDirectoryEntryMessage>();
+    }
+
+    /// <summary>
+    /// Asks the selected node for one level; a null path lists its approved roots. The shown
+    /// level only advances on a clean answer, so a refused path leaves the operator where they
+    /// were, with the node's own reason.
+    /// </summary>
+    private async Task BrowseAsync(string? path)
+    {
+        if (!Guid.TryParse(_bindingNodeId, out var nodeId) || nodeId == Guid.Empty)
+        {
+            _pickerOffline = false;
+            _pickerErrorCode = null;
+            _pickerError = "Select the node that owns the workspace first.";
+            _pickerEntries = Array.Empty<WorkspaceDirectoryEntryMessage>();
+            return;
+        }
+
+        _pickerLoading = true;
+        _pickerOffline = false;
+        _pickerError = null;
+        _pickerErrorCode = null;
+        StateHasChanged();
+
+        try
+        {
+            var response = await Directories.BrowseAsync(
+                nodeId,
+                new WorkspaceDirectoryBrowseRequestMessage(path),
+                CancellationToken.None);
+
+            if (response.ErrorCode is { Length: > 0 } code)
+            {
+                _pickerErrorCode = code;
+                _pickerError = response.ErrorDetail;
+                _pickerEntries = Array.Empty<WorkspaceDirectoryEntryMessage>();
+            }
+            else
+            {
+                _pickerCurrentPath = response.CurrentPath;
+                _pickerParentPath = response.ParentPath;
+                _pickerEntries = response.Directories;
+            }
+        }
+        catch (InvalidOperationException ex)
+        {
+            _pickerOffline = true;
+            _pickerError = ex.Message;
+            _pickerEntries = Array.Empty<WorkspaceDirectoryEntryMessage>();
+        }
+        catch (Exception ex)
+        {
+            _pickerError = ex.Message;
+            _pickerEntries = Array.Empty<WorkspaceDirectoryEntryMessage>();
+        }
+        finally
+        {
+            _pickerLoading = false;
+        }
+    }
+
+    /// <summary>One level up: the node's parent path, or its approved roots when at a root.</summary>
+    private Task BrowseUpAsync() =>
+        _pickerCurrentPath is null ? Task.CompletedTask : BrowseAsync(_pickerParentPath);
+
+    /// <summary>
+    /// Takes the canonical path the node returned for the shown level as the designation input.
+    /// Designating and validating stay the separate existing actions.
+    /// </summary>
+    private void SelectCurrentFolder()
+    {
+        if (_pickerCurrentPath is not { Length: > 0 } selected)
+        {
+            return;
+        }
+
+        _bindingPath = selected;
+        _bindingError = null;
+        _pickerHidden = true;
+    }
+
+    /// <summary>Names the node the picker is listing, falling back when none is selected.</summary>
+    private string PickerNodeLabel()
+    {
+        if (Guid.TryParse(_bindingNodeId, out var nodeId))
+        {
+            foreach (var node in _nodes)
+            {
+                if (node.Id == nodeId)
+                {
+                    return node.DisplayName;
+                }
+            }
+        }
+
+        return "The selected node";
+    }
+
+    /// <summary>Operator title for a node-issued browse error code; the node owns the detail.</summary>
+    private static string PickerErrorTitle(string code) => code switch
+    {
+        WorkspaceDirectoryBrowseErrorCodes.InvalidPath => "That path is not usable",
+        WorkspaceDirectoryBrowseErrorCodes.PathMissing => "That folder no longer exists",
+        WorkspaceDirectoryBrowseErrorCodes.OutsideApprovedRoot => "Outside the node's approved roots",
+        WorkspaceDirectoryBrowseErrorCodes.Unreadable => "The node could not read that folder",
+        _ => "The node refused that folder",
+    };
 
     /// <summary>
     /// Names the assignment that makes the catalog reject removal, so the actions are disabled
@@ -829,7 +1117,7 @@ else
 
         if (string.IsNullOrWhiteSpace(_bindingPath))
         {
-            _bindingError = "Repository path is required.";
+            _bindingError = "Browse the node and select a workspace folder.";
             return;
         }
 
@@ -838,7 +1126,7 @@ else
         {
             var binding = await Bindings.DesignateAsync(
                 new ProjectId(ProjectId),
-                new DesignateWorkspaceBindingCommand(new NodeId(nodeId), _bindingPath!.Trim()),
+                new DesignateWorkspaceBindingCommand(new NodeId(nodeId), _bindingPath!),
                 Clock.UtcNow,
                 CancellationToken.None);
             ToastService.ShowSuccess($"Designated {binding.RepositoryPath}");

@@ -31,7 +31,7 @@ node --version     # v26+
 
 ## Project placement model
 
-A **Project** is fleet-owned metadata and policy. It has no `NodeId` or repository path, so registration works with no node or checkout. In the initial phase each Project has zero or one **WorkspaceBinding**, which designates one node-local checkout. The selected authenticated node validates the binding's current revision on its own filesystem under its node-side `Projects:ApprovedRoots`; editing the node, path, or validation inputs makes the binding pending again.
+A **Project** is fleet-owned metadata and policy. It has no `NodeId` or repository path, so registration works with no node or checkout. In the initial phase each Project has zero or one **WorkspaceBinding**, which designates one node-local checkout. The designation UI browses the selected authenticated node's directories under that node's `Projects:ApprovedRoots` (null path lists those roots; each request returns one direct directory level; there is no manual path field). The control plane never inspects node filesystems. Choosing a folder only records a path; the selected node still validates the binding's current revision (Git, default branch, approved-root containment) on its own filesystem. Editing the node, path, or validation inputs makes the binding pending again.
 
 Requests can be enqueued while a Project is unbound or its node is offline and remain `Queued` with a scheduling reason. When the designated binding becomes eligible, the control plane atomically creates a durable **ExecutionAssignment** containing the request's immutable node, path, branch, and binding-revision snapshot. Only the connection authenticated as that assigned node, with the assignment token, may act for the request, and every child stays on that node and workspace.
 
@@ -193,7 +193,7 @@ RUN_REAL_PI_TESTS=1 RUN_REAL_CLAUDE_TESTS=1 RUN_REAL_ANTIGRAVITY_TESTS=1 dotnet 
 |---|---|
 | `ConnectionStrings:ControlPlane` | SQLite |
 | `ControlPlane:BaseUrl` | Browser/API base (example `http://127.0.0.1:5057`) |
-| `Projects:ApprovedRoots` (**Node configuration only**) | Node-local allowed WorkspaceBinding prefixes; used by the selected node during revisioned validation, never by Project registration |
+| `Projects:ApprovedRoots` (**Node configuration only**) | Node-local allowed WorkspaceBinding prefixes; used by the selected node for bounded directory browse and revisioned validation, never by Project registration or the control plane filesystem |
 | `Admin:Username` / `Admin:PasswordFile` | Cookie admin |
 | `NodeAuthentication:CredentialFile` / `Header` / `Scheme` | Node hub |
 | `Node:ControlPlaneUrl`, `Id`, `DisplayName`, `HeartbeatSeconds`, `ClaimLeaseSeconds`, `EventSpoolPath`, `RequireCleanStart`, `AllowUntrackedFiles` | Node worker |

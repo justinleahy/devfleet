@@ -10,7 +10,7 @@ Single local administrator. Loopback by default. No anonymous web UI or API (exc
 | CSRF against login/logout and mutating APIs | `UseAntiforgery`; login is an antiforgery form; logout is POST |
 | Node impersonation | Distinct manually provisioned credential per node; authentication creates a principal containing the stable `NodeId`; hub code derives identity from the connection and rejects metadata mismatches |
 | Credential leak in logs/API/transport payloads | Node secrets are confined to the HTTP authentication layer and are never logged, returned, or placed in SignalR DTOs; provider credentials never leave the node or enter SQLite or agent payloads |
-| Path traversal / symlink escape | Node-local `Projects:ApprovedRoots`; revisioned canonical-path and Git validation by the node that owns the path namespace; `.git/` cannot be reserved |
+| Path traversal / symlink escape | Node-local `Projects:ApprovedRoots`; bounded node-owned directory browse (no control-plane filesystem reads, no symlink entries, no parent above a root); revisioned canonical-path and Git validation by the node that owns the path namespace; `.git/` cannot be reserved |
 | Prompt injection widening permissions | Runtime executables, profiles, hooks, project roots, and completion gates are configuration/supervisor-owned |
 | Reservation bypass via Claude tools | Host-owned `--settings`; `--setting-sources ""` disables repository/user hook discovery; PreToolUse/PostToolUse gate on loopback |
 | Shell escape for writers | Pi children lack unrestricted `edit`/`write`/`bash`; mutations go through reserved tools + `AuthorizeMutation` |
@@ -85,9 +85,9 @@ This is **not** the admin password hash (`Admin:PasswordFile`) and **not** any n
 
 ## Node-local workspace trust
 
-`Projects:ApprovedRoots` belongs to each node, not to the control plane: only that machine can define and inspect its local path namespace. A workspace designation starts a new validation revision. The control plane invokes `ValidateWorkspaceBinding` only on the connection authenticated as the binding's node, and the node canonicalizes the path and applies its ApprovedRoots, filesystem, and Git checks. The result is bounded and structured; it includes the same binding, project, and revision plus the canonical path on success. The control plane accepts it only from that node and only while the revision remains current. Stale-revision and cross-node results fail closed.
+`Projects:ApprovedRoots` belongs to each node, not to the control plane: only that machine can define and inspect its local path namespace. Workspace designation browses that tree through `BrowseWorkspaceDirectories` on the selected authenticated node. The control plane never reads node filesystems. Browse returns only existing directories inside ApprovedRoots, omits symlink entries, never allows traversal above an approved root, bounds entries (500) and error detail (512 characters), and fails if the node is offline. Selecting a folder records a path; it does not prove Git or default-branch validity.
 
-A Project can exist and accept queued requests without a WorkspaceBinding. A path grants no authority by itself: it is meaningful only with its authenticated node and current binding revision.
+A workspace designation starts a new validation revision. The control plane invokes `ValidateWorkspaceBinding` only on the connection authenticated as the binding's node, and the node canonicalizes the path and applies its ApprovedRoots, filesystem, and Git checks. The result is bounded and structured; it includes the same binding, project, and revision plus the canonical path on success. The control plane accepts it only from that node and only while the revision remains current. Stale-revision and cross-node results fail closed.
 
 ## Reservation and hook boundary
 

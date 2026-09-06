@@ -29,7 +29,7 @@ Control Plane  (loopback default, SQLite WAL)
     │  authenticated SignalR /nodeHub
     │
 Assigned node worker
-    │  validates the designated path on its own filesystem
+    │  browses and validates designated paths on its own filesystem
     │  NDJSON protocolVersion 1 (1 MiB frames) ──► pi-worker (Pi SDK)
     │  official `claude` + host-owned --settings hooks
     │  official `agy` (read-only reviewer)
@@ -72,7 +72,7 @@ Null fields render as Unavailable, never as zero.
 ```
 
 1. Operator registers fleet Project metadata and policy. Registration neither accepts nor validates a node or repository path.
-2. The operator may designate the Project's sole WorkspaceBinding: a node plus that node's local path. The selected authenticated node validates the binding under its node-local `Projects:ApprovedRoots`; every edit advances the validation revision, and stale responses are ignored.
+2. The operator may designate the Project's sole WorkspaceBinding: a node plus a path chosen from that node's approved-root tree. The UI browses via `INodeWorkspaceDirectoryGateway` → SignalR `BrowseWorkspaceDirectories` on the selected authenticated node only (null path lists `Projects:ApprovedRoots`; each response is one directory level; no typed path). The control plane never inspects node filesystems. Choosing a folder does not validate Git or the default branch. The selected authenticated node then validates the binding under its node-local `Projects:ApprovedRoots`; every edit advances the validation revision, and stale responses are ignored.
 3. A work request is enqueued (`POST /api/projects/{projectId}/requests`). Registration and enqueue both work with no binding; the request remains `Queued` with a scheduling reason until the binding and node are eligible.
 4. At claim time, the control plane atomically creates a durable ExecutionAssignment, changes the request to `Starting`, and returns the immutable binding snapshot only to the designated node. The initial phase never selects another checkout or fails over to another node.
 5. Only the connection authenticated as the assigned node, with the assignment token, may renew, publish owned events, operate reservations, verify, complete, or receive cancellation for that request.
@@ -265,7 +265,7 @@ Research: [research/agent-token-cost-statistics.md](research/agent-token-cost-st
 | GET | `/health` | Anonymous on loopback |
 | GET/POST | `/api/projects` | List / register fleet metadata only |
 | GET | `/api/projects/{projectId}` | Includes the nullable designated WorkspaceBinding |
-| PUT | `/api/projects/{projectId}/workspace-binding` | Create or replace the sole node/path designation; advances its validation revision |
+| PUT | `/api/projects/{projectId}/workspace-binding` | Create or replace the sole node/path designation (path comes from node browse, not typed entry); advances its validation revision |
 | POST | `/api/projects/{projectId}/workspace-binding/validate` | Ask the selected authenticated node to validate the current revision; remains pending while offline |
 | DELETE | `/api/projects/{projectId}/workspace-binding` | Allowed only when no nonterminal or recovery-required assignment references it |
 | GET/POST | `/api/projects/{projectId}/requests` | List / enqueue; no binding is required, so ineligible work stays queued |

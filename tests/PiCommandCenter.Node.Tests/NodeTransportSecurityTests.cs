@@ -149,6 +149,7 @@ public sealed class NodeTransportSecurityTests
             new UnusedModelDiscovery(),
             new UnusedSubscriptionUsageCache(),
             new UnusedWorkspaceBindingValidator(),
+            new UnusedWorkspaceDirectoryBrowser(),
             NullLogger<NodeTransportClient>.Instance);
     }
 
@@ -179,6 +180,14 @@ public sealed class NodeTransportSecurityTests
     {
         public Task<WorkspaceBindingValidationResultMessage> ValidateAsync(
             WorkspaceBindingValidationRequestMessage request,
+            CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+    }
+
+    private sealed class UnusedWorkspaceDirectoryBrowser : IWorkspaceDirectoryBrowser
+    {
+        public Task<WorkspaceDirectoryBrowseResponseMessage> BrowseAsync(
+            WorkspaceDirectoryBrowseRequestMessage request,
             CancellationToken cancellationToken = default)
             => throw new NotSupportedException();
     }

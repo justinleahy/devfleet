@@ -358,10 +358,12 @@ public class FluentSurfaceTests : IClassFixture<ControlPlaneFixture>
 
         var html = await GetHtmlAsync(client, $"/projects/{seed.ProjectId}");
 
+        Assert.Contains("Workspace folder on that node", html);
         Assert.Contains(seed.RepositoryPath, html);
+        Assert.Contains("Change folder", html);
+        Assert.DoesNotContain("Repository path on that node", html);
         Assert.Contains("Valid", html);
         Assert.Contains($"revision {seed.BindingValidationRevision}", html);
-        Assert.Contains("Repository path on that node", html);
         Assert.Contains("Update designation", html);
         Assert.Contains("Revalidate workspace", html);
         Assert.Contains("Remove designation", html);

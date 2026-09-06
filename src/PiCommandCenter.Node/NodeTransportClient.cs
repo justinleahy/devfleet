@@ -25,6 +25,7 @@ public sealed class NodeTransportClient : INodeHubOps
     private readonly IRuntimeModelDiscovery _models;
     private readonly ISubscriptionUsageCache _usage;
     private readonly IWorkspaceBindingValidator _workspaceBindingValidator;
+    private readonly IWorkspaceDirectoryBrowser _workspaceDirectoryBrowser;
     private HubConnection? _connection;
     private NodeCredential? _credential;
 
@@ -48,6 +49,7 @@ public sealed class NodeTransportClient : INodeHubOps
         IRuntimeModelDiscovery models,
         ISubscriptionUsageCache usage,
         IWorkspaceBindingValidator workspaceBindings,
+        IWorkspaceDirectoryBrowser workspaceDirectoryBrowser,
         ILogger<NodeTransportClient> logger)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -57,12 +59,14 @@ public sealed class NodeTransportClient : INodeHubOps
         ArgumentNullException.ThrowIfNull(models);
         ArgumentNullException.ThrowIfNull(usage);
         ArgumentNullException.ThrowIfNull(workspaceBindings);
+        ArgumentNullException.ThrowIfNull(workspaceDirectoryBrowser);
         _options = options.Value;
         _credentials = credentials;
         _routing = routing;
         _models = models;
         _usage = usage;
         _workspaceBindingValidator = workspaceBindings;
+        _workspaceDirectoryBrowser = workspaceDirectoryBrowser;
         _logger = logger;
     }
 
@@ -106,6 +110,10 @@ public sealed class NodeTransportClient : INodeHubOps
         connection.On<WorkspaceBindingValidationRequestMessage, WorkspaceBindingValidationResultMessage>(
             "ValidateWorkspaceBinding",
             request => _workspaceBindingValidator.ValidateAsync(request));
+
+        connection.On<WorkspaceDirectoryBrowseRequestMessage, WorkspaceDirectoryBrowseResponseMessage>(
+            WorkspaceDirectoryBrowseCallback.MethodName,
+            request => _workspaceDirectoryBrowser.BrowseAsync(request));
         await connection.StartAsync(cancellationToken).ConfigureAwait(false);
         _connection = connection;
 

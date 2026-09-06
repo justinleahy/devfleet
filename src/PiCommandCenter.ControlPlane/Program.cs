@@ -86,6 +86,7 @@ builder.Services.AddSingleton<NodeConnectionDirectory>();
 builder.Services.AddSingleton<IWorkspaceValidationGateway, NodeWorkspaceValidationGateway>();
 builder.Services.AddSingleton<INodeRuntimeConfigurationGateway, NodeRuntimeConfigurationGateway>();
 builder.Services.AddSingleton<INodeSubscriptionUsageGateway, NodeSubscriptionUsageGateway>();
+builder.Services.AddSingleton<INodeWorkspaceDirectoryGateway, NodeWorkspaceDirectoryGateway>();
 builder.Services.AddSingleton<INativeApiRealtimeGateway, NativeApiRealtimeGateway>();
 
 builder.Services.AddSingleton<IClock, SystemClock>();
